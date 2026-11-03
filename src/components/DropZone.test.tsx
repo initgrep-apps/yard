@@ -220,7 +220,7 @@ describe('DropZone', () => {
   it('bounds the empty card and centres it via Empty slots', () => {
     render(<DropZone onBrowse={vi.fn()} onDrop={vi.fn()} />)
     const zone = screen.getByRole('button', { name: /drop files here or press/i })
-    expect(zone.className).toContain('rounded-3xl')
+    expect(zone.className).toContain('rounded-xl')
     expect(zone.className).toContain('max-w-xl')
     expect(zone.className).toContain('min-h-[320px]')
     expect(zone.className).toContain('flex-none')

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # verify-theme-tokens.sh — assert all 18 core shadcn oklch tokens present in
-# src/index.css, plus :root --radius and exact green --primary values for both
+# src/index.css, plus :root --radius and exact neutral --primary values for both
 # light and dark. Exits 0 on success, 1 on failure. Guards against theme token
 # drift (Task 2 acceptance criterion: "full 18+ oklch tokens").
 set -euo pipefail
@@ -16,10 +16,10 @@ for tok in $tokens; do
   grep -q -- "--$tok:" "$CSS" || fail "missing --$tok"
 done
 
-grep -q -- "--radius: 0.35rem" "$CSS" || fail "missing --radius"
+grep -q -- "--radius: 0.625rem" "$CSS" || fail "missing --radius"
 
-grep -q -- "--primary: oklch(0.527 0.154 150.069)" "$CSS" || fail "light --primary wrong"
-grep -q -- "--primary: oklch(0.448 0.119 151.328)" "$CSS" || fail "dark --primary wrong"
+grep -q -- "--primary: oklch(0.205 0 0)" "$CSS" || fail "light --primary wrong"
+grep -q -- "--primary: oklch(0.922 0 0)" "$CSS" || fail "dark --primary wrong"
 
 echo "verify-theme: PASS — all theme tokens present"
 exit 0
