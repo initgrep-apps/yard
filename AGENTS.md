@@ -29,7 +29,7 @@ Superpowers specs and plans are working artifacts. When a slice merges: digest t
 
 - **Desktop:** Tauri 2.12 (Rust backend)
 - **Frontend:** React 19.3 + TypeScript 7.0 + Vite 8.3 (Rolldown)
-- **UI:** shadcn/ui 4.21 on Base UI + Tailwind CSS 4.3 (green oklch theme, preset `bNRvlrmDx`), motion 14, sonner
+- **UI:** shadcn/ui 4.23 on Base UI + Tailwind CSS 4.3 (neutral oklch theme, preset `b0`), motion 14, sonner
 - **Font:** Inter (`@fontsource-variable/inter` 5.3)
 - **Plugin:** tauri-plugin-store 2.5, tauri-plugin-dialog 2.8, tauri-plugin-opener 2.7, tauri-plugin-os 2.4, tauri-plugin-window-state 2.5, tauri-plugin-single-instance 2.5 (no shell plugin)
 - **Async:** Tokio 1.x + tokio-util 0.7 (via Tauri)
@@ -47,7 +47,7 @@ See `docs/ARCHITECTURE.md` for components, IPC, algorithms and limits. Key rule:
 
 ## Setup
 
-Scaffolded via `yarn create tauri-app` (React + TS + Vite). shadcn/ui via `yarn dlx shadcn@latest init --preset bNRvlrmDx --template vite`. Package manager: yarn.
+Scaffolded via `yarn create tauri-app` (React + TS + Vite). shadcn/ui via `yarn dlx shadcn@latest init --preset b0 --template vite`. Package manager: yarn.
 
 ## CI/CD
 
@@ -92,5 +92,5 @@ When working with a library, use its official AI docs/skill if available. Fetch 
 - TypeScript: types in `src/types.ts`, matching Rust models
 - React: hooks in `src/hooks/`, views in `src/views/`, components in `src/components/`
 - shadcn: use existing blocks — ask which block to use. Do not build custom when a block exists.
-- Theme: green oklch tokens from preset. Do not approximate with hex.
+- Theme: neutral oklch tokens from preset. Do not approximate with hex.
 - No comments in code unless explicitly requested.

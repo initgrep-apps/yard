@@ -12,5 +12,5 @@ Every icon in `src/` renders from `lucide-react`. `@remixicon/react` is gone: no
 
 - Where the Remix glyph and shadcn's canonical Lucide glyph disagree, shadcn wins: sonner uses `OctagonX` and `TriangleAlert`, not the closer `CircleX`/`CircleAlert`. Similar icons look slightly less like their Remix ancestors; toasts stay consistent with the rest of shadcn.
 - No Lucide `FileShield` exists, so the brand mark is `FileLock2`.
-- Never run `shadcn apply` or `init --preset b3T38WTmL`: that preset still resolves `iconLibrary: remixicon` and reverts the whole tree.
-- New icons are bare `lucide-react` imports; the `*Icon` alias suffix is not used.
+- Never run `shadcn apply` or `init` with a preset that resolves `iconLibrary: remixicon` (for example `b3T38WTmL`): it reverts the whole tree. Presets that resolve `lucide` (`b0`) are safe to apply.
+- New icons in app-authored files are bare `lucide-react` imports (`FileLock2`, not `FileLock2Icon`). Files under `src/components/ui/` keep the names the CLI writes, `*Icon` included, so a later `shadcn apply` stays a clean overwrite instead of a rename diff.
