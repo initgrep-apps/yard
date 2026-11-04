@@ -23,10 +23,11 @@ import {
   type ReactElement,
 } from "react"
 import {
+  createSortedRowModel,
   flexRender,
-  getCoreRowModel,
-  getSortedRowModel,
-  useReactTable,
+  rowSortingFeature,
+  tableFeatures,
+  useTable,
   type Column,
   type ColumnDef,
   type Row,
@@ -81,6 +82,13 @@ import {
 import { HistoryFileDetail } from "@/components/history/HistoryFileDetail"
 import { HistoryTableToolbar } from "@/components/history/HistoryTableToolbar"
 
+const features = tableFeatures({
+  rowSortingFeature,
+  sortedRowModel: createSortedRowModel(),
+})
+
+type HistoryRow = Row<typeof features, HistoryFile>
+
 const HEADER_LABELS: Record<string, string> = {
   file: "File",
   size: "Size",
@@ -102,7 +110,7 @@ async function revealFile(filePath: string) {
   }
 }
 
-function ariaSort(column: Column<HistoryFile, unknown>): "ascending" | "descending" | "none" {
+function ariaSort(column: Column<typeof features, HistoryFile, unknown>): "ascending" | "descending" | "none" {
   const sorted = column.getIsSorted()
   if (sorted === "asc") return "ascending"
   if (sorted === "desc") return "descending"
@@ -113,7 +121,7 @@ function SortHeader({
   column,
   label,
 }: {
-  column: Column<HistoryFile, unknown>
+  column: Column<typeof features, HistoryFile, unknown>
   label: string
 }) {
   const sorted = column.getIsSorted()
@@ -216,7 +224,7 @@ export function HistoryFilesTable({
     }
   }, [expandedPath, filtered])
 
-  const columns = useMemo<ColumnDef<HistoryFile>[]>(
+  const columns = useMemo<ColumnDef<typeof features, HistoryFile>[]>(
     () => [
       {
         id: "expand",
@@ -280,7 +288,8 @@ export function HistoryFilesTable({
             </div>
           )
         },
-        sortingFn: (a, b) => a.original.name.localeCompare(b.original.name),
+        sortFn: (a: HistoryRow, b: HistoryRow) =>
+          a.original.name.localeCompare(b.original.name),
         sortDescFirst: false,
       },
       {
@@ -293,7 +302,7 @@ export function HistoryFilesTable({
           </span>
         ),
         sortDescFirst: false,
-        sortingFn: (a, b) => {
+        sortFn: (a: HistoryRow, b: HistoryRow) => {
           const left = sizeSortValue(a.original)
           const right = sizeSortValue(b.original)
           if (left === null && right === null) return 0
@@ -308,7 +317,7 @@ export function HistoryFilesTable({
         header: ({ column }) => <SortHeader column={column} label="Status" />,
         cell: ({ row }) => <StatusBadge status={row.original.status} />,
         sortDescFirst: false,
-        sortingFn: (a, b) =>
+        sortFn: (a: HistoryRow, b: HistoryRow) =>
           (HISTORY_STATUS_ORDER[a.original.status] ?? 99) -
           (HISTORY_STATUS_ORDER[b.original.status] ?? 99),
       },
@@ -322,13 +331,12 @@ export function HistoryFilesTable({
     [expandedPath]
   )
 
-  const table = useReactTable({
+  const table = useTable({
+    features,
     data: filtered,
     columns,
     state: { sorting },
     onSortingChange: setSorting,
-    getCoreRowModel: getCoreRowModel(),
-    getSortedRowModel: getSortedRowModel(),
   })
 
   const clearFilters = () => {
@@ -368,7 +376,7 @@ export function HistoryFilesTable({
   const topSpacer = firstVirtual?.start ?? 0
   const bottomSpacer = lastVirtual ? virtualizer.getTotalSize() - lastVirtual.end : 0
 
-  const renderFileRow = (row: Row<HistoryFile>) => {
+  const renderFileRow = (row: HistoryRow) => {
     const file = row.original
     const failed = file.status === "failed"
     return (
@@ -380,7 +388,7 @@ export function HistoryFilesTable({
           failed && "bg-destructive/5 hover:bg-destructive/10"
         )}
       >
-        {row.getVisibleCells().map((cell) => (
+        {row.getAllCells().map((cell) => (
           <TableCell
             key={cell.id}
             className={cn(
@@ -396,7 +404,7 @@ export function HistoryFilesTable({
   }
 
   const renderDetailRow = (
-    row: Row<HistoryFile>,
+    row: HistoryRow,
     virtualIndex?: number
   ) => (
     <TableRow
