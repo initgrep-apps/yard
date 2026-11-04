@@ -1,6 +1,6 @@
 [package]
 name = "yard"
-version = "0.1.0"
+version = "1.0.0"
 description = "Yard — offline batch file processing"
 authors = ["you"]
 edition = "2021"

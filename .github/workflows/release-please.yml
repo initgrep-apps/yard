@@ -21,12 +21,20 @@ jobs:
       contents: write
       pull-requests: write
     timeout-minutes: 15
+    env:
+      RELEASE_PLEASE_APP_ID: ${{ secrets.RELEASE_PLEASE_APP_ID }}
+      RELEASE_PLEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
     steps:
-      - name: maintain the release PR + changelog
-        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7
+      - name: mint GitHub App token
+        id: app-token
+        if: ${{ env.RELEASE_PLEASE_APP_ID != '' && env.RELEASE_PLEASE_APP_PRIVATE_KEY != '' }}
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
-          release-type: node
+          app-id: ${{ env.RELEASE_PLEASE_APP_ID }}
+          private-key: ${{ env.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+      - name: maintain the release PR + changelog
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ steps.app-token.outputs.token || secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

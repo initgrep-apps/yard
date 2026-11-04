@@ -62,21 +62,23 @@ Static entries (`ffmpeg`/`ffprobe`, `static: true`) ship as the flat exe only: n
    Values are hex40 sha strings, plain JSON, no comments and no extra keys.
 3. `yarn build && yarn test && cd src-tauri && cargo test` locally, commit, merge.
 4. Click **Freeze sidecar engines** (workflow_dispatch). Expect 4 green rows + finalize publishing `sidecars-<date>` with 8 assets. Finalize verifies with `gh release view --json assets --jq '.assets | length'`, retrying 4×10 s through GitHub's asset-indexing lag; it reuses a leftover same-day draft idempotently and never publishes anything short of the exact-8 name set.
-5. Tag `v<version>` (or dispatch release.yml). Expect 4 green rows building into the draft, the sidecars preflight requiring all 8 bundle assets, and the SBOM + third-party notices from the aarch64 row.
+5. Tag `v<version>` (or dispatch release.yml). Expect 4 green rows building into the draft, the sidecars preflight requiring all 8 bundle assets, the SBOM + third-party notices from the aarch64 row, and each row uploading its stable `Yard-*` alias + `.sha256`.
 6. Operator verifies the draft and clicks publish. Never publish the `sidecars-*` release by hand.
 
 **Package gate (release rows).** After `tauri-action` populates the draft and the per-row app-asset check passes, every release row runs `node scripts/ci/package-gate.mjs --triple <triple>`. It opens that row's own package, asserts every engine exists where the app resolves it, checks the manifest version, runs one real operation per engine, verifies the gs resource tree, and runs the app's own resolver against the package. A row that fails it leaves the draft unpublished — investigate the failing engine, never publish around it.
 
-**Version bump + changelog automation (release-please, live 2026-10-17)**
+**Version bump + changelog automation (release-please, stable baseline `1.0.0`)**
 
-`release-please.yml` runs on every push to main: it reads squash-merged Conventional Commit PRs, maintains a **draft** Release PR that bumps `package.json` and appends to `CHANGELOG.md`, and merges as `v<next>` (tags stay bare-`v`-prefixed via `include-component-in-tag: false`, so the existing `release.yml` trigger fires unchanged). Rules of the road:
+`release-please.yml` runs on every push to main: it reads squash-merged Conventional Commit PRs, maintains a **draft** Release PR that bumps the version files and appends to `CHANGELOG.md`, and merges as `v<next>` (tags stay bare-`v`-prefixed via `include-component-in-tag: false`, so `release.yml` fires unchanged). Rules of the road:
 
-- **`package.json` is the tag-version source of truth.** The release gate requires `package.json` to equal the full tag version (`v0.1.0-alpha.4` → `0.1.0-alpha.4`); the About dialog reads that same field, so the shipped app always shows the released alpha.
-- **`src-tauri/tauri.conf.json` stays on the numeric core** (`0.1.0`). The Windows WiX/MSI bundler hard-fails on a non-numeric prerelease identifier, so release-please does **not** touch it. When a release changes the core (e.g. `0.2.0`), bump it in the same PR as the manifest baseline; the gate rejects a tag whose core differs.
+- **`package.json` is the tag-version source of truth.** The release gate requires `package.json` to equal the full tag version (`v1.0.0` → `1.0.0`); the About dialog reads that same field.
+- **The other version files are extra-files.** release-please updates `src-tauri/tauri.conf.json` (`$.version`) and `src-tauri/Cargo.toml` (`$.package.version`) in the same Release PR. Keep them in sync by hand only when editing the baseline outside release-please.
+- **Token chain.** The workflow prefers a GitHub App (`RELEASE_PLEASE_APP_ID` + `RELEASE_PLEASE_APP_PRIVATE_KEY`), then the `RELEASE_PLEASE_TOKEN` PAT, then `GITHUB_TOKEN`. `GITHUB_TOKEN` needs the repo setting **Allow GitHub Actions to create and approve pull requests**, and PRs it creates do not trigger `ci.yml`; use the App or PAT so the Release PR gets its gate rows.
 - Merging a PR into main does **not** release; only merging the draft Release PR creates the tag and burns a release run (~135 billed min). Close the Release PR if the build is unwanted — release-please aggregates everything into the next proposal.
-- The baseline is seeded at `0.1.0-alpha.4` (`.release-please-manifest.json` = the live tag); everything predating it is the hand-written `CHANGELOG.md` entries, never imported.
-- Prerelease strategy: every proposal bumps the alpha suffix (`0.1.0-alpha.5`, …). To cut the first stable, set the manifest to `0.1.0` in an ordinary PR (the documented manual-baseline move); release-please then continues from stable.
+- The baseline is `1.0.0` (`.release-please-manifest.json` = the live tag); the `1.0.0` changelog entry is hand-written and curated, and predates the baseline. Later releases use commit-derived entries; noise types (`docs`, `chore`, `ci`, `refactor`, `test`, `build`, `style`) are hidden by `release-please-config.json`.
 - Squash-merge only (repo settings enforce it; merge commits are disabled) — one PR = one changelog entry; a PR title is the changelog line, so write them for humans.
+
+**Stable download aliases.** Each release row uploads its installer again under a fixed name — `Yard-macOS-arm64.dmg`, `Yard-macOS-x64.dmg`, `Yard-Windows-x64-setup.exe`, `Yard-Windows-arm64-setup.exe` — plus a `.sha256` file. The README download buttons use `releases/latest/download/<alias>`, so they keep working across versions. The upload step finds the installer matching the release version, so a stale bundle cannot be published under the alias.
 
 **Windows-target compile gate (developer-time, runs on the mac)**
 
