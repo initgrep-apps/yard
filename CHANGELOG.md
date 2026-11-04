@@ -1,9 +1,5 @@
 # Changelog
 
-All notable changes to Yard. `1.0.0` is the hand-written stable baseline; later
-entries are maintained by [`release-please`](.github/workflows/release-please.yml)
-from Conventional Commit PRs (squash-merged, one PR = one entry).
-
 ## 1.0.0 (2026-11-04)
 
 First stable release. Yard compresses images, video, PDF, and Office documents
