@@ -1,104 +1,146 @@
-# Yard
+<p align="center">
+  <img src="docs/assets/yard-icon.png" width="96" alt="Yard icon">
+</p>
 
-An offline desktop app that compresses files to a target size. Drag files in, pick nothing, press Compress — each file gets a size limit based on its type, and the app compresses it as close to that limit as quality allows.
+<h1 align="center">Yard</h1>
 
-Built with Tauri 2 (Rust) + React 19 + TypeScript. GPLv3.
+<p align="center">
+  Offline batch file compression for macOS and Windows.
+  <br>
+  Images, video, PDF, and Office documents — compressed to target sizes, never uploaded.
+</p>
 
-## What it does
+<p align="center">
+  <a href="https://github.com/initgrep-apps/yard/actions/workflows/ci.yml"><img src="https://github.com/initgrep-apps/yard/actions/workflows/ci.yml/badge.svg" alt="PR gate"></a>
+  <a href="https://github.com/initgrep-apps/yard/releases/latest"><img src="https://img.shields.io/github/v/release/initgrep-apps/yard?display_name=tag&sort=semver" alt="Latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/initgrep-apps/yard" alt="License: GPL-3.0"></a>
+  <a href="#download"><img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Windows-lightgrey" alt="Platforms: macOS and Windows"></a>
+</p>
 
-- **Category-based targets** — images ≤ 200 KB, videos ≤ 10 MB, PDF ≤ 2 MB, documents ≤ 1 MB by default. Editable in Settings.
-- **Real engines, bundled** — libvips (images), FFmpeg (video), qpdf + Ghostscript (PDF). No internet needed, ever. Your files never leave your machine.
-- **Originals are safe** — the app never modifies source files. Results go to a separate output folder (`~/Documents/Compressed` by default).
-- **Normalized copies** — metadata (EXIF/GPS/ICC) is stripped to save size, HEIC/HEIF becomes JPEG, MOV becomes MP4.
-- **Batch workflow** — parallel compression with per-file progress, per-file cancel, and a history log (90-day retention by default).
+![Yard compress screen](docs/assets/screenshots/compress.png)
 
-Supported inputs: JPEG, PNG, WebP, HEIC/HEIF (→ JPEG) · MP4, MOV (→ MP4) · PDF · DOCX, XLSX, PPTX (embedded media recompressed).
+Yard takes a batch of files, gives each one a size limit based on its type, and
+compresses it as close to that limit as quality allows. Everything runs on your
+machine: the compression engines are bundled, and there is no telemetry, account,
+or network access.
 
-## Status
+## Features
 
-- **macOS** — arm64 and Intel builds are produced by CI.
-- **Windows** — x64 and arm64 builds are produced by CI.
-- **Linux** — not packaged yet.
-- macOS builds are ad-hoc signed and not notarized, so install needs a manual quarantine removal — see **Installing a release** below and `docs/distribution-acceptance.md`.
-- Windows builds are unsigned, so SmartScreen shows a warning: choose **More info** → **Run anyway**.
+| | |
+|---|---|
+| **Category targets** | Images, video, PDF, and documents each get a target size. Defaults are editable in Settings. |
+| **Bundled engines** | libvips, FFmpeg, qpdf, and Ghostscript ship with the app. No runtime downloads. |
+| **Originals stay untouched** | Results go to a separate output folder. Metadata is stripped; HEIC/HEIF becomes JPEG and MOV becomes MP4. |
+| **Batch workflow** | Parallel compression, per-file progress, per-file cancel, and cancel-all. |
+| **History** | A local audit trail with per-file sizes, methods, timings, and a 90-day retention default. |
+| **Offline by design** | No telemetry, no cloud processing, no auto-update. Your files never leave the machine. |
+
+## Download
+
+| Platform | Installer |
+|---|---|
+| macOS 11+ · Apple Silicon | [![Download for macOS Apple Silicon](https://img.shields.io/badge/Download-.dmg-black?logo=apple&logoColor=white)](https://github.com/initgrep-apps/yard/releases/latest/download/Yard-macOS-arm64.dmg) |
+| macOS 11+ · Intel | [![Download for macOS Intel](https://img.shields.io/badge/Download-.dmg-black?logo=apple&logoColor=white)](https://github.com/initgrep-apps/yard/releases/latest/download/Yard-macOS-x64.dmg) |
+| Windows 10+ · x64 | [![Download for Windows x64](https://img.shields.io/badge/Download-.exe-0078D4?logo=windows&logoColor=white)](https://github.com/initgrep-apps/yard/releases/latest/download/Yard-Windows-x64-setup.exe) |
+| Windows 10+ · arm64 | [![Download for Windows arm64](https://img.shields.io/badge/Download-.exe-0078D4?logo=windows&logoColor=white)](https://github.com/initgrep-apps/yard/releases/latest/download/Yard-Windows-arm64-setup.exe) |
+
+All installers, checksums, SBOM, and third-party notices are on the
+[Releases page](https://github.com/initgrep-apps/yard/releases/latest). Each
+installer has a matching `.sha256` file.
+
+### Installing on macOS
+
+The macOS builds are ad-hoc signed and not notarized, so Gatekeeper quarantines
+the download. Copy the app first, then remove the quarantine mark:
+
+```bash
+hdiutil attach ~/Downloads/Yard-macOS-arm64.dmg
+cp -R /Volumes/yard/yard.app /Applications/
+hdiutil detach /Volumes/yard
+xattr -dr com.apple.quarantine /Applications/yard.app
+```
+
+**System Settings → Privacy & Security → Open Anyway** is the alternative after
+the first launch attempt. On macOS 15+ it is the only route when the command is
+not used.
+
+### Installing on Windows
+
+Run the installer. When SmartScreen warns, choose **More info** → **Run anyway**.
+The Windows builds are unsigned.
+
+## Usage
+
+1. Drop files onto the window, or click **Browse your files**.
+2. Press **Compress**. Progress is shown per file; cancel any file or the batch.
+3. Open the output folder from the result row, or browse the batch in **History**.
+
+Targets, quality floors, output folder, and parallelism live in **Settings**.
+
+## Supported formats
+
+| Type | Input | Output |
+|---|---|---|
+| Images | JPEG, PNG, WebP, HEIC/HEIF | JPEG, PNG, WebP; HEIC/HEIF becomes JPEG |
+| Video | MP4, MOV | MP4 |
+| PDF | PDF | PDF |
+| Documents | DOCX, XLSX, PPTX | Same format, embedded media recompressed |
+
+## Screenshots
+
+### History
+
+![Yard history screen](docs/assets/screenshots/history.png)
+
+### Targets
+
+![Yard targets settings](docs/assets/screenshots/targets.png)
 
 ## System requirements
 
-| | Minimum | Recommended | Power |
-|---|---|---|---|
-| CPU | 2 cores | 6–8 logical cores | 10+ cores |
-| RAM | 4 GB | 16 GB | 32 GB |
-| Disk | SSD, ~2× largest file + 2 GB free | SSD, 30 GB free | NVMe, 64 GB free |
-| GPU | not needed | not needed | not needed |
-| OS | macOS 11+ / Windows 10+ | same | same |
+| | Minimum | Recommended |
+|---|---|---|
+| CPU | 2 cores | 6–8 logical cores |
+| RAM | 4 GB | 16 GB |
+| Disk | SSD, ~2× largest file + 2 GB free | SSD, 30 GB free |
+| OS | macOS 11+ / Windows 10+ | Same |
 
-RAM matters most: documents are processed in memory (~8–12× their compressed size). A 500 MB PPTX needs about 5 GB; a 2 GB PPTX needs about 20 GB. Disk matters second: attempt files stay on disk until each job ends, so a batch of very large documents can spike temp usage.
+RAM matters most for large documents: they are processed in memory at roughly
+8–12× their compressed size. A 500 MB PPTX needs about 5 GB; a 2 GB PPTX needs
+about 20 GB. Attempt files stay on disk until each job ends, so a batch of very
+large documents can spike temporary disk usage.
 
-## Installing a release
+## Security
 
-**macOS** — the DMG mounts read-only, so copy the app first and strip the quarantine mark from the installed copy:
+Yard processes files locally and sends nothing over the network. To report a
+vulnerability, use [GitHub private vulnerability reporting](https://github.com/initgrep-apps/yard/security/advisories/new)
+as described in [`SECURITY.md`](SECURITY.md). Do not open a public issue for a
+security report.
 
-```bash
-hdiutil attach ~/Downloads/yard_<version>_<aarch64|x64>.dmg
-cp -R /Volumes/<volume-name>/*.app /Applications/
-hdiutil detach /Volumes/<volume-name>
-xattr -dr com.apple.quarantine /Applications/<app-name>.app
-```
+Release assets are built on native GitHub-hosted runners, gated by the full test
+suite and a package-content check, and published with SHA-256 checksums. The
+builds are not code-signed or notarized yet.
 
-**System Settings → Privacy & Security → Open Anyway** is the alternative (on macOS 15+ it is the only route when the command is not used).
+## Development
 
-**Windows** — run the installer; when SmartScreen warns, choose **More info** → **Run anyway**.
-
-## Verifying a release
-
-`node scripts/ci/package-gate.mjs --triple <triple>` proves the engines are present, startable and usable inside the built package. The platform × file-type matrix in `docs/distribution-acceptance.md` covers the UI layer, which CI cannot.
-
-## For users
-
-Download the installer for your platform from the Releases page once a release is published, or build from source (see **For developers**). Then:
-
-1. Open the app and drag files onto the drop zone (or click it to browse).
-2. Press **Compress**. Progress shows per file; you can cancel any file or the whole batch.
-3. Find the results in the output folder — use the reveal button on each row, or check the History view.
-
-Targets, quality floors, output folder, and parallelism are configurable in **Settings**.
-
-## For developers
-
-### Prerequisites
-
-- Node.js 22 LTS and [yarn](https://yarnpkg.com/)
-- Rust stable
-- Tauri 2 system dependencies for your platform: https://v2.tauri.app/start/prerequisites/
-
-### Setup
+Requirements: Node.js 22, [yarn](https://yarnpkg.com/), Rust stable, and the
+[Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/) for your
+platform.
 
 ```bash
 yarn install
-yarn binaries:all     # one-time: download + verify + stage the compression engines (~150 MB)
+yarn binaries:all     # one-time: download, verify, and stage the engines (~150 MB)
 yarn tauri dev
 ```
 
-> `cargo test` fails on a fresh clone until `yarn binaries:all` has run — the Tauri build config requires the engine binaries to exist.
-
-### Checks before pushing
+Run the gate before pushing:
 
 ```bash
 yarn build && yarn test && (cd src-tauri && cargo test)
 ```
 
-### Scripts
-
-| Command | What it does |
-|---|---|
-| `yarn binaries:all` | fetch → prep → verify → audit the sidecar engines (full pipeline) |
-| `yarn binaries:fetch` | download engines, verify sha256 against the manifest, write the lock file |
-| `yarn binaries:prep` | stage per-platform layouts (macOS dylibs, Windows engine folders) |
-| `yarn binaries:verify` | check CPU architecture vs file name, versions vs lock |
-| `yarn binaries:audit` | clean-room Ghostscript smoke test + supply-chain checks |
-| `yarn binaries:refresh` | bump engine versions in the manifest + lock |
-| `yarn sbom` | regenerate `sbom.json` + `THIRD_PARTY_LICENSES.md` from the lock |
-| `yarn tauri dev` / `yarn tauri build` | run / build the desktop app |
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the PR process, commit conventions,
+and release rules.
 
 ### Project layout
 
@@ -110,17 +152,17 @@ scripts/ci/           Freeze/unfreeze, package gate, workflow tests
 docs/                 Architecture, features, ADRs, CI runbook, known gaps
 ```
 
-Rule: `src/` renders and calls IPC; everything else lives in Rust.
-
 ### Documentation
 
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — how the app works today (components, IPC, algorithms, limits)
-- [`docs/FEATURES.md`](docs/FEATURES.md) — what shipped, slice by slice, plus the research backlog
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — components, IPC, algorithms, limits
+- [`docs/FEATURES.md`](docs/FEATURES.md) — shipped slices and research backlog
 - [`docs/adr/`](docs/adr/) — decisions and rejected alternatives
-- [`docs/ci-process.md`](docs/ci-process.md) — CI model, runbook, failure table
-- [`docs/bugs.md`](docs/bugs.md) — open bugs, known gaps, deferred CI work
+- [`docs/ci-process.md`](docs/ci-process.md) — CI model, release runbook, failure table
+- [`docs/bugs.md`](docs/bugs.md) — open bugs and known gaps
 - [`GLOSSARY.md`](GLOSSARY.md) — project vocabulary
 
 ## License
 
-GPLv3 — see [`LICENSE`](LICENSE). Bundled engines keep their own licenses (FFmpeg GPLv2+, Ghostscript AGPLv3, libvips LGPLv3, qpdf Apache-2.0) — see [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md).
+GPL-3.0 — see [`LICENSE`](LICENSE). Bundled engines keep their own licenses:
+FFmpeg GPL-2.0-or-later, Ghostscript AGPL-3.0, libvips LGPL-3.0, qpdf
+Apache-2.0. See [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md).

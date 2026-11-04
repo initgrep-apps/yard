@@ -203,6 +203,57 @@ jobs:
           releaseId: ${{ needs.gate.outputs.release_id }}
           releaseDraft: true
           args: --target ${{ matrix.triple }}
+      - name: upload stable download alias + checksum (${{ matrix.triple }})
+        env:
+          RELEASE_TAG: ${{ needs.gate.outputs.release_tag }}
+          APP_VERSION: ${{ needs.gate.outputs.app_version }}
+          TRIPLE: ${{ matrix.triple }}
+          GH_TOKEN: ${{ github.token }}
+        run: |-
+          set -euo pipefail
+          case "$TRIPLE" in
+            aarch64-apple-darwin)
+              dir="src-tauri/target/$TRIPLE/release/bundle/dmg"
+              pattern="*.dmg"
+              alias="Yard-macOS-arm64.dmg"
+              ;;
+            x86_64-apple-darwin)
+              dir="src-tauri/target/$TRIPLE/release/bundle/dmg"
+              pattern="*.dmg"
+              alias="Yard-macOS-x64.dmg"
+              ;;
+            x86_64-pc-windows-msvc)
+              dir="src-tauri/target/$TRIPLE/release/bundle/nsis"
+              pattern="*-setup.exe"
+              alias="Yard-Windows-x64-setup.exe"
+              ;;
+            aarch64-pc-windows-msvc)
+              dir="src-tauri/target/$TRIPLE/release/bundle/nsis"
+              pattern="*-setup.exe"
+              alias="Yard-Windows-arm64-setup.exe"
+              ;;
+            *)
+              echo "::error::no stable download alias implemented for triple '$TRIPLE'"
+              exit 1
+              ;;
+          esac
+          asset="$(find "$dir" -maxdepth 1 -type f -name "$pattern" -name "*${APP_VERSION}*" -print -quit)"
+          if [ -z "$asset" ]; then
+            echo "::error::no built installer matching '$pattern' under '$dir' for $TRIPLE"
+            exit 1
+          fi
+          echo "uploading $asset as $alias"
+          cp "$asset" "$RUNNER_TEMP/$alias"
+          gh release upload "$RELEASE_TAG" "$RUNNER_TEMP/$alias" --clobber
+          if command -v sha256sum >/dev/null 2>&1; then
+            digest="$(sha256sum "$asset" | cut -d' ' -f1)"
+          else
+            digest="$(shasum -a 256 "$asset" | cut -d' ' -f1)"
+          fi
+          printf '%s  %s\n' "$digest" "$alias" > "$RUNNER_TEMP/$alias.sha256"
+          gh release upload "$RELEASE_TAG" "$RUNNER_TEMP/$alias.sha256" --clobber
+          echo "stable alias + checksum uploaded: $alias"
+        shell: bash
       - name: fail-closed app-asset check for this triple
         env:
           RELEASE_TAG: ${{ needs.gate.outputs.release_tag }}

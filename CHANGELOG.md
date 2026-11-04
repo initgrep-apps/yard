@@ -1,9 +1,39 @@
 # Changelog
 
-All notable changes to the Yard. Entries for `0.1.0-alpha.1` onward are maintained
-by [`release-please`](.github/workflows/release-please.yml) from Conventional Commit PRs (squash-merged,
-one PR = one entry); the first entry below is the hand-written seed for the bootstrapped release so no
-history predating it leaks into the file.
+All notable changes to Yard. `1.0.0` is the hand-written stable baseline; later
+entries are maintained by [`release-please`](.github/workflows/release-please.yml)
+from Conventional Commit PRs (squash-merged, one PR = one entry).
+
+## 1.0.0 (2026-11-04)
+
+First stable release. Yard compresses images, video, PDF, and Office documents
+offline, to per-category size limits, without uploading files.
+
+### Highlights
+
+- **Category targets** — images, video, PDF, and documents each get a size limit;
+  defaults are editable in Settings.
+- **Bundled engines** — libvips, FFmpeg, qpdf, and Ghostscript ship with the app.
+  No downloads, accounts, or network access at runtime.
+- **Originals are never modified** — compressed copies go to a separate output
+  folder; metadata is stripped and HEIC/HEIF becomes JPEG, MOV becomes MP4.
+- **Batch workflow** — parallel compression with per-file progress, per-file
+  cancel, and a history audit trail with 90-day retention by default.
+- **Native installers** — macOS arm64/Intel DMG and Windows x64/arm64
+  NSIS installers, built and gated on native CI runners.
+- **Offline by design** — no telemetry, no auto-update, no cloud processing.
+
+### Platforms
+
+- macOS 11+ (Apple Silicon and Intel)
+- Windows 10+ (x64 and arm64)
+
+### Known limitations
+
+- macOS builds are ad-hoc signed and not notarized; first launch needs the
+  documented quarantine removal.
+- Windows builds are unsigned, so SmartScreen warns on first launch.
+- Linux builds from source but is not packaged.
 
 ## 0.1.0-alpha.1 (2026-10-17)
 

@@ -193,34 +193,54 @@ describe("release-please.yml changelog automation", () => {
     });
   });
 
-  it("runs the SHA-pinned release-please-action against the committed config + manifest", async () => {
+  it("mints a GitHub App token when configured, then runs the SHA-pinned release-please-action against the committed config + manifest", async () => {
     const { doc } = await loadWorkflow(FILENAME);
     const job = jobsOf(doc)["release-please"];
     expect(job["runs-on"]).toBe("ubuntu-24.04");
     expect(job["timeout-minutes"]).toBe(15);
-    expect(stepUses(stepsOf(job)[0])).toBe(
+    expect(job.env?.RELEASE_PLEASE_APP_ID).toBe("${{ secrets.RELEASE_PLEASE_APP_ID }}");
+    expect(job.env?.RELEASE_PLEASE_APP_PRIVATE_KEY).toBe(
+      "${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}",
+    );
+    const steps = stepsOf(job);
+    expect(steps).toHaveLength(2);
+    expect(steps[0].id).toBe("app-token");
+    expect(steps[0].if).toBe(
+      "${{ env.RELEASE_PLEASE_APP_ID != '' && env.RELEASE_PLEASE_APP_PRIVATE_KEY != '' }}",
+    );
+    expect(stepUses(steps[0])).toMatch(/^actions\/create-github-app-token@[0-9a-f]{40}$/);
+    expect(steps[1].uses).toBe(
       `googleapis/release-please-action@${RELEASE_PLEASE_SHA}`,
     );
-    expect(stepsOf(job)[0].with["config-file"]).toBe("release-please-config.json");
-    expect(stepsOf(job)[0].with["manifest-file"]).toBe(".release-please-manifest.json");
-    expect(stepsOf(job)[0].env?.GITHUB_TOKEN).toBe("${{ secrets.GITHUB_TOKEN }}");
+    expect(steps[1].with.token).toBe(
+      "${{ steps.app-token.outputs.token || secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}",
+    );
+    expect(steps[1].with["config-file"]).toBe("release-please-config.json");
+    expect(steps[1].with["manifest-file"]).toBe(".release-please-manifest.json");
   });
 
-  it("config keeps tags v-prefixed (release.yml trigger intact), automates alpha bumps, drafts the release PR, and leaves the numeric tauri.conf.json alone", async () => {
+  it("config keeps tags v-prefixed (release.yml trigger intact), targets stable versions, drafts the release PR, and syncs the app version files", async () => {
     const config = JSON.parse(await readFile(join(HERE, "..", "..", "release-please-config.json"), "utf8"));
     const pkg = config.packages["."];
     expect(pkg["release-type"]).toBe("node");
     expect(pkg["include-component-in-tag"]).toBe(false);
-    expect(pkg.prerelease).toBe(true);
-    expect(pkg["prerelease-type"]).toBe("alpha");
+    expect(pkg.prerelease).toBeUndefined();
     expect(pkg["draft-pull-request"]).toBe(true);
-    expect(
-      pkg["extra-files"],
-      "release-please must not write a prerelease into tauri.conf.json — the Windows MSI bundler only accepts a numeric core",
-    ).toBeUndefined();
+    expect(pkg["extra-files"]).toEqual([
+      {
+        type: "json",
+        path: "src-tauri/tauri.conf.json",
+        jsonpath: "$.version",
+      },
+      {
+        type: "toml",
+        path: "src-tauri/Cargo.toml",
+        jsonpath: "$.package.version",
+      },
+    ]);
   });
 
-  it("manifest is seeded at the live tag so no history predating the current release enters the changelog", async () => {
+  it("manifest is seeded at the current package version so no history predating the baseline enters the changelog", async () => {
     const manifest = JSON.parse(
       await readFile(join(HERE, "..", "..", ".release-please-manifest.json"), "utf8"),
     );
@@ -228,9 +248,9 @@ describe("release-please.yml changelog automation", () => {
     expect(manifest["."]).toBe(pkg.version);
   });
 
-  it("CHANGELOG.md is seeded with the hand-written first entry, not a historic commit dump", async () => {
+  it("CHANGELOG.md is seeded with the hand-written stable baseline, not a historic commit dump", async () => {
     const changelog = await readFile(join(HERE, "..", "..", "CHANGELOG.md"), "utf8");
-    expect(changelog).toMatch(/## 0\.1\.0-alpha\.1 \(2026-10-17\)/);
+    expect(changelog).toMatch(/## 1\.0\.0 \(2026-11-04\)/);
     expect(changelog).not.toMatch(/### Bug Fixes[\s\S]*#1[12][0-9]\b/);
   });
 });
@@ -1102,6 +1122,32 @@ describe("release.yml release workflow", () => {
     }
     expect(withBlock.releaseDraft).toBe(true);
     expect(withBlock.args).toBe("--target ${{ matrix.triple }}");
+  });
+
+  it("uploads the stable README download aliases plus SHA-256 checksums after tauri-action", async () => {
+    const { doc } = await loadWorkflow(FILENAME);
+    const steps = stepsOf(jobsOf(doc).release);
+    const actionIdx = steps.findIndex((s) => stepUses(s).startsWith("tauri-apps/tauri-action@"));
+    const aliasStep = steps.find((s) => s.name?.startsWith("upload stable download alias"));
+    expect(aliasStep, "stable alias upload step must exist").toBeDefined();
+    expect(steps.findIndex((s) => s === aliasStep)).toBeGreaterThan(actionIdx);
+
+    const run = aliasStep.run;
+    for (const [triple, alias] of [
+      ["aarch64-apple-darwin", "Yard-macOS-arm64.dmg"],
+      ["x86_64-apple-darwin", "Yard-macOS-x64.dmg"],
+      ["x86_64-pc-windows-msvc", "Yard-Windows-x64-setup.exe"],
+      ["aarch64-pc-windows-msvc", "Yard-Windows-arm64-setup.exe"],
+    ]) {
+      expect(run, `${triple} must publish ${alias}`).toContain(`alias="${alias}"`);
+    }
+    expect(run).toContain('-name "*${APP_VERSION}*"');
+    expect(run).toContain('cp "$asset" "$RUNNER_TEMP/$alias"');
+    expect(run).toContain('gh release upload "$RELEASE_TAG" "$RUNNER_TEMP/$alias" --clobber');
+    expect(run).toContain('printf \'%s  %s\\n\' "$digest" "$alias"');
+    expect(run).toContain('gh release upload "$RELEASE_TAG" "$RUNNER_TEMP/$alias.sha256" --clobber');
+    expect(aliasStep.env?.APP_VERSION).toBe("${{ needs.gate.outputs.app_version }}");
+    expect(aliasStep.env?.TRIPLE).toBe("${{ matrix.triple }}");
   });
 
   it("fail-closes each row when the gated draft carries no app artifacts for its triple after tauri-action", async () => {

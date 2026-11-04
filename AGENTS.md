@@ -21,7 +21,7 @@ Offline desktop app for batch-optimizing files to maximum size limits. Tauri 2 +
 
 ## Documentation lifecycle
 
-Canonical, always-current docs: `README.md`, `docs/ARCHITECTURE.md`, `docs/FEATURES.md`, `GLOSSARY.md`, `docs/adr/`, `docs/bugs.md`, `docs/ci-process.md`, `docs/distribution-acceptance.md`, `docs/reference/`.
+Canonical, always-current docs: `README.md`, `docs/ARCHITECTURE.md`, `docs/FEATURES.md`, `GLOSSARY.md`, `docs/adr/`, `docs/bugs.md`, `docs/ci-process.md`, `docs/distribution-acceptance.md`.
 
 Superpowers specs and plans are working artifacts. When a slice merges: digest the outcome into `docs/FEATURES.md`, record any decision that passes the ADR three-test filter in `docs/adr/`, move open work to `docs/bugs.md`, then delete the spec and plan. Resolved investigations leave no document behind.
 
