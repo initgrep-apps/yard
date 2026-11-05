@@ -237,7 +237,12 @@ pub fn deliver_output(
 pub fn commit_output(temp: &Path, dest: &Path) -> std::io::Result<()> {
     match std::fs::hard_link(temp, dest) {
         Ok(()) => {
-            let _ = std::fs::remove_file(temp);
+            if let Err(e) = std::fs::remove_file(temp) {
+                // shortcut: temp cleanup best-effort only; a stuck temp file
+                // is harmless but should be logged. Upgrade if we ever need
+                // strict temp accounting.
+                eprintln!("warn: could not remove committed temp {}: {e}", temp.display());
+            }
             Ok(())
         }
         Err(e) if link_unsupported(&e) => {
@@ -831,6 +836,33 @@ mod tests {
             "existing destination must not be clobbered"
         );
         assert!(!dir.path().join("out.bin.yard-tmp").exists());
+    }
+
+    #[test]
+    fn successful_commit_leaves_no_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.bin");
+        fs::write(&input, b"delivered").unwrap();
+        let output = dir.path().join("out.bin");
+
+        let result = deliver_output(
+            &input,
+            &output,
+            9,
+            "test".to_string(),
+            75,
+            true,
+            &ProgressSender::test_stub(),
+            &CancellationToken::new(),
+        );
+
+        assert!(result.is_ok(), "got: {:?}", result);
+        assert!(output.exists(), "destination must exist");
+        assert_eq!(fs::read(&output).unwrap(), b"delivered");
+        assert!(
+            !output.with_extension("yard-tmp").exists(),
+            "temp must be removed after successful commit"
+        );
     }
 
     #[test]
