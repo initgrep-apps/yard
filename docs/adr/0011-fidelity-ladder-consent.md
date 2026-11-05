@@ -19,6 +19,6 @@ Two corrections are part of the same decision, because they are bugs rather than
 - New file state `needs_permission`. The status enum and the TypeScript union change together.
 - Video gains no lossless compression rung: remux changes the container, not the byte count. It is used for compatibility, not size.
 - Outputs are sRGB. A print or wide-gamut workflow is out of scope; converting is what keeps the result consistent across viewers.
-- HDR gain maps embedded in images are bulky metadata, but removing one changes how an HDR photo displays. Treated as a destructive change, not a silent strip.
+- HDR gain maps embedded in images are never stripped silently: removing one changes how an HDR photo displays, and an attempt that cannot carry it fails rather than guessing.
 - `qpdf --optimize-images --jpeg-quality=75` is reclassified as a lossy pass; it was previously presented as part of the safe part of the PDF ladder.
 - The report for each file names the changes made and the consent that permitted them.
