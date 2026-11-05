@@ -516,7 +516,7 @@ impl CompressionProcessor for DocumentProcessor {
     }
 
     fn supported_extensions(&self) -> &[&str] {
-        &["docx", "xlsx", "pptx"]
+        crate::registry::extensions_for(Category::Document)
     }
 
     fn compress_to_target(

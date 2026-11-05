@@ -45,7 +45,12 @@ impl ProcessorRegistry {
     fn register(&mut self, processor: Box<dyn CompressionProcessor>) {
         let category = processor.category();
         for ext in processor.supported_extensions() {
-            self.extension_map.insert(ext.to_lowercase(), category);
+            let ext = ext.to_lowercase();
+            assert!(
+                !self.extension_map.contains_key(&ext),
+                "duplicate extension {ext} registered in the file-type registry"
+            );
+            self.extension_map.insert(ext, category);
         }
         self.processors.insert(category, processor);
     }
@@ -68,58 +73,83 @@ impl Default for ProcessorRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::{CompressionError, CompressionResult, ProgressSender, SidecarPaths};
+    use crate::settings::QualityFloors;
+    use std::path::Path;
+    use tokio_util::sync::CancellationToken;
 
     #[test]
-    fn registry_maps_all_image_extensions_to_image_category() {
+    fn registry_maps_every_file_type_to_its_category() {
         let registry = ProcessorRegistry::new();
-        for ext in ["jpg", "jpeg", "png", "webp", "heic", "heif"] {
+        for row in crate::registry::FILE_TYPES {
             assert_eq!(
-                registry.extension_map.get(ext),
-                Some(&Category::Image),
+                registry.lookup(row.ext),
+                Some(row.category),
                 "ext: {}",
-                ext
+                row.ext
+            );
+            assert_eq!(
+                registry.lookup(&row.ext.to_uppercase()),
+                Some(row.category),
+                "uppercase ext: {}",
+                row.ext
             );
         }
-        // lowercased on insert — uppercase input still maps
-        assert_eq!(registry.lookup("JPEG"), Some(Category::Image));
+        assert_eq!(registry.lookup("xyz"), None);
+        assert_eq!(
+            registry.extension_map.len(),
+            crate::registry::FILE_TYPES.len(),
+            "the processor map must hold exactly the file-type rows"
+        );
     }
 
     #[test]
-    fn registry_maps_pdf_extension_to_pdf_category() {
+    fn every_file_type_category_has_a_processor() {
         let registry = ProcessorRegistry::new();
-        assert_eq!(registry.lookup("pdf"), Some(Category::Pdf));
-        assert_eq!(registry.lookup("PDF"), Some(Category::Pdf));
-        assert!(registry.get_processor(Category::Pdf).is_some());
-    }
-
-    #[test]
-    fn registry_maps_video_extensions_to_video_category() {
-        let registry = ProcessorRegistry::new();
-        assert_eq!(registry.lookup("mp4"), Some(Category::Video));
-        assert_eq!(registry.lookup("MOV"), Some(Category::Video));
-        assert!(registry.get_processor(Category::Video).is_some());
-    }
-
-    #[test]
-    fn registry_lookup_matches_category() {
-        let registry = ProcessorRegistry::new();
-        assert!(registry.get_processor(Category::Video).is_some());
-        assert!(registry.get_processor(Category::Document).is_some());
+        for category in [
+            Category::Image,
+            Category::Video,
+            Category::Pdf,
+            Category::Document,
+        ] {
+            assert!(
+                registry.get_processor(category).is_some(),
+                "category: {category:?}"
+            );
+        }
         assert!(registry.get_processor(Category::Other).is_none());
     }
 
-    #[test]
-    fn registry_maps_document_extensions_to_document_category() {
-        let registry = ProcessorRegistry::new();
-        for ext in ["docx", "xlsx", "pptx"] {
-            assert_eq!(
-                registry.extension_map.get(ext),
-                Some(&Category::Document),
-                "ext: {}",
-                ext
-            );
+    struct StubProcessor(&'static [&'static str]);
+
+    impl CompressionProcessor for StubProcessor {
+        fn category(&self) -> Category {
+            Category::Image
         }
-        assert_eq!(registry.lookup("DOCX"), Some(Category::Document));
-        assert!(registry.get_processor(Category::Document).is_some());
+
+        fn supported_extensions(&self) -> &[&str] {
+            self.0
+        }
+
+        fn compress_to_target(
+            &self,
+            _input: &Path,
+            _output: &Path,
+            _target_bytes: u64,
+            _quality_floor: &QualityFloors,
+            _cancel_token: CancellationToken,
+            _progress: ProgressSender,
+            _sidecar_paths: &SidecarPaths,
+            _temp_dir: &Path,
+        ) -> Result<CompressionResult, CompressionError> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate extension")]
+    fn duplicate_extension_registration_is_rejected() {
+        let mut registry = ProcessorRegistry::new();
+        registry.register(Box::new(StubProcessor(&["png"])));
     }
 }

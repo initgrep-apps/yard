@@ -58,21 +58,7 @@ fn run_processor_catch_panic(
 /// case-insensitive. Resolving the real output extension here is what makes
 /// collision detection apply before any processor touches the filename.
 pub(crate) fn output_file_name(name: &str) -> String {
-    let lower = name.to_lowercase();
-    let output_ext: Option<&str> = if lower.ends_with(".heic") || lower.ends_with(".heif") {
-        Some("jpg")
-    } else if lower.ends_with(".mov") {
-        Some("mp4")
-    } else {
-        None
-    };
-    match output_ext {
-        Some(ext) => name.rsplit_once('.').map_or_else(
-            || format!("{name}.{ext}"),
-            |(stem, _)| format!("{stem}.{ext}"),
-        ),
-        None => name.to_string(),
-    }
+    crate::registry::output_file_name(name)
 }
 
 /// Map a successful CompressionResult to its final FileStatus.
@@ -1076,24 +1062,29 @@ mod tests {
     }
 
     #[test]
-    fn output_file_name_rewrites_heic_to_jpg() {
-        assert_eq!(output_file_name("photo.heic"), "photo.jpg");
-        assert_eq!(output_file_name("photo.HEIC"), "photo.jpg");
-        assert_eq!(output_file_name("photo.heif"), "photo.jpg");
-        assert_eq!(output_file_name("photo.HEIF"), "photo.jpg");
-    }
+    fn output_file_name_follows_the_registry_for_every_row() {
+        for row in crate::registry::FILE_TYPES {
+            let name = format!("clip.{}", row.ext);
+            let output = output_file_name(&name);
+            if row.output_ext == row.ext {
+                assert_eq!(output, name, "ext: {}", row.ext);
+            } else {
+                assert_eq!(output, format!("clip.{}", row.output_ext), "ext: {}", row.ext);
+            }
 
-    #[test]
-    fn output_file_name_rewrites_mov_to_mp4() {
-        assert_eq!(output_file_name("clip.mov"), "clip.mp4");
-        assert_eq!(output_file_name("clip.MOV"), "clip.mp4");
-    }
-
-    #[test]
-    fn output_file_name_keeps_non_heic_name() {
-        assert_eq!(output_file_name("photo.png"), "photo.png");
-        assert_eq!(output_file_name("doc.PDF"), "doc.PDF");
-        assert_eq!(output_file_name("clip.mp4"), "clip.mp4");
+            let upper = format!("CLIP.{}", row.ext.to_uppercase());
+            let upper_output = output_file_name(&upper);
+            if row.output_ext == row.ext {
+                assert_eq!(upper_output, upper, "uppercase ext: {}", row.ext);
+            } else {
+                assert_eq!(
+                    upper_output,
+                    format!("CLIP.{}", row.output_ext),
+                    "uppercase ext: {}",
+                    row.ext
+                );
+            }
+        }
     }
 
     #[test]

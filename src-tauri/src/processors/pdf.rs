@@ -259,7 +259,7 @@ impl CompressionProcessor for PdfProcessor {
     }
 
     fn supported_extensions(&self) -> &[&str] {
-        &["pdf"]
+        crate::registry::extensions_for(Category::Pdf)
     }
 
     fn compress_to_target(

@@ -802,7 +802,7 @@ impl CompressionProcessor for VideoProcessor {
     }
 
     fn supported_extensions(&self) -> &[&str] {
-        &["mp4", "mov"]
+        crate::registry::extensions_for(Category::Video)
     }
 
     fn compress_to_target(
@@ -1963,7 +1963,7 @@ exit 1
         // queue.rs output_file_name resolves clip.mov → clip.mp4 (with
         // collision suffixes) BEFORE the processor runs; the processor must
         // deliver to the resolved path untouched. See
-        // queue::output_file_name_rewrites_mov_to_mp4 and
+        // registry::tests::mov_and_heic_keep_their_output_extension_rules and
         // queue::mov_collision_uses_real_output_name for the naming half.
         let output = dir.path().join("clip.mp4");
 

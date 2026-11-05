@@ -44,17 +44,6 @@ impl ImageProcessor {
         ImageProcessor
     }
 
-    fn get_output_extension(input: &Path) -> String {
-        let ext = input.extension().and_then(|e| e.to_str()).unwrap_or("");
-        match ext.to_lowercase().as_str() {
-            "jpg" | "jpeg" => "jpg".to_string(),
-            "png" => "png".to_string(),
-            "webp" => "webp".to_string(),
-            // HEIC/HEIF → JPEG output (spec §3); unknown → jpg fallback
-            _ => "jpg".to_string(),
-        }
-    }
-
     fn save_options(ext: &str, quality: u32) -> String {
         match ext {
             "png" => format!("[compression=9,palette,Q={quality},keep=icc]"),
@@ -70,11 +59,11 @@ impl ImageProcessor {
     /// `width` is a square target box, so a portrait image's long edge is the
     /// capped dimension too.
     fn attempt_args(input: &Path, output: &Path, width: u32, quality: u32) -> Vec<String> {
-        let ext = Self::get_output_extension(input);
+        let ext = crate::registry::output_extension(input.to_string_lossy().as_ref());
         vec![
             "thumbnail".to_string(),
             input.display().to_string(),
-            format!("{}{}", output.display(), Self::save_options(&ext, quality)),
+            format!("{}{}", output.display(), Self::save_options(ext, quality)),
             width.to_string(),
             "--size".to_string(),
             "down".to_string(),
@@ -324,7 +313,7 @@ impl CompressionProcessor for ImageProcessor {
     }
 
     fn supported_extensions(&self) -> &[&str] {
-        &["jpg", "jpeg", "png", "webp", "heic", "heif"]
+        crate::registry::extensions_for(Category::Image)
     }
 
     fn compress_to_target(
@@ -356,7 +345,7 @@ impl CompressionProcessor for ImageProcessor {
             );
         }
 
-        let ext = Self::get_output_extension(input);
+        let ext = crate::registry::output_extension(input.to_string_lossy().as_ref());
         let png_output = ext == "png";
         let min_quality = quality_floor.image.min_quality;
         let min_long_edge = quality_floor.image.min_long_edge;
@@ -550,46 +539,6 @@ mod tests {
             qpdf: None,
             gs_resources: None,
         }
-    }
-
-    #[test]
-    fn get_output_extension_maps_heic_heif_to_jpg() {
-        assert_eq!(
-            ImageProcessor::get_output_extension(Path::new("p/photo.heic")),
-            "jpg"
-        );
-        assert_eq!(
-            ImageProcessor::get_output_extension(Path::new("p/photo.HEIF")),
-            "jpg"
-        );
-    }
-
-    #[test]
-    fn get_output_extension_preserves_png_jpg_webp() {
-        assert_eq!(
-            ImageProcessor::get_output_extension(Path::new("p/a.png")),
-            "png"
-        );
-        assert_eq!(
-            ImageProcessor::get_output_extension(Path::new("p/a.JPG")),
-            "jpg"
-        );
-        assert_eq!(
-            ImageProcessor::get_output_extension(Path::new("p/a.webp")),
-            "webp"
-        );
-    }
-
-    #[test]
-    fn get_output_extension_defaults_unknown_to_jpg() {
-        assert_eq!(
-            ImageProcessor::get_output_extension(Path::new("p/a.tiff")),
-            "jpg"
-        );
-        assert_eq!(
-            ImageProcessor::get_output_extension(Path::new("p/a")),
-            "jpg"
-        );
     }
 
     #[test]

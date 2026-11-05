@@ -23,6 +23,7 @@ mod models;
 mod output;
 mod processors;
 mod queue;
+mod registry;
 mod scheduler;
 mod settings;
 mod sidecar;
