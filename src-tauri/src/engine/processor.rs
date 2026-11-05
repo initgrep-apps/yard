@@ -149,6 +149,7 @@ const STDERR_TAIL_CHARS: usize = 500;
 const STDERR_TAIL_KEEP_BYTES: usize = 2048;
 const STDERR_DRAIN_CHUNK: usize = 4096;
 const DELIVER_COPY_CHUNK: usize = 65536;
+const STDOUT_CAPTURE_LIMIT: usize = 64 * 1024;
 
 /// Copies `from` to the final output path and reports completion. One
 /// enforcement point for the copy + send_progress(100) + result triple
@@ -354,15 +355,56 @@ pub fn run_sidecar(
     cancel_token: &CancellationToken,
     tolerated_exit: ToleratedExit,
 ) -> Result<(), CompressionError> {
+    run_sidecar_inner(
+        sidecar_path,
+        label,
+        args,
+        cancel_token,
+        tolerated_exit,
+        false,
+    )
+    .map(|_| ())
+}
+
+/// Runs a sidecar and captures its stdout (up to 64 KiB) for callers that
+/// need the tool's answer, such as `qpdf --show-npages`. stderr keeps the
+/// same bounded-tail contract as `run_sidecar`.
+pub fn run_sidecar_capture_stdout(
+    sidecar_path: &str,
+    label: &'static str,
+    args: &[String],
+    cancel_token: &CancellationToken,
+    tolerated_exit: ToleratedExit,
+) -> Result<(std::process::ExitStatus, String), CompressionError> {
+    let (status, stdout) = run_sidecar_inner(
+        sidecar_path,
+        label,
+        args,
+        cancel_token,
+        tolerated_exit,
+        true,
+    )?;
+    Ok((status, String::from_utf8_lossy(&stdout).into_owned()))
+}
+
+fn run_sidecar_inner(
+    sidecar_path: &str,
+    label: &'static str,
+    args: &[String],
+    cancel_token: &CancellationToken,
+    tolerated_exit: ToleratedExit,
+    capture_stdout: bool,
+) -> Result<(std::process::ExitStatus, Vec<u8>), CompressionError> {
     let mut command = std::process::Command::new(sidecar_path);
-    command
-        .args(args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped());
+    command.args(args).stderr(std::process::Stdio::piped());
+    if capture_stdout {
+        command.stdout(std::process::Stdio::piped());
+    } else {
+        command.stdout(std::process::Stdio::null());
+    }
     suppress_console_window(&mut command);
     prepend_engine_dir_to_path(&mut command, sidecar_path);
-    let mut child = command.spawn()
-        .map_err(|e| {
+    let mut child = command.spawn().map_err(|e| {
             CompressionError::SidecarFailed(format!("Failed to start {}: {}", label, e))
         })?;
 
@@ -387,6 +429,11 @@ pub fn run_sidecar(
         }
         tail
     });
+
+    let stdout_reader = child
+        .stdout
+        .take()
+        .map(|pipe| std::thread::spawn(move || capture_bounded_stdout(pipe, label)));
 
     let status = loop {
         match child.try_wait() {
@@ -420,6 +467,16 @@ pub fn run_sidecar(
             StderrTail::new()
         }
     };
+    let stdout = match stdout_reader {
+        Some(reader) => match reader.join() {
+            Ok(stdout) => stdout,
+            Err(_) => {
+                eprintln!("warn: {label} stdout capture thread panicked");
+                Vec::new()
+            }
+        },
+        None => Vec::new(),
+    };
 
     if !status.success() && !tolerated_exit(label, status.code()) {
         if cancel_token.is_cancelled() {
@@ -432,7 +489,29 @@ pub fn run_sidecar(
             stderr_tail(&tail)
         )));
     }
-    Ok(())
+    Ok((status, stdout))
+}
+
+fn capture_bounded_stdout(mut pipe: impl Read, label: &str) -> Vec<u8> {
+    let mut captured = Vec::new();
+    let mut buf = [0u8; STDERR_DRAIN_CHUNK];
+    loop {
+        match pipe.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                let remaining = STDOUT_CAPTURE_LIMIT.saturating_sub(captured.len());
+                captured.extend_from_slice(&buf[..n.min(remaining)]);
+            }
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                eprintln!("warn: {label}: stdout capture failed, answer partial: {e}");
+                break;
+            }
+        }
+    }
+    captured
 }
 
 pub trait CompressionProcessor: Send + Sync {
@@ -880,6 +959,72 @@ mod tests {
             "retained tail {} exceeds {STDERR_TAIL_KEEP_BYTES} bytes",
             tail.tail().len()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_stdout_is_capped_and_stderr_stays_bounded() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let chatty = dir.path().join("chatty");
+        fs::write(
+            &chatty,
+            r#"#!/bin/bash
+head -c 100000 /dev/zero | tr '\0' 'x'
+printf 'CAPTURE_TAIL\n' >&2
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&chatty, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let (status, stdout) = run_sidecar_capture_stdout(
+            chatty.to_str().unwrap(),
+            "qpdf",
+            &[],
+            &CancellationToken::new(),
+            strict_exit,
+        )
+        .unwrap();
+
+        assert!(status.success());
+        assert_eq!(
+            stdout.len(),
+            STDOUT_CAPTURE_LIMIT,
+            "stdout must be capped at 64 KiB but fully drained"
+        );
+        assert!(stdout.bytes().all(|b| b == b'x'));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_stdout_failure_still_reports_the_stderr_tail() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let failing = dir.path().join("failing");
+        fs::write(
+            &failing,
+            r#"#!/bin/bash
+printf 'STDOUT_ANSWER\n'
+printf 'STDERR_CAUSE\n' >&2
+exit 3
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&failing, fs::Permissions::from_mode(0o755)).unwrap();
+
+        match run_sidecar_capture_stdout(
+            failing.to_str().unwrap(),
+            "qpdf",
+            &[],
+            &CancellationToken::new(),
+            strict_exit,
+        ) {
+            Err(CompressionError::SidecarFailed(msg)) => {
+                assert!(msg.contains("exited with code Some(3)"), "msg: {msg}");
+                assert!(msg.contains("STDERR_CAUSE"), "msg: {msg}");
+            }
+            other => panic!("expected SidecarFailed, got {:?}", other.map(|_| ())),
+        }
     }
 
     #[test]
