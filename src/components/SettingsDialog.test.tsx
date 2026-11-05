@@ -31,6 +31,9 @@ import { toast } from "sonner"
 import type { Settings } from "@/types"
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }))
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(() => Promise.resolve(() => {})),
+}))
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }))
 vi.mock("sonner", () => ({
   toast: { error: vi.fn(), success: vi.fn(), dismiss: vi.fn() },
@@ -58,7 +61,7 @@ const baseSettings: Settings = {
     pdf: { minDpi: 72, minJpegQuality: 15 },
     document: { minMediaQuality: 40 },
   },
-  performance: { maxConcurrent: "auto" },
+  performance: { adaptiveMemory: true, memoryCeilingMb: 2048 },
   history: { retentionDays: 90 },
 }
 
@@ -942,5 +945,35 @@ describe("SettingsDialog", () => {
     await user.click(screen.getByRole("button", { name: "Clear history" }))
     await user.click(await screen.findByRole("button", { name: "Cancel" }))
     expect(clearHistory).not.toHaveBeenCalled()
+  })
+
+  it("shows memory stats and the configured ceiling in Performance", async () => {
+    vi.mocked(invoke).mockImplementation((command: string) => {
+      if (command === "get_settings") {
+        return Promise.resolve({
+          ...structuredClone(baseSettings),
+          performance: { adaptiveMemory: false, memoryCeilingMb: 512 },
+        })
+      }
+      if (command === "memory_stats") {
+        return Promise.resolve({
+          totalRamBytes: 16 * 1024 * 1024 * 1024,
+          budgetBytes: 512 * 1024 * 1024,
+          processRssBytes: 100 * 1024 * 1024,
+        })
+      }
+      return Promise.resolve(undefined)
+    })
+    render(<SettingsDialog open onOpenChange={vi.fn()} />)
+    await screen.findByRole("tab", { name: "General" })
+    fireEvent.click(screen.getByRole("tab", { name: "Performance" }))
+
+    expect(await screen.findByText("Total RAM")).toBeInTheDocument()
+    expect(
+      screen.getByLabelText("Memory ceiling in megabytes"),
+    ).toHaveDisplayValue("512")
+    expect(screen.getByText("16.0 GB")).toBeInTheDocument()
+    expect(screen.getByText("512.0 MB")).toBeInTheDocument()
+    expect(screen.getByText("100.0 MB")).toBeInTheDocument()
   })
 })

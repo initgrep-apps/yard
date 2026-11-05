@@ -96,7 +96,7 @@ const settings: Settings = {
     pdf: { minDpi: 72, minJpegQuality: 15 },
     document: { minMediaQuality: 40 },
   },
-  performance: { maxConcurrent: "auto" },
+  performance: { adaptiveMemory: true, memoryCeilingMb: 2048 },
   history: { retentionDays: 90 },
 }
 

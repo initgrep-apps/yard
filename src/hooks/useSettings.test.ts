@@ -41,7 +41,7 @@ const mockSettings: Settings = {
     pdf: { minDpi: 100, minJpegQuality: 55 },
     document: { minMediaQuality: 50 },
   },
-  performance: { maxConcurrent: 'auto' },
+  performance: { adaptiveMemory: true, memoryCeilingMb: 2048 },
   history: { retentionDays: 90 },
 }
 

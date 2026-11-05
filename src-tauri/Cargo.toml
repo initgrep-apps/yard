@@ -27,7 +27,8 @@ tauri-plugin-window-state = "2"
 tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["sync", "rt", "macros"] }
+tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
+sysinfo = "0.39"
 tokio-util = "0.7"
 uuid = { version = "1", features = ["v4"] }
 dirs = "7"

@@ -21,16 +21,21 @@ use std::task::Poll;
 
 pub struct LaneSpec<J> {
     pub key: String,
-    pub weight: u32,
     pub jobs: VecDeque<J>,
 }
 
-pub async fn run_weighted_lanes<J, F, Fut, S, C>(
+pub struct LaneJob {
+    pub file_id: String,
+    pub estimate: u64,
+}
+
+pub async fn run_budgeted_lanes<J, F, Fut, S, C, E>(
     mut lanes: Vec<LaneSpec<J>>,
-    max_slots: u32,
+    budget: u64,
     should_stop: S,
     mut run_job: F,
     mut on_skipped: C,
+    estimate: E,
 ) -> u64
 where
     J: Send + 'static,
@@ -38,10 +43,12 @@ where
     Fut: Future<Output = u64> + Send + 'static,
     S: Fn() -> bool + Send + Sync,
     C: FnMut(&J) + Send,
+    E: Fn(&J) -> u64 + Send + Sync,
 {
-    let mut used: u32 = 0;
+    let mut used: u64 = 0;
     let mut total: u64 = 0;
-    let mut inflight: Vec<(usize, u32, tokio::task::JoinHandle<u64>)> = Vec::new();
+    let mut inflight: Vec<(usize, u64, tokio::task::JoinHandle<u64>)> = Vec::new();
+    let mut oversize_warned = false;
 
     loop {
         let mut dispatched = false;
@@ -52,7 +59,22 @@ where
             if inflight.iter().any(|(i, _, _)| *i == idx) {
                 continue;
             }
-            if used + lanes[idx].weight > max_slots {
+            let job = lanes[idx].jobs.front().expect("checked non-empty");
+            let est = estimate(job);
+            let can_admit = if used + est <= budget {
+                true
+            } else if est > budget && inflight.is_empty() {
+                if !oversize_warned {
+                    oversize_warned = true;
+                    eprintln!(
+                        "warn: job estimate {est} exceeds memory budget {budget}; running oversize jobs alone to avoid deadlock"
+                    );
+                }
+                true
+            } else {
+                false
+            };
+            if !can_admit {
                 continue;
             }
             if should_stop() {
@@ -64,9 +86,9 @@ where
                 break;
             }
             let job = lanes[idx].jobs.pop_front().expect("checked non-empty");
-            used += lanes[idx].weight;
+            used = used.saturating_add(est);
             let handle = tokio::spawn(run_job(job));
-            inflight.push((idx, lanes[idx].weight, handle));
+            inflight.push((idx, est, handle));
             dispatched = true;
             break;
         }
@@ -84,12 +106,12 @@ where
                 Poll::Pending
             })
             .await;
-            let (_idx, weight, _) = inflight.remove(done);
+            let (_idx, est, _) = inflight.remove(done);
             let output = result.unwrap_or_else(|e| {
                 eprintln!("warn: lane job panicked, counting as 0: {e}");
                 0
             });
-            used = used.saturating_sub(weight);
+            used = used.saturating_sub(est);
             total += output;
         }
     }
@@ -108,8 +130,8 @@ mod tests {
     struct Probe {
         active: Arc<Mutex<HashMap<String, usize>>>,
         max_seen: Arc<Mutex<HashMap<String, usize>>>,
-        weight: Arc<Mutex<u32>>,
-        max_weight: Arc<Mutex<u32>>,
+        weight: Arc<Mutex<u64>>,
+        max_weight: Arc<Mutex<u64>>,
         order: Arc<Mutex<Vec<String>>>,
     }
 
@@ -124,7 +146,7 @@ mod tests {
             }
         }
 
-        fn enter(&self, lane: &str, job: &str, weight: u32) {
+        fn enter(&self, lane: &str, job: &str, weight: u64) {
             self.order.lock().unwrap().push(job.to_string());
             let n = {
                 let mut active = self.active.lock().unwrap();
@@ -142,7 +164,7 @@ mod tests {
             *max_w = (*max_w).max(*w);
         }
 
-        fn exit(&self, lane: &str, weight: u32) {
+        fn exit(&self, lane: &str, weight: u64) {
             let mut active = self.active.lock().unwrap();
             let n = active.get(lane).copied().unwrap_or(1);
             if n <= 1 {
@@ -155,26 +177,25 @@ mod tests {
             *w = w.saturating_sub(weight);
         }
 
-        fn max_weight(&self) -> u32 {
+        fn max_weight(&self) -> u64 {
             *self.max_weight.lock().unwrap()
         }
     }
 
-    fn make_lanes(spec: &[(&str, u32, Vec<&str>)]) -> Vec<LaneSpec<String>> {
+    fn make_lanes(spec: &[(&str, u64, Vec<&str>)]) -> Vec<LaneSpec<String>> {
         spec.iter()
-            .map(|(key, weight, jobs)| LaneSpec {
+            .map(|(key, _estimate, jobs)| LaneSpec {
                 key: key.to_string(),
-                weight: *weight,
                 jobs: jobs.iter().map(|j| format!("{key}:{j}")).collect(),
             })
             .collect()
     }
 
-    fn weight_of_lane(job: &str) -> u32 {
-        if job.starts_with("video:") { 2 } else { 1 }
+    fn estimate(job: &String) -> u64 {
+        if job.starts_with("video:") { 200 } else { 100 }
     }
 
-    fn job_future(probe: &Probe, job: String, weight: u32) -> impl Future<Output = u64> {
+    fn job_future(probe: &Probe, job: String, weight: u64) -> impl Future<Output = u64> {
         let probe = probe.clone();
         let (lane, _) = job.split_once(':').unwrap();
         let lane = lane.to_string();
@@ -184,60 +205,93 @@ mod tests {
                 tokio::task::yield_now().await;
             }
             probe.exit(&lane, weight);
-            u64::from(weight)
+            weight
         }
     }
 
     #[tokio::test]
     async fn same_category_never_runs_two_at_once() {
         let probe = Probe::new();
-        let lanes = make_lanes(&[("image", 1, vec!["a", "b", "c"])]);
+        let lanes = make_lanes(&[("image", 100, vec!["a", "b", "c"])]);
         let probe2 = probe.clone();
-        let total = run_weighted_lanes(lanes, 4, || false, move |j| {
-            job_future(&probe2, j, 1)
-        }, |_| {}).await;
-        assert_eq!(total, 3);
+        let total = run_budgeted_lanes(lanes, 1000, || false, move |j| {
+            let weight = estimate(&j);
+            job_future(&probe2, j, weight)
+        }, |_| {}, estimate).await;
+        assert_eq!(total, 300);
         assert_eq!(*probe.max_seen.lock().unwrap().get("image").unwrap(), 1);
     }
 
     #[tokio::test]
     async fn lanes_dispatch_oldest_first_within_budget() {
         let probe = Probe::new();
-        let lanes = make_lanes(&[("image", 1, vec!["a", "b"]), ("pdf", 1, vec!["p"])]);
+        let lanes = make_lanes(&[("image", 100, vec!["a", "b"]), ("pdf", 100, vec!["p"])]);
         let probe2 = probe.clone();
-        run_weighted_lanes(lanes, 3, || false, move |j| {
-            job_future(&probe2, j, 1)
-        }, |_| {}).await;
+        run_budgeted_lanes(lanes, 1000, || false, move |j| {
+            let weight = estimate(&j);
+            job_future(&probe2, j, weight)
+        }, |_| {}, estimate).await;
         let order = probe.order.lock().unwrap().clone();
         assert_eq!(order, vec!["image:a", "pdf:p", "image:b"]);
     }
 
     #[tokio::test]
-    async fn video_occupies_two_slots_video_plus_two_images_fill_n4() {
+    async fn video_occupies_more_budget_image_plus_video_fill_budget() {
         let probe = Probe::new();
         let lanes = make_lanes(&[
-            ("video", 2, vec!["v"]),
-            ("image", 1, vec!["i1"]),
-            ("image", 1, vec!["i2"]),
+            ("video", 200, vec!["v"]),
+            ("image", 100, vec!["i1"]),
+            ("image", 100, vec!["i2"]),
         ]);
         let probe2 = probe.clone();
-        run_weighted_lanes(lanes, 4, || false, move |j| {
-            let weight = weight_of_lane(&j);
+        run_budgeted_lanes(lanes, 400, || false, move |j| {
+            let weight = estimate(&j);
             job_future(&probe2, j, weight)
-        }, |_| {}).await;
+        }, |_| {}, estimate).await;
         assert_eq!(*probe.max_seen.lock().unwrap().get("video").unwrap(), 1);
         assert_eq!(*probe.max_seen.lock().unwrap().get("image").unwrap(), 2);
-        assert_eq!(probe.max_weight(), 4);
+        assert_eq!(probe.max_weight(), 400);
     }
 
     #[tokio::test]
-    async fn two_videos_do_not_overlap_at_n3() {
+    async fn scheduler_waits_when_estimate_exceeds_budget() {
         let probe = Probe::new();
-        let lanes = make_lanes(&[("video", 2, vec!["v1", "v2"])]);
+        let lanes = make_lanes(&[
+            ("video", 200, vec!["v1"]),
+            ("video", 200, vec!["v2"]),
+        ]);
         let probe2 = probe.clone();
-        run_weighted_lanes(lanes, 3, || false, move |j| {
-            job_future(&probe2, j, 2)
-        }, |_| {}).await;
+        let total = run_budgeted_lanes(lanes, 300, || false, move |j| {
+            let weight = estimate(&j);
+            job_future(&probe2, j, weight)
+        }, |_| {}, estimate).await;
+        assert_eq!(total, 400);
+        assert_eq!(*probe.max_seen.lock().unwrap().get("video").unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn oversize_job_runs_alone_instead_of_deadlocking() {
+        let lanes = make_lanes(&[("image", 100, vec!["big"])]);
+        let total = run_budgeted_lanes(lanes, 50, || false, |j| async move {
+            tokio::task::yield_now().await;
+            estimate(&j)
+        }, |_| {}, estimate).await;
+        assert_eq!(total, 100);
+    }
+
+    #[tokio::test]
+    async fn every_oversize_job_runs_alone_instead_of_deadlocking() {
+        let probe = Probe::new();
+        let lanes = make_lanes(&[
+            ("video", 200, vec!["v1"]),
+            ("video", 200, vec!["v2"]),
+        ]);
+        let probe2 = probe.clone();
+        let total = run_budgeted_lanes(lanes, 50, || false, move |j| {
+            let weight = estimate(&j);
+            job_future(&probe2, j, weight)
+        }, |_| {}, estimate).await;
+        assert_eq!(total, 400);
         assert_eq!(*probe.max_seen.lock().unwrap().get("video").unwrap(), 1);
     }
 
@@ -247,10 +301,10 @@ mod tests {
         let stop2 = stop.clone();
         let skipped = Arc::new(Mutex::new(Vec::new()));
         let skipped2 = skipped.clone();
-        let lanes = make_lanes(&[("image", 1, vec!["a", "b", "c"])]);
-        let total = run_weighted_lanes(
+        let lanes = make_lanes(&[("image", 100, vec!["a", "b", "c"])]);
+        let total = run_budgeted_lanes(
             lanes,
-            2,
+            200,
             move || stop2.load(std::sync::atomic::Ordering::SeqCst),
             |j| {
                 let stop = stop.clone();
@@ -261,6 +315,7 @@ mod tests {
                 }
             },
             move |j| skipped2.lock().unwrap().push(j.clone()),
+            estimate,
         )
         .await;
         assert_eq!(total, 1);
@@ -269,41 +324,42 @@ mod tests {
 
     #[tokio::test]
     async fn drains_to_empty_and_returns_sum() {
-        let lanes = make_lanes(&[("image", 1, vec!["a", "b"]), ("pdf", 1, vec!["p", "q"])]);
-        let total = run_weighted_lanes(lanes, 2, || false, |j| async move {
+        let lanes = make_lanes(&[("image", 100, vec!["a", "b"]), ("pdf", 100, vec!["p", "q"])]);
+        let total = run_budgeted_lanes(lanes, 200, || false, |j| async move {
             tokio::task::yield_now().await;
             if j.ends_with('a') || j.ends_with('p') { 3 } else { 4 }
-        }, |_| {}).await;
+        }, |_| {}, estimate).await;
         assert_eq!(total, 14);
     }
 
     #[tokio::test]
-    async fn never_exceeds_slot_budget() {
+    async fn never_exceeds_budget() {
         let probe = Probe::new();
         let lanes = make_lanes(&[
-            ("image", 1, vec!["a"]),
-            ("pdf", 1, vec!["p"]),
-            ("doc", 1, vec!["d"]),
-            ("video", 1, vec!["v"]),
+            ("image", 100, vec!["a"]),
+            ("pdf", 100, vec!["p"]),
+            ("doc", 100, vec!["d"]),
+            ("video", 200, vec!["v"]),
         ]);
         let probe2 = probe.clone();
-        let total = run_weighted_lanes(lanes, 2, || false, move |j| {
-            job_future(&probe2, j, 1)
-        }, |_| {}).await;
-        assert_eq!(total, 4);
-        assert_eq!(probe.max_weight(), 2);
+        let total = run_budgeted_lanes(lanes, 200, || false, move |j| {
+            let weight = estimate(&j);
+            job_future(&probe2, j, weight)
+        }, |_| {}, estimate).await;
+        assert_eq!(total, 500);
+        assert_eq!(probe.max_weight(), 200);
     }
 
     #[tokio::test]
     async fn panicking_job_does_not_kill_batch_or_sum() {
-        let lanes = make_lanes(&[("image", 1, vec!["a"]), ("pdf", 1, vec!["p"])]);
-        let total = run_weighted_lanes(lanes, 2, || false, |j| async move {
+        let lanes = make_lanes(&[("image", 100, vec!["a"]), ("pdf", 100, vec!["p"])]);
+        let total = run_budgeted_lanes(lanes, 200, || false, |j| async move {
             tokio::task::yield_now().await;
             if j.starts_with("image") {
                 panic!("boom");
             }
             7
-        }, |_| {}).await;
+        }, |_| {}, estimate).await;
         assert_eq!(total, 7);
     }
 
@@ -311,10 +367,10 @@ mod tests {
     async fn stop_before_start_skips_everything() {
         let skipped = Arc::new(Mutex::new(Vec::new()));
         let skipped2 = skipped.clone();
-        let lanes = make_lanes(&[("image", 1, vec!["a", "b"]), ("pdf", 1, vec!["p", "q"])]);
-        let total = run_weighted_lanes(lanes, 2, || true, |_j| async { 0u64 }, move |j| {
+        let lanes = make_lanes(&[("image", 100, vec!["a", "b"]), ("pdf", 100, vec!["p", "q"])]);
+        let total = run_budgeted_lanes(lanes, 200, || true, |_j| async { 0u64 }, move |j| {
             skipped2.lock().unwrap().push(j.clone())
-        })
+        }, estimate)
         .await;
         assert_eq!(total, 0);
         assert_eq!(
@@ -324,31 +380,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn two_videos_do_not_overlap_even_at_n4() {
+    async fn two_videos_do_not_overlap_even_with_large_budget() {
         let probe = Probe::new();
-        let lanes = make_lanes(&[("video", 2, vec!["v1", "v2"])]);
+        let lanes = make_lanes(&[("video", 200, vec!["v1", "v2"])]);
         let probe2 = probe.clone();
-        let total = run_weighted_lanes(lanes, 4, || false, move |j| {
-            job_future(&probe2, j, 2)
-        }, |_| {}).await;
-        assert_eq!(total, 4);
+        let total = run_budgeted_lanes(lanes, 1000, || false, move |j| {
+            let weight = estimate(&j);
+            job_future(&probe2, j, weight)
+        }, |_| {}, estimate).await;
+        assert_eq!(total, 400);
         assert_eq!(*probe.max_seen.lock().unwrap().get("video").unwrap(), 1);
     }
 
     #[tokio::test]
-    async fn frees_slots_as_soon_as_jobs_finish() {
+    async fn frees_budget_as_soon_as_jobs_finish() {
         let probe = Probe::new();
         let order = Arc::new(Mutex::new(Vec::new()));
         let lanes = make_lanes(&[
-            ("video", 2, vec!["v"]),
-            ("image", 1, vec!["i1", "i2"]),
+            ("video", 200, vec!["v"]),
+            ("image", 100, vec!["i1", "i2"]),
         ]);
         let probe2 = probe.clone();
         let order2 = order.clone();
-        run_weighted_lanes(lanes, 4, || false, move |j| {
+        run_budgeted_lanes(lanes, 300, || false, move |j| {
             let probe = probe2.clone();
             let order = order2.clone();
-            let weight = weight_of_lane(&j);
+            let weight = estimate(&j);
             let iterations: usize = if j.starts_with("video") { 50 } else { 1 };
             async move {
                 let lane = j.split_once(':').unwrap().0;
@@ -359,9 +416,9 @@ mod tests {
                 }
                 probe.exit(lane, weight);
                 order.lock().unwrap().push(format!("{j}:exit"));
-                u64::from(weight)
+                weight
             }
-        }, |_| {}).await;
+        }, |_| {}, estimate).await;
 
         let order = order.lock().unwrap().clone();
         let i2_enter = order.iter().position(|e| e == "image:i2");

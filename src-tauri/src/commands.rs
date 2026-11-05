@@ -304,6 +304,12 @@ pub fn open_folder<R: tauri::Runtime>(
         .map_err(|e| format!("Could not open folder {}: {}", path, e))
 }
 
+#[tauri::command]
+pub fn memory_stats<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> crate::memory::MemoryStats {
+    let settings = load_settings(&app);
+    crate::memory::memory_stats(&settings.performance)
+}
+
 #[cfg(test)]
 pub(crate) fn mock_test_context(
     dirs_override: tauri::utils::config::AppDirectoriesOverride,

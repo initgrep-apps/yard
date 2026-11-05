@@ -55,11 +55,13 @@ import {
 } from "@/components/ui/select"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { NumberStepper } from "@/components/NumberStepper"
+import { useMemory } from "@/hooks/useMemory"
 import { useSettings } from "@/hooks/useSettings"
 import { useHistoryContext } from "@/providers/HistoryProvider"
 import type {
   Category,
   CategoryTarget,
+  PerformanceSettings,
   QualityFloors,
   Settings,
 } from "@/types"
@@ -340,41 +342,93 @@ function FloorsSection({ draft, onChange }: SectionProps) {
 }
 
 function PerformanceSection({ draft, onChange }: SectionProps) {
+  const { stats, batchUsage } = useMemory()
+  const setPerformance = (patch: Partial<PerformanceSettings>) =>
+    onChange({
+      ...draft,
+      performance: { ...draft.performance, ...patch },
+    })
+
   return (
     <FieldSet>
       <FieldLegend>Performance</FieldLegend>
       <FieldDescription>
-        How many files compress at once. Auto adapts to your machine (CPU
-        cores).
+        Memory budget controls how many files compress at once.
       </FieldDescription>
       <FieldGroup>
         <Field orientation="horizontal">
-          <FieldLabel>Simultaneous files</FieldLabel>
+          <FieldLabel>Memory mode</FieldLabel>
           <Select
-            value={draft.performance.maxConcurrent}
-            onValueChange={(maxConcurrent) => {
-              if (maxConcurrent !== null) {
-                onChange({
-                  ...draft,
-                  performance: { maxConcurrent },
-                })
+            value={draft.performance.adaptiveMemory ? 'adaptive' : 'manual'}
+            onValueChange={(mode) => {
+              if (mode !== null) {
+                setPerformance({ adaptiveMemory: mode === 'adaptive' })
               }
             }}
           >
-            <SelectTrigger aria-label="Simultaneous files" className="w-24">
+            <SelectTrigger aria-label="Memory mode" className="w-32">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="auto">Auto</SelectItem>
-              <SelectItem value="1">1</SelectItem>
-              <SelectItem value="2">2</SelectItem>
-              <SelectItem value="3">3</SelectItem>
+              <SelectItem value="adaptive">Adaptive</SelectItem>
+              <SelectItem value="manual">Manual</SelectItem>
             </SelectContent>
           </Select>
         </Field>
+        <Field orientation="horizontal">
+          <FieldLabel htmlFor="memory-ceiling">Memory ceiling</FieldLabel>
+          <NumberStepper
+            id="memory-ceiling"
+            value={draft.performance.memoryCeilingMb}
+            onValueChange={(memoryCeilingMb) =>
+              setPerformance({ memoryCeilingMb })
+            }
+            min={300}
+            max={2048}
+            ariaLabel="Memory ceiling in megabytes"
+            className="w-32"
+          />
+        </Field>
       </FieldGroup>
+      {stats && (
+        <div className={`mt-4 grid gap-2 text-sm ${batchUsage ? 'grid-cols-4' : 'grid-cols-3'}`}>
+          <div>
+            <div className="text-muted-foreground">Total RAM</div>
+            <div className="font-medium">{formatBytes(stats.totalRamBytes)}</div>
+          </div>
+          <div>
+            <div className="text-muted-foreground">Budget</div>
+            <div className="font-medium">
+              {formatBytes(batchUsage?.budgetBytes ?? stats.budgetBytes)}
+            </div>
+          </div>
+          <div>
+            <div className="text-muted-foreground">App RSS</div>
+            <div className="font-medium">
+              {formatBytes(batchUsage?.processRssBytes ?? stats.processRssBytes)}
+            </div>
+          </div>
+          {batchUsage && (
+            <div>
+              <div className="text-muted-foreground">Batch used</div>
+              <div className="font-medium">{formatBytes(batchUsage.usedBytes)}</div>
+            </div>
+          )}
+        </div>
+      )}
     </FieldSet>
   )
+}
+
+function formatBytes(bytes: number): string {
+  const units = ['B', 'KB', 'MB', 'GB']
+  let value = bytes
+  let unitIndex = 0
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024
+    unitIndex += 1
+  }
+  return `${value.toFixed(1)} ${units[unitIndex]}`
 }
 
 function HistorySection({ draft, onChange, clearHistory }: SectionProps & { clearHistory: () => Promise<void> }) {

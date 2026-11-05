@@ -15,6 +15,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
 
 const KB: u64 = 1024;
 const MB: u64 = 1024 * 1024;
@@ -85,15 +86,17 @@ impl DocumentQualityFloor {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct Performance {
-    pub max_concurrent: String,
+    pub adaptive_memory: bool,
+    pub memory_ceiling_mb: u32,
 }
 
 impl Default for Performance {
     fn default() -> Self {
         Performance {
-            max_concurrent: "auto".to_string(),
+            adaptive_memory: true,
+            memory_ceiling_mb: 2048,
         }
     }
 }
@@ -236,34 +239,24 @@ impl Settings {
             None => 0,
         }
     }
+}
 
-    pub fn resolve_max_concurrent(&self) -> u32 {
-        let cores = match std::thread::available_parallelism() {
-            Ok(n) => n.get() as u32,
-            Err(e) => {
-                eprintln!("warn: available_parallelism() failed, assuming 1 core: {e}");
-                1
-            }
-        };
-        self.resolve_max_concurrent_from(cores)
-    }
-
-    pub fn resolve_max_concurrent_from(&self, cores: u32) -> u32 {
-        let auto = (cores.max(1) / 2).clamp(1, 4);
-        match self.performance.max_concurrent.as_str() {
-            "1" => 1,
-            "2" => 2,
-            "3" => 3,
-            "auto" => auto,
-            raw => {
-                eprintln!("warn: invalid performance.maxConcurrent {raw:?}, using 1");
-                1
-            }
-        }
-    }
+fn warn_legacy_max_concurrent() {
+    static WARNED: OnceLock<()> = OnceLock::new();
+    WARNED.get_or_init(|| {
+        eprintln!("warn: legacy performance.maxConcurrent ignored; use adaptiveMemory and memoryCeilingMb");
+    });
 }
 
 pub fn parse_settings_value(value: Option<serde_json::Value>) -> Settings {
+    if let Some(ref v) = value {
+        if v.get("performance")
+            .and_then(|p| p.get("maxConcurrent"))
+            .is_some()
+        {
+            warn_legacy_max_concurrent();
+        }
+    }
     match value {
         Some(v) => serde_json::from_value(v).unwrap_or_else(|e| {
             eprintln!("warn: settings parse failed, using defaults: {e}");
@@ -382,41 +375,18 @@ mod tests {
     }
 
     #[test]
-    fn performance_defaults_to_auto() {
+    fn performance_defaults_to_adaptive_2048() {
         let s = Settings::default();
-        assert_eq!(s.performance.max_concurrent, "auto");
-    }
-
-    #[test]
-    fn resolve_max_concurrent_auto_clamps_cores() {
-        let s = Settings::default();
-        assert_eq!(s.resolve_max_concurrent_from(1), 1);
-        assert_eq!(s.resolve_max_concurrent_from(2), 1);
-        assert_eq!(s.resolve_max_concurrent_from(3), 1);
-        assert_eq!(s.resolve_max_concurrent_from(4), 2);
-        assert_eq!(s.resolve_max_concurrent_from(8), 4);
-        assert_eq!(s.resolve_max_concurrent_from(16), 4);
-        assert_eq!(s.resolve_max_concurrent_from(0), 1);
-    }
-
-    #[test]
-    fn resolve_max_concurrent_manual_verbatim() {
-        let mut s = Settings::default();
-        for (raw, want) in [("1", 1), ("2", 2), ("3", 3), ("5", 1), ("", 1)] {
-            s.performance.max_concurrent = raw.to_string();
-            assert_eq!(s.resolve_max_concurrent_from(16), want, "raw={raw}");
-        }
-        for (raw, want) in [("1", 1), ("2", 2), ("3", 3)] {
-            s.performance.max_concurrent = raw.to_string();
-            assert_eq!(s.resolve_max_concurrent_from(1), want, "raw={raw}");
-        }
+        assert!(s.performance.adaptive_memory);
+        assert_eq!(s.performance.memory_ceiling_mb, 2048);
     }
 
     #[test]
     fn performance_serde_roundtrip_camel_case() {
         let value = serde_json::to_value(Settings::default()).unwrap();
         let perf = value.get("performance").unwrap();
-        assert!(perf.get("maxConcurrent").is_some());
+        assert!(perf.get("adaptiveMemory").is_some());
+        assert!(perf.get("memoryCeilingMb").is_some());
         let roundtripped: Settings = serde_json::from_value(value).unwrap();
         assert_eq!(Settings::default(), roundtripped);
     }
@@ -425,7 +395,8 @@ mod tests {
     fn parse_settings_value_missing_performance_fills_default() {
         let partial = serde_json::json!({ "outputFolder": "/tmp/out" });
         let parsed = parse_settings_value(Some(partial));
-        assert_eq!(parsed.performance.max_concurrent, "auto");
+        assert!(parsed.performance.adaptive_memory);
+        assert_eq!(parsed.performance.memory_ceiling_mb, 2048);
     }
 
     #[test]
@@ -434,7 +405,27 @@ mod tests {
             "outputFolder": "/x",
             "performance": {}
         });
-        assert_eq!(parse_settings_value(Some(corrupt)), Settings::default());
+        let parsed = parse_settings_value(Some(corrupt));
+        assert_eq!(parsed.output_folder, "/x");
+        assert_eq!(parsed.performance, Performance::default());
+    }
+
+    #[test]
+    fn old_settings_with_max_concurrent_still_load() {
+        let legacy = serde_json::json!({
+            "outputFolder": "/custom/out",
+            "categoryTargets": { "image": { "size": 300, "unit": "KB" } },
+            "performance": { "maxConcurrent": "3" }
+        });
+        let parsed = parse_settings_value(Some(legacy));
+        assert_eq!(parsed.output_folder, "/custom/out");
+        assert_eq!(
+            parsed.category_targets.get("image").unwrap().size,
+            300,
+            "unrelated fields preserved"
+        );
+        assert!(parsed.performance.adaptive_memory);
+        assert_eq!(parsed.performance.memory_ceiling_mb, 2048);
     }
 
     #[test]

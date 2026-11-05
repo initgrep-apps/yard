@@ -57,10 +57,9 @@ export interface QualityFloors {
   document: { minMediaQuality: number }
 }
 
-export type MaxConcurrent = 'auto' | '1' | '2' | '3'
-
 export interface PerformanceSettings {
-  maxConcurrent: MaxConcurrent
+  adaptiveMemory: boolean
+  memoryCeilingMb: number
 }
 
 export interface HistorySettings {

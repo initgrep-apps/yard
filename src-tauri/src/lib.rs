@@ -18,6 +18,7 @@ mod commands;
 mod detection;
 mod engine;
 mod history;
+mod memory;
 mod models;
 mod output;
 mod processors;
@@ -186,6 +187,7 @@ macro_rules! invoke_handlers {
             commands::get_history,
             commands::clear_history,
             commands::open_folder,
+            commands::memory_stats,
             commands::quit,
         ]
     };

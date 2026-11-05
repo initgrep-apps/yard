@@ -137,6 +137,8 @@ pub struct QueueState<R: Runtime = tauri::Wry> {
     history_records: Mutex<HashMap<String, Vec<FileResultRecord>>>,
     history_error_sent: Mutex<HashSet<String>>,
     sender: mpsc::UnboundedSender<BatchMessage>,
+    #[cfg(test)]
+    test_estimate: Mutex<Option<fn(crate::models::Category, u64, Option<u32>) -> u64>>,
     _runtime: std::marker::PhantomData<fn() -> R>,
 }
 
@@ -155,6 +157,8 @@ impl<R: Runtime> QueueState<R> {
             history_records: Mutex::new(HashMap::new()),
             history_error_sent: Mutex::new(HashSet::new()),
             sender,
+            #[cfg(test)]
+            test_estimate: Mutex::new(None),
             _runtime: std::marker::PhantomData,
         }
     }
@@ -202,6 +206,17 @@ impl<R: Runtime> QueueState<R> {
             .is_some_and(|t| t.is_cancelled())
     }
 
+    fn estimate_entry(&self, entry: &FileEntry) -> u64 {
+        #[cfg(test)]
+        {
+            self.estimate_for(entry.category, entry.original_size, None)
+        }
+        #[cfg(not(test))]
+        {
+            crate::memory::estimate_job(entry.category, entry.original_size, None)
+        }
+    }
+
     fn insert_token(&self, file_id: &str, token: CancellationToken) {
         poison_recover(self.token_map.lock()).insert(file_id.to_string(), token);
     }
@@ -223,6 +238,18 @@ impl<R: Runtime> QueueState<R> {
     #[cfg(test)]
     fn history_error_pending(&self, batch_id: &str) -> bool {
         poison_recover(self.history_error_sent.lock()).contains(batch_id)
+    }
+
+    #[cfg(test)]
+    fn set_test_estimate(&self, estimate: fn(crate::models::Category, u64, Option<u32>) -> u64) {
+        *poison_recover(self.test_estimate.lock()) = Some(estimate);
+    }
+
+    #[cfg(test)]
+    fn estimate_for(&self, category: crate::models::Category, input_size: u64, width: Option<u32>) -> u64 {
+        poison_recover(self.test_estimate.lock())
+            .map(|f| f(category, input_size, width))
+            .unwrap_or_else(|| crate::memory::estimate_job(category, input_size, width))
     }
 
     #[cfg(test)]
@@ -313,21 +340,56 @@ impl<R: Runtime> QueueState<R> {
         let queue = app.state::<QueueState<R>>();
         let state = app.state::<FileListState>();
 
-        // Preflight: the output folder must be writable before the batch starts
         let settings = crate::commands::load_settings(app);
         let output_folder = settings.output_folder.clone();
+
         if let Err(e) = ensure_output_folder_writable(&output_folder) {
-            poison_recover(queue.history_records.lock()).remove(&batch_id);
-            poison_recover(queue.history_error_sent.lock()).remove(&batch_id);
-            poison_recover(queue.batch_tokens.lock()).remove(&batch_id);
-            let _ = app.emit(
-                "batch:error",
-                serde_json::json!({ "batchId": batch_id, "errorMessage": e }),
-            );
+            Self::fail_preflight(app, &queue, &batch_id, e);
             return;
         }
 
-        let max_concurrent = settings.resolve_max_concurrent();
+        let (estimates, largest_output, largest_estimate) = {
+            let list = poison_recover(state.0.lock());
+            let mut estimates = HashMap::new();
+            let mut largest_output = 0u64;
+            let mut largest_estimate = 0u64;
+            for file_id in &file_ids {
+                let Some(entry) = list
+                    .iter()
+                    .find(|e| &e.id == file_id && e.status == FileStatus::Pending)
+                else {
+                    continue;
+                };
+                let est = queue.estimate_entry(entry);
+                estimates.insert(file_id.clone(), est);
+                largest_output = largest_output.max(entry.original_size);
+                largest_estimate = largest_estimate.max(est);
+            }
+            (estimates, largest_output, largest_estimate)
+        };
+
+        let output_need = largest_output.saturating_mul(11) / 10;
+        if let Err(e) = crate::memory::check_disk_headroom(
+            output_need,
+            crate::memory::available_space(std::path::Path::new(&output_folder)),
+        ) {
+            Self::fail_preflight(app, &queue, &batch_id, e);
+            return;
+        }
+
+        let temp_base = app
+            .path()
+            .temp_dir()
+            .map(|p| p.join("yard"))
+            .unwrap_or_else(|_| std::env::temp_dir().join("yard"));
+        let temp_need = largest_estimate / 2;
+        if let Err(e) = crate::memory::check_disk_headroom(
+            temp_need,
+            crate::memory::available_space(&temp_base),
+        ) {
+            Self::fail_preflight(app, &queue, &batch_id, e);
+            return;
+        }
 
         let started = SessionStartRecord {
             session_id: batch_id.clone(),
@@ -337,38 +399,12 @@ impl<R: Runtime> QueueState<R> {
         };
         let _ = append_history(app, HistoryRecordRef::SessionStart(&started));
 
-        if max_concurrent <= 1 {
-            let mut total_saved: u64 = 0;
-            let reserved = crate::output::ReservedNames::new();
-            for file_id in file_ids {
-                // Cancel-all stops the remaining queue
-                if queue.batch_cancelled(&batch_id) {
-                    let entry = {
-                        let mut list = poison_recover(state.0.lock());
-                        cancel_skip_entry(&mut list, &file_id)
-                    };
-                    if let Some(entry) = entry {
-                        queue.record_cancelled(app, &batch_id, &entry, 0);
-                    }
-                    emit_file_cancelled(app, &file_id);
-                    continue;
-                }
-                total_saved += Self::process_single_job(
-                    app.clone(),
-                    batch_id.clone(),
-                    file_id,
-                    output_folder.clone(),
-                    settings.clone(),
-                    &reserved,
-                )
-                .await;
-            }
-            Self::finish_batch(app, &batch_id, total_saved);
-            return;
-        }
+        let budget = crate::memory::derive_budget(&settings.performance);
 
         let reserved = std::sync::Arc::new(crate::output::ReservedNames::new());
-        let (lanes, placed) = group_lanes(&state, &file_ids);
+        let (lanes, placed) = group_lanes(&state, &file_ids, |entry| {
+            estimates.get(&entry.id).copied().unwrap_or_else(|| queue.estimate_entry(entry))
+        });
 
         let unplaced_cancelled: Vec<FileEntry> = {
             let list = poison_recover(state.0.lock());
@@ -398,45 +434,85 @@ impl<R: Runtime> QueueState<R> {
         let run_folder = output_folder.clone();
         let run_settings = settings.clone();
         let run_reserved = reserved.clone();
+        let used = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let emit_app = app.clone();
+        let emit_used = used.clone();
+        let emit_batch_id = batch_id.clone();
+        let emit_handle = tauri::async_runtime::spawn(async move {
+            let emit_queue = emit_app.state::<QueueState<R>>();
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+            loop {
+                interval.tick().await;
+                if emit_queue.batch_cancelled(&emit_batch_id) {
+                    break;
+                }
+                let _ = emit_app.emit(
+                    "memory:usage",
+                    serde_json::json!({
+                        "budgetBytes": budget,
+                        "usedBytes": emit_used.load(std::sync::atomic::Ordering::SeqCst),
+                        "processRssBytes": crate::memory::process_rss(),
+                    }),
+                );
+            }
+        });
+
         let skip_app = app.clone();
         let skip_batch_id = batch_id.clone();
         let skip_state = app.state::<FileListState>();
-        let total_saved = scheduler::run_weighted_lanes(
+        let total_saved = scheduler::run_budgeted_lanes(
             lanes,
-            max_concurrent,
+            budget,
             stop_flag,
-            move |file_id| {
+            move |job| {
                 let app = run_app.clone();
                 let batch_id = run_batch_id.clone();
                 let output_folder = run_folder.clone();
                 let settings = run_settings.clone();
                 let reserved = run_reserved.clone();
+                let used = used.clone();
                 async move {
-                    Self::process_single_job(
+                    used.fetch_add(job.estimate, std::sync::atomic::Ordering::SeqCst);
+                    let result = Self::process_single_job(
                         app,
                         batch_id,
-                        file_id,
+                        job.file_id,
                         output_folder,
                         settings,
                         &reserved,
                     )
-                    .await
+                    .await;
+                    used.fetch_sub(job.estimate, std::sync::atomic::Ordering::SeqCst);
+                    result
                 }
             },
-            move |file_id| {
-                emit_file_cancelled(&skip_app, &file_id);
+            move |job| {
+                emit_file_cancelled(&skip_app, &job.file_id);
                 let entry = {
                     let mut list = poison_recover(skip_state.0.lock());
-                    cancel_skip_entry(&mut list, file_id)
+                    cancel_skip_entry(&mut list, &job.file_id)
                 };
                 if let Some(entry) = entry {
                     let queue = skip_app.state::<QueueState<R>>();
                     queue.record_cancelled(&skip_app, &skip_batch_id, &entry, 0);
                 }
             },
+            |job| job.estimate,
         )
         .await;
+        emit_handle.abort();
+        let _ = emit_handle.await;
         Self::finish_batch(app, &batch_id, total_saved);
+    }
+
+    fn fail_preflight(app: &AppHandle<R>, queue: &tauri::State<'_, QueueState<R>>, batch_id: &str, error: String) {
+        poison_recover(queue.history_records.lock()).remove(batch_id);
+        poison_recover(queue.history_error_sent.lock()).remove(batch_id);
+        poison_recover(queue.batch_tokens.lock()).remove(batch_id);
+        let _ = app.emit(
+            "batch:error",
+            serde_json::json!({ "batchId": batch_id, "errorMessage": error }),
+        );
     }
 
     async fn process_single_job(
@@ -869,16 +945,13 @@ fn category_key(category: &crate::models::Category) -> &'static str {
     }
 }
 
-fn lane_weight(category: &crate::models::Category) -> u32 {
-    if matches!(category, crate::models::Category::Video) { 2 } else { 1 }
-}
-
 fn group_lanes(
     state: &tauri::State<'_, FileListState>,
     file_ids: &[String],
-) -> (Vec<scheduler::LaneSpec<String>>, HashSet<String>) {
+    estimate: impl Fn(&FileEntry) -> u64,
+) -> (Vec<scheduler::LaneSpec<scheduler::LaneJob>>, HashSet<String>) {
     let list = poison_recover(state.0.lock());
-    let mut lanes: Vec<scheduler::LaneSpec<String>> = Vec::new();
+    let mut lanes: Vec<scheduler::LaneSpec<scheduler::LaneJob>> = Vec::new();
     let mut placed: HashSet<String> = HashSet::new();
     for file_id in file_ids {
         let Some(entry) = list
@@ -889,13 +962,16 @@ fn group_lanes(
         };
         placed.insert(file_id.clone());
         let key = category_key(&entry.category).to_string();
+        let job = scheduler::LaneJob {
+            file_id: file_id.clone(),
+            estimate: estimate(entry),
+        };
         if let Some(lane) = lanes.iter_mut().find(|l| l.key == key) {
-            lane.jobs.push_back(file_id.clone());
+            lane.jobs.push_back(job);
         } else {
             lanes.push(scheduler::LaneSpec {
                 key,
-                weight: lane_weight(&entry.category),
-                jobs: std::collections::VecDeque::from(vec![file_id.clone()]),
+                jobs: std::collections::VecDeque::from(vec![job]),
             });
         }
     }
@@ -1292,8 +1368,16 @@ mod tests {
         app
     }
 
+    fn fixed_estimate(category: crate::models::Category, _input: u64, _width: Option<u32>) -> u64 {
+        const MIB: u64 = 1024 * 1024;
+        match category {
+            crate::models::Category::Video => 600 * MIB,
+            _ => 300 * MIB,
+        }
+    }
+
     fn setup_app(
-        max_concurrent: &str,
+        budget_mb: u32,
     ) -> (
         tempfile::TempDir,
         tauri::App<tauri::test::MockRuntime>,
@@ -1306,9 +1390,11 @@ mod tests {
             root.path(),
             serde_json::json!({
                 "outputFolder": out.to_str().unwrap(),
-                "performance": { "maxConcurrent": max_concurrent }
+                "performance": { "adaptiveMemory": false, "memoryCeilingMb": budget_mb }
             }),
         );
+        app.state::<QueueState<tauri::test::MockRuntime>>()
+            .set_test_estimate(fixed_estimate);
         (root, app, out)
     }
 
@@ -1368,9 +1454,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn n1_matches_legacy_sequential_order() {
+    async fn tight_budget_runs_one_job_at_a_time() {
         let _temp_guard = temp_guard();
-        let (_root, app, _out) = setup_app("1");
+        let (_root, app, _out) = setup_app(450);
         let ids = add_entries(&app, &[
             ("a.jpg", crate::models::Category::Image, "/tmp/a.jpg"),
             ("b.pdf", crate::models::Category::Pdf, "/tmp/b.pdf"),
@@ -1386,15 +1472,15 @@ mod tests {
             assert_eq!(topic, "file:error", "missing sidecars fail every job; got {topic} {payload}");
             order.push(payload["fileId"].as_str().unwrap().to_string());
         }
-        assert_eq!(order, ids, "N=1 completion order must equal batch order");
+        assert_eq!(order, ids, "one-job-at-a-time order must equal batch order");
         let (topic, _) = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
         assert_eq!(topic, "batch:complete");
     }
 
     #[tokio::test]
-    async fn video_occupies_two_slots_image_waits_at_n2() {
+    async fn video_estimate_blocks_image_until_lane_drains() {
         let _temp_guard = temp_guard();
-        let (_root, app, _out) = setup_app("2");
+        let (_root, app, _out) = setup_app(600);
         let ids = add_entries(&app, &[
             ("v1.mp4", crate::models::Category::Video, "/tmp/v1.mp4"),
             ("v2.mp4", crate::models::Category::Video, "/tmp/v2.mp4"),
@@ -1409,13 +1495,13 @@ mod tests {
             let (_, payload) = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
             order.push(payload["fileId"].as_str().unwrap().to_string());
         }
-        assert_eq!(order, ids, "video lane drains (2 slots each) before the image lane dispatches");
+        assert_eq!(order, ids, "a 600 MiB video estimate fills the whole 600 MiB budget");
     }
 
     #[tokio::test]
     async fn cancel_all_mid_batch_marks_pending_cancelled_across_lanes() {
         let _temp_guard = temp_guard();
-        let (_root, app, _out) = setup_app("3");
+        let (_root, app, _out) = setup_app(900);
         let ids = add_entries(&app, &[
             ("i1.jpg", crate::models::Category::Image, "/tmp/i1.jpg"),
             ("i2.jpg", crate::models::Category::Image, "/tmp/i2.jpg"),
@@ -1478,9 +1564,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_all_across_lanes_cleans_each_jobs_temp_and_frees_slots() {
+    async fn cancel_all_across_lanes_cleans_each_jobs_temp_and_frees_budget() {
         let _temp_guard = temp_guard();
-        let (_root, app, _out) = setup_app("3");
+        let (_root, app, _out) = setup_app(900);
         let ids = add_entries(&app, &[
             ("i1.jpg", crate::models::Category::Image, "/tmp/i1.jpg"),
             ("i2.jpg", crate::models::Category::Image, "/tmp/i2.jpg"),
@@ -1548,7 +1634,7 @@ mod tests {
     #[tokio::test]
     async fn single_failure_does_not_stop_lane_or_batch() {
         let _temp_guard = temp_guard();
-        let (_root, app, _out) = setup_app("3");
+        let (_root, app, _out) = setup_app(900);
         let ids = add_entries(&app, &[
             ("a.jpg", crate::models::Category::Image, "/tmp/a.jpg"),
             ("b.pdf", crate::models::Category::Pdf, "/tmp/b.pdf"),
@@ -1570,7 +1656,7 @@ mod tests {
     #[tokio::test]
     async fn batch_complete_fires_once_after_all_lanes_drain() {
         let _temp_guard = temp_guard();
-        let (_root, app, _out) = setup_app("3");
+        let (_root, app, _out) = setup_app(900);
         let ids = add_entries(&app, &[
             ("a.jpg", crate::models::Category::Image, "/tmp/a.jpg"),
             ("b.pdf", crate::models::Category::Pdf, "/tmp/b.pdf"),
@@ -1593,7 +1679,7 @@ mod tests {
         use std::io::Write;
 
         let _temp_guard = temp_guard();
-        let (root, app, _out) = setup_app("2");
+        let (root, app, _out) = setup_app(600);
 
         let mut docx_paths = Vec::new();
         for i in 0..2 {
@@ -1798,7 +1884,7 @@ mod tests {
     #[tokio::test]
     async fn lane_pending_cancelled_entry_recorded_once() {
         let _temp_guard = temp_guard();
-        let (_root, app, _out) = setup_app("3");
+        let (_root, app, _out) = setup_app(900);
         let ids = add_entries(&app, &[
             ("i1.jpg", crate::models::Category::Image, "/tmp/i1.jpg"),
             ("i2.jpg", crate::models::Category::Image, "/tmp/i2.jpg"),
@@ -1857,7 +1943,7 @@ mod tests {
     #[tokio::test]
     async fn queued_entry_individually_cancelled_records_on_dispatch() {
         let _temp_guard = temp_guard();
-        let (_root, app, out) = setup_app("3");
+        let (_root, app, out) = setup_app(900);
         let ids = add_entries(&app, &[
             ("queued.jpg", crate::models::Category::Image, "/tmp/queued.jpg"),
         ]);
@@ -1898,7 +1984,7 @@ mod tests {
     #[tokio::test]
     async fn failed_batch_writes_session_records() {
         let _temp_guard = temp_guard();
-        let (_root, app, _out) = setup_app("1");
+        let (_root, app, _out) = setup_app(450);
         let ids = add_entries(&app, &[
             ("a.jpg", crate::models::Category::Image, "/tmp/a.jpg"),
             ("b.jpg", crate::models::Category::Image, "/tmp/b.jpg"),
@@ -1971,7 +2057,7 @@ mod tests {
         use std::io::Write;
 
         let _temp_guard = temp_guard();
-        let (root, app, out) = setup_app("1");
+        let (root, app, out) = setup_app(450);
 
         let src = root.path().join("src");
         std::fs::create_dir_all(&src).unwrap();
@@ -2141,7 +2227,7 @@ mod tests {
     #[tokio::test]
     async fn done_entry_not_recorded_on_skip_path() {
         let _temp_guard = temp_guard();
-        let (_root, app, _out) = setup_app("3");
+        let (_root, app, _out) = setup_app(900);
         let ids = add_entries(&app, &[
             ("stale.jpg", crate::models::Category::Image, "/tmp/stale.jpg"),
             ("fresh.jpg", crate::models::Category::Image, "/tmp/fresh.jpg"),
@@ -2175,7 +2261,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_all_records_cancelled_files() {
         let _temp_guard = temp_guard();
-        let (_root, app, _out) = setup_app("3");
+        let (_root, app, _out) = setup_app(900);
         let ids = add_entries(&app, &[
             ("i1.jpg", crate::models::Category::Image, "/tmp/i1.jpg"),
             ("i2.jpg", crate::models::Category::Image, "/tmp/i2.jpg"),
@@ -2225,7 +2311,7 @@ mod tests {
     #[tokio::test]
     async fn batch_complete_payload_carries_cancelled_flag() {
         let _temp_guard = temp_guard();
-        let (_root, app, _out) = setup_app("1");
+        let (_root, app, _out) = setup_app(450);
         let queue = app.state::<QueueState<tauri::test::MockRuntime>>();
 
         let ids = add_entries(&app, &[("a.jpg", crate::models::Category::Image, "/tmp/a.jpg")]);
@@ -2276,7 +2362,7 @@ mod tests {
     #[tokio::test]
     async fn sequential_cancel_all_records_cancelled() {
         let _temp_guard = temp_guard();
-        let (_root, app, _out) = setup_app("1");
+        let (_root, app, _out) = setup_app(450);
         let ids = add_entries(&app, &[
             ("a.jpg", crate::models::Category::Image, "/tmp/a.jpg"),
             ("b.jpg", crate::models::Category::Image, "/tmp/b.jpg"),
@@ -2323,7 +2409,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_skipped_records_have_zero_duration_and_no_output() {
         let _temp_guard = temp_guard();
-        let (root, app, _out) = setup_app("3");
+        let (root, app, _out) = setup_app(900);
         let real = root.path().join("real.jpg");
         std::fs::write(&real, vec![7u8; 1024]).unwrap();
         let ids = add_entries(&app, &[
@@ -2392,7 +2478,7 @@ mod tests {
     #[tokio::test]
     async fn unsupported_outcome_recorded() {
         let _temp_guard = temp_guard();
-        let (root, app, _out) = setup_app("1");
+        let (root, app, _out) = setup_app(450);
         let path = root.path().join("weird.xyz");
         std::fs::write(&path, vec![1u8; 512]).unwrap();
         let ids = add_entries(&app, &[
@@ -2432,7 +2518,7 @@ mod tests {
             root.path(),
             serde_json::json!({
                 "outputFolder": out.to_str().unwrap(),
-                "performance": { "maxConcurrent": "1" }
+                "performance": { "adaptiveMemory": false, "memoryCeilingMb": 450 }
             }),
         );
         let ids = add_entries(&app, &[
@@ -2481,7 +2567,7 @@ mod tests {
             root.path(),
             serde_json::json!({
                 "outputFolder": out.to_str().unwrap(),
-                "performance": { "maxConcurrent": "3" }
+                "performance": { "adaptiveMemory": false, "memoryCeilingMb": 900 }
             }),
         );
         let ids = add_entries(&app, &[
@@ -2518,7 +2604,7 @@ mod tests {
             root.path(),
             serde_json::json!({
                 "outputFolder": out.to_str().unwrap(),
-                "performance": { "maxConcurrent": "1" }
+                "performance": { "adaptiveMemory": false, "memoryCeilingMb": 450 }
             }),
         );
         let rx = events_of(&app.handle(), &["file:error", "history:error", "batch:complete"]);
@@ -2559,7 +2645,7 @@ mod tests {
     #[tokio::test]
     async fn history_records_accumulator_cleared_after_batch() {
         let _temp_guard = temp_guard();
-        let (_root, app, _out) = setup_app("1");
+        let (_root, app, _out) = setup_app(450);
         let first = add_entries(&app, &[
             ("a.jpg", crate::models::Category::Image, "/tmp/a.jpg"),
         ]);
@@ -2606,7 +2692,7 @@ mod tests {
             root.path(),
             serde_json::json!({
                 "outputFolder": out.to_str().unwrap(),
-                "performance": { "maxConcurrent": "1" },
+                "performance": { "adaptiveMemory": false, "memoryCeilingMb": 450 },
                 "history": { "retentionDays": 10 }
             }),
         );
@@ -2650,7 +2736,7 @@ mod tests {
             root.path(),
             serde_json::json!({
                 "outputFolder": out.to_str().unwrap(),
-                "performance": { "maxConcurrent": "3" }
+                "performance": { "adaptiveMemory": false, "memoryCeilingMb": 900 }
             }),
             false,
         );
@@ -2690,7 +2776,7 @@ mod tests {
             root.path(),
             serde_json::json!({
                 "outputFolder": out.to_str().unwrap(),
-                "performance": { "maxConcurrent": "1" },
+                "performance": { "adaptiveMemory": false, "memoryCeilingMb": 450 },
                 "history": { "retentionDays": 10 }
             }),
         );
@@ -2716,7 +2802,7 @@ mod tests {
     #[tokio::test]
     async fn session_start_output_folder_matches_settings() {
         let _temp_guard = temp_guard();
-        let (_root, app, out) = setup_app("1");
+        let (_root, app, out) = setup_app(450);
         let ids = add_entries(&app, &[
             ("a.jpg", crate::models::Category::Image, "/tmp/a.jpg"),
         ]);
@@ -2736,7 +2822,7 @@ mod tests {
     #[tokio::test]
     async fn duration_ms_positive_for_processed_outcome() {
         let _temp_guard = temp_guard();
-        let (_root, app, _out) = setup_app("1");
+        let (_root, app, _out) = setup_app(450);
         let ids = add_entries(&app, &[
             ("a.jpg", crate::models::Category::Image, "/tmp/a.jpg"),
         ]);
@@ -2760,7 +2846,7 @@ mod tests {
     #[tokio::test]
     async fn panic_is_caught_and_reported_as_file_error() {
         let _temp_guard = temp_guard();
-        let (_root, app, out) = setup_app("1");
+        let (_root, app, out) = setup_app(450);
 
         struct PanicProcessor;
         impl CompressionProcessor for PanicProcessor {
