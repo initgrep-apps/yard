@@ -21,11 +21,9 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 #[cfg(test)]
-use std::sync::atomic::Ordering;
-
-#[cfg(test)]
 thread_local! {
     static OPEN_ENTRIES: std::cell::RefCell<usize> = std::cell::RefCell::new(0);
+    static MAX_OPEN_ENTRIES: std::cell::RefCell<usize> = std::cell::RefCell::new(0);
     static FINISH_COUNT: std::cell::RefCell<usize> = std::cell::RefCell::new(0);
 }
 
@@ -226,7 +224,14 @@ pub fn extract_media(
             CompressionError::SidecarFailed(CORRUPT.to_string())
         })?;
         #[cfg(test)]
-        OPEN_ENTRIES.with(|c| *c.borrow_mut() += 1);
+        OPEN_ENTRIES.with(|c| {
+            let mut n = c.borrow_mut();
+            *n += 1;
+            MAX_OPEN_ENTRIES.with(|m| {
+                let mut m = m.borrow_mut();
+                *m = (*m).max(*n);
+            });
+        });
         let ext = media_ext(&meta.name);
         let path = temp.join(format!("media-{}.{}", meta.index, ext));
         let mut out = std::fs::File::create(&path)
@@ -241,29 +246,31 @@ pub fn extract_media(
     Ok(media)
 }
 
-/// Writer adapter that counts every byte written to the underlying writer.
+/// Writer adapter that tracks the logical write position of the underlying
+/// writer. Writes advance the position; seeks set it. This matches the final
+/// file size even when `ZipWriter` patches headers by seeking backward.
 struct CountingWriter<W: Write> {
     inner: W,
-    bytes_written: u64,
+    position: u64,
 }
 
 impl<W: Write> CountingWriter<W> {
     fn new(inner: W) -> Self {
         Self {
             inner,
-            bytes_written: 0,
+            position: 0,
         }
     }
 
-    fn bytes_written(&self) -> u64 {
-        self.bytes_written
+    fn position(&self) -> u64 {
+        self.position
     }
 }
 
 impl<W: Write> Write for CountingWriter<W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let n = self.inner.write(buf)?;
-        self.bytes_written += n as u64;
+        self.position += n as u64;
         Ok(n)
     }
 
@@ -274,7 +281,9 @@ impl<W: Write> Write for CountingWriter<W> {
 
 impl<W: Write + Seek> Seek for CountingWriter<W> {
     fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
-        self.inner.seek(pos)
+        let new_pos = self.inner.seek(pos)?;
+        self.position = new_pos;
+        Ok(new_pos)
     }
 }
 
@@ -325,14 +334,23 @@ fn measure_fixed_part(
     let counter = writer
         .finish()
         .map_err(|e| CompressionError::OutputFileError(format!("rezip finish: {e}")))?;
-    let fixed_len = counter.bytes_written();
+    let fixed_len = counter.position();
+    let scratch_len = std::fs::metadata(&scratch)
+        .map_err(|e| output_file_error(&scratch, e))?
+        .len();
+    debug_assert_eq!(
+        fixed_len, scratch_len,
+        "CountingWriter position must match the final scratch file size"
+    );
     let _ = std::fs::remove_file(&scratch);
     Ok(fixed_len)
 }
 
-/// Writes a complete archive: non-media entries streamed from `input`, media
-/// entries read from `media` and stored uncompressed. The file is finished
-/// but not committed to the final output path.
+/// Writes a complete archive: non-media entries streamed from `input`; media
+/// entries are streamed from `media` and stored uncompressed. The chosen media
+/// file is compared against the original entry size, and if it grew, the
+/// original entry bytes are streamed instead. The file is finished but not
+/// committed to the final output path.
 pub fn write_archive(
     input: &Path,
     metas: &[EntryMeta],
@@ -365,17 +383,39 @@ pub fn write_archive(
                 .map_err(|e| CompressionError::OutputFileError(format!("rezip: {e}")))?;
             std::io::copy(&mut entry, &mut writer)
                 .map_err(|e| CompressionError::OutputFileError(format!("rezip entry {}: {e}", meta.name)))?;
-        } else {
-            let path = media.get(&meta.index).ok_or_else(|| {
-                CompressionError::OutputFileError(format!("missing media for {}", meta.name))
+            continue;
+        }
+
+        let chosen_path = media.get(&meta.index).ok_or_else(|| {
+            CompressionError::OutputFileError(format!("missing media for {}", meta.name))
+        })?;
+        let original_len = archive.by_index(meta.index)
+            .map_err(|e| {
+                eprintln!("warn: cannot read zip entry {} of {}: {e}", meta.name, input.display());
+                CompressionError::SidecarFailed(CORRUPT.to_string())
+            })?
+            .size();
+        let chosen_len = std::fs::metadata(chosen_path)
+            .map_err(|e| output_file_error(chosen_path, e))?
+            .len();
+
+        let use_original = chosen_len > original_len;
+        let method = if use_original { deflate_options() } else { stored_options() };
+        writer
+            .start_file(meta.name.clone(), method)
+            .map_err(|e| CompressionError::OutputFileError(format!("rezip: {e}")))?;
+
+        if use_original {
+            let mut entry = archive.by_index(meta.index).map_err(|e| {
+                eprintln!("warn: cannot read zip entry {} of {}: {e}", meta.name, input.display());
+                CompressionError::SidecarFailed(CORRUPT.to_string())
             })?;
-            let content = std::fs::read(path)
-                .map_err(|e| output_file_error(path, e))?;
-            writer
-                .start_file(meta.name.clone(), stored_options())
-                .map_err(|e| CompressionError::OutputFileError(format!("rezip: {e}")))?;
-            writer
-                .write_all(&content)
+            std::io::copy(&mut entry, &mut writer)
+                .map_err(|e| CompressionError::OutputFileError(format!("rezip entry {}: {e}", meta.name)))?;
+        } else {
+            let mut src = std::fs::File::open(chosen_path)
+                .map_err(|e| output_file_error(chosen_path, e))?;
+            std::io::copy(&mut src, &mut writer)
                 .map_err(|e| CompressionError::OutputFileError(format!("rezip entry {}: {e}", meta.name)))?;
         }
     }
@@ -719,7 +759,6 @@ mod tests {
     use super::*;
     use std::fs;
     use std::io::{Read, Write};
-    use std::sync::atomic::Ordering;
     use zip::ZipArchive;
     use zip::ZipWriter;
 
@@ -915,11 +954,17 @@ awk -v n="$n" 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
         let tmp = dir.path().join("tmp");
         fs::create_dir_all(&tmp).unwrap();
         OPEN_ENTRIES.with(|c| *c.borrow_mut() = 0);
+        MAX_OPEN_ENTRIES.with(|c| *c.borrow_mut() = 0);
         extract_media(&input, &metas, &tmp).unwrap();
         assert_eq!(
             OPEN_ENTRIES.with(|c| *c.borrow()),
             0,
             "no zip entry may remain open after extraction"
+        );
+        assert_eq!(
+            MAX_OPEN_ENTRIES.with(|c| *c.borrow()),
+            1,
+            "only one zip entry may be open at a time"
         );
         assert_eq!(
             fs::read_dir(&tmp).unwrap().count(),
@@ -1038,6 +1083,56 @@ awk -v n="$n" 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
         assert_eq!(produced[0].1.as_slice(), CONTENT_TYPES);
         assert_eq!(produced[1].1.as_slice(), RELS_XML);
         assert_eq!(produced[2].1, xml);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fixed_len_equals_scratch_file_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.docx");
+        build_docx(
+            &input,
+            &[
+                ("[Content_Types].xml", CONTENT_TYPES.to_vec()),
+                ("word/document.xml", varied_text(1000)),
+                ("ppt/slides/slide1.xml", varied_text(500)),
+                ("word/media/image1.jpg", noise_bytes(500)),
+            ],
+        );
+        let metas = read_index(&input).unwrap();
+        let tmp = dir.path().join("tmp");
+        fs::create_dir_all(&tmp).unwrap();
+
+        let fixed_len = measure_fixed_part(&input, &metas, &tmp).unwrap();
+        // scratch file is removed by measure_fixed_part; read size by rerunning
+        // the non-media phase directly and checking the counter and file size.
+        let scratch = tmp.join("check.docx");
+        let file = fs::File::create(&scratch).unwrap();
+        let counter = CountingWriter::new(file);
+        let mut writer = zip::ZipWriter::new(counter);
+        let input_file = fs::File::open(&input).unwrap();
+        let mut archive = zip::ZipArchive::new(input_file).unwrap();
+        for meta in &metas {
+            if meta.is_dir || media_disposition(&meta.name) != MediaDisposition::NotMedia {
+                continue;
+            }
+            let mut entry = archive.by_index(meta.index).unwrap();
+            writer
+                .start_file(meta.name.clone(), deflate_options())
+                .unwrap();
+            std::io::copy(&mut entry, &mut writer).unwrap();
+        }
+        let counter = writer.finish().unwrap();
+        let counted = counter.position();
+        let file_len = fs::metadata(&scratch).unwrap().len();
+        assert_eq!(
+            counted, file_len,
+            "CountingWriter position must equal the final scratch file size (counted={counted}, file={file_len})"
+        );
+        assert_eq!(
+            fixed_len, file_len,
+            "measure_fixed_part must return the same position"
+        );
     }
 
     #[cfg(unix)]
