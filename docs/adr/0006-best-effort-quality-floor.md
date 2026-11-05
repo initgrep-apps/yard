@@ -1,5 +1,7 @@
 # Best effort at the quality floor, never worse
 
+**Status:** superseded by ADR 0011 — silent best-effort delivery is replaced by a consent-gated ladder.
+
 Every category has a user-editable quality floor. When the target cannot be met at the floor, the compressor stops, delivers the smallest attempt, and reports `met_target: false` with status `best_effort`. Continuing to degrade until the number fits was rejected: it silently destroys the quality the user said was unacceptable, and a size target is advisory, not a contract.
 
 ## Considered Options

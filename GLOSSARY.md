@@ -89,14 +89,82 @@ _Avoid_: queue, pending list
 The per-category queue inside a batch (image, video, pdf, document, other). One job runs per lane at a time.
 _Avoid_: queue, pool
 
-**Slot**:
-A unit of the parallelism budget (`maxConcurrent`). Most jobs cost 1 slot; a video costs 2 so two encodes never overlap.
-_Avoid_: thread, worker
+**Attempt**:
+One complete try at producing an output: one engine run, or one two-pass encode.
+_Avoid_: pass, run, iteration
+
+**Rung**:
+One step of a ladder. A rung declares the command, the capabilities it needs, and how its output is validated.
+_Avoid_: step, stage
+
+**Ladder**:
+The ordered list of rungs a job may try, from least to most destructive.
+_Avoid_: pipeline, chain
+
+**Lossless pass**:
+A rung that changes encoding or container without discarding pages, tracks, pixels or profile data.
+_Avoid_: safe mode, compression
+
+**Remux**:
+Rewriting the container without re-encoding the streams. Lossless, and it does not reduce size.
+_Avoid_: convert, rewrap
+
+**Lossy encode**:
+Re-encoding that lowers fidelity while keeping the same contents: every page, track and frame, in the same format.
+_Avoid_: destructive change, compression
+
+**Destructive change**:
+A change the user can notice in the result: fewer pixels, a missing track or page, a different format, rasterised pages. Requires consent.
+_Avoid_: lossy, degradation
+
+**Batch budget**:
+The total RAM a running batch may use, derived from the machine's RAM (`clamp(total/8, 300 MiB, 2 GiB)`) or fixed by the user. Replaces the old slot count.
+_Avoid_: slot, concurrency limit, thread pool
+
+**Job ceiling**:
+The maximum peak RAM one job may use. It never grows with input size.
+_Avoid_: memory limit, cap
+
+**Engine estimate**:
+The conservative RAM figure attributed to a job's engine child for admission. An estimate, never a measurement.
+_Avoid_: engine memory
 
 **Target**:
 The per-category size cap a batch aims for (image 200 KB, video 10 MB, PDF 2 MB, document 1 MB by default).
 _Avoid_: limit, max size
 
 **Quality floors**:
-The user's minimum acceptable quality per category (image Q30, video CRF 28 at 480p, PDF 72 dpi / JPEGQ 15, document media Q40). The compressor stops here and delivers best effort rather than degrading further.
+The user's minimum acceptable quality per category (image Q30, video CRF 28 at 480p, PDF 72 dpi / JPEGQ 15, document media Q40). The compressor stops here rather than degrading further.
 _Avoid_: limits, thresholds
+
+**Resolution floor**:
+The smallest size the user accepts before a downscale counts as destructive (video 480p, image long edge 1280 px).
+_Avoid_: minimum size, scale limit
+
+**Free zone**:
+The range of degradation the user already authorised through the quality and resolution floors. Rungs inside it need no consent.
+_Avoid_: allowed loss, safe range
+
+**Capability**:
+One kind of change a rung can make: lossy encode, downscale, drop stream, format change, metadata strip, rasterise, page drop.
+_Avoid_: permission, flag
+
+**Capability matrix**:
+The table that maps a capability and a category to allowed, needs consent, or denied.
+_Avoid_: rules engine, policy config
+
+**Consent**:
+An explicit user decision permitting a specific destructive change for a stated scope: once, this batch, or this category.
+_Avoid_: approval, confirmation
+
+**Pre-flight consent**:
+One prompt before a batch for destructive changes that can be predicted from the file type alone, such as HEIC to JPG.
+_Avoid_: batch warning, upfront dialog
+
+**Needs permission**:
+The outcome of a file whose required destructive change was denied or left unanswered. Nothing is delivered.
+_Avoid_: failed, blocked, best effort
+
+**Best effort**:
+The outcome of a file where every required change was authorised but the target still could not be reached. The smallest attempt is delivered.
+_Avoid_: needs permission, failed

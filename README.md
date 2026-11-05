@@ -30,7 +30,7 @@ or network access.
 |---|---|
 | **Category targets** | Images, video, PDF, and documents each get a target size. Defaults are editable in Settings. |
 | **Bundled engines** | libvips, FFmpeg, qpdf, and Ghostscript ship with the app. No runtime downloads. |
-| **Originals stay untouched** | Results go to a separate output folder. Metadata is stripped; HEIC/HEIF becomes JPEG and MOV becomes MP4. |
+| **Originals stay untouched** | Results go to a separate output folder. Image and PDF metadata is stripped; HEIC/HEIF becomes JPEG and MOV becomes MP4. |
 | **Batch workflow** | Parallel compression, per-file progress, per-file cancel, and cancel-all. |
 | **History** | A local audit trail with per-file sizes, methods, timings, and a 90-day retention default. |
 | **Offline by design** | No telemetry, no cloud processing, no auto-update. Your files never leave the machine. |

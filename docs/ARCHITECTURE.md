@@ -217,7 +217,7 @@ Details that change behavior:
 
 1. **Preflight.** The app creates the output folder and writes/deletes a probe file. Failure emits `batch:error` before any history record is written.
 2. **Cancel tokens register before the status flips** from Pending to Compressing, so a cancel can never miss a job that just started.
-3. **Panics are contained** by `catch_unwind` and reported as an unknown error.
+3. **Panics are caught** by `catch_unwind` and reported as an unknown error — but the release profile sets `panic = "abort"`, so containment only exists in debug and test builds today (ADR 0014).
 4. **Output names** try `name.ext`, `stem-1.ext` … `stem-999.ext`, then `stem-overflow.ext`, then a uuid fallback. An in-memory reservation registry stops parallel jobs from claiming the same name. Extensions are rewritten first: HEIC/HEIF → JPG, MOV → MP4.
 5. **History is append-per-record.** A failed write emits one `history:error` per batch; compression results are unaffected.
 
@@ -251,7 +251,7 @@ All processors share one contract: an input already under target becomes a plain
 |---|---|---|
 | Image | Quality search (≤ 8 steps, floor → 95); then dimensions 90 % → 50 % in 10 % steps; then best effort. PNG skips the quality step and uses palette compression. | Non-zero size |
 | Video | Bitrate `target × 8 × 0.95 / duration`, two-pass libx264; if over, step 1080 → 720 → 480 within the resolution floor; then single-pass CRF fallback. Audio 128 kbps AAC. Clips < 0.5 s rejected. | `ftyp` marker + size |
-| PDF | qpdf lossless → qpdf image pass → gs `/screen` → gs grid (dpi 100/72/50/36 × jpegq 60/40/25/15, filtered by floors). A failing pass never stops the ladder. | `%PDF-` header + size |
+| PDF | qpdf lossless → qpdf image pass (**lossy**: recompresses images at JPEG 75) → gs `/screen` → gs grid (dpi 100/72/50/36 × jpegq 60/40/25/15, filtered by floors). A failing pass never stops the ladder. | `%PDF-` header + size; **no page-count check** |
 | Document | Whole OOXML archive read into RAM; only `word/media/`, `ppt/media/`, `xl/media/` entries recompressed (≤ 8 quality steps); archive rewritten at deflate 9. A media entry that fails keeps its original bytes. | Zip opens cleanly |
 
 Never use ffmpeg `-fs`: it truncates the file. Size is controlled by bitrate, then resolution, then CRF.
@@ -296,6 +296,8 @@ Poisoned mutexes are recovered with a warning, never a permanent stall. Missing 
 | Webview | every progress event re-renders the run view; no throttling |
 
 Practical worst cases: a 500 MB PPTX needs ~5 GB RAM; a 2 GB PPTX needs ~20 GB. Four 500 MB decks can spike temp disk to ~60 GB. Hardware tiers and the plain-language requirements are in `README.md → System requirements`.
+
+Planned replacement: ADR 0010 bounds per-file memory and replaces slots with a machine-derived memory budget; ADR 0011 changes what a delivered result means. The slice order is in `docs/superpowers/plans/2026-11-05-backend-remediation.md`.
 
 ## 11. Read next
 
