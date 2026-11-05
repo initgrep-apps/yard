@@ -269,6 +269,7 @@ impl CompressionProcessor for PdfProcessor {
                 100,
                 true,
                 &progress,
+                &cancel_token,
             );
         }
 
@@ -323,6 +324,7 @@ impl CompressionProcessor for PdfProcessor {
                             spec.quality,
                             true,
                             &progress,
+                            &cancel_token,
                         );
                     }
                     BestAttempt::keep_smaller_in(
@@ -364,6 +366,7 @@ impl CompressionProcessor for PdfProcessor {
                 best.quality,
                 false,
                 &progress,
+                &cancel_token,
             );
         }
 
@@ -700,7 +703,7 @@ exit 0
             "fake-gs-chatter",
             r#"#!/bin/bash
 echo "gs $*" >> "$(dirname "$0")/gs.log"
-printf 'HEAD_START%0585d' 0 >&2
+printf 'HEAD_START%3000d' 0 >&2
 printf 'TAIL_END\n' >&2
 exit 1
 "#,

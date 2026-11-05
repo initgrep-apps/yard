@@ -47,6 +47,13 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
+fn run_processor_catch_panic(
+    f: impl FnOnce() -> Result<CompressionResult, CompressionError>,
+) -> Result<CompressionResult, CompressionError> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+        .unwrap_or_else(|payload| Err(CompressionError::OutputFileError(panic_payload_message(&payload))))
+}
+
 /// HEIC/HEIF input → .jpg output and MOV input → .mp4 output (spec §3),
 /// case-insensitive. Resolving the real output extension here is what makes
 /// collision detection apply before any processor touches the filename.
@@ -582,7 +589,7 @@ impl<R: Runtime> QueueState<R> {
 
                 let run = match sidecar::resolve_all_sidecar_paths() {
                     Ok(sidecar_paths) => {
-                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        run_processor_catch_panic(|| {
                             processor.compress_to_target(
                                 std::path::Path::new(&entry.path),
                                 &output_path,
@@ -593,9 +600,6 @@ impl<R: Runtime> QueueState<R> {
                                 &sidecar_paths,
                                 &temp_dir,
                             )
-                        }))
-                        .unwrap_or_else(|payload| {
-                            Err(CompressionError::Unknown(panic_payload_message(&payload)))
                         })
                     }
                     // resolve_all_sidecar_paths already carries the
@@ -921,7 +925,7 @@ fn ensure_output_folder_writable(folder: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::CompressionResult;
+    use crate::engine::{CompressionProcessor, CompressionResult};
 
     fn result(met: bool, strategy: &str) -> CompressionResult {
         CompressionResult {
@@ -2751,5 +2755,87 @@ mod tests {
             "attempted job must carry a measured duration, got {}",
             s.files[0].duration_ms
         );
+    }
+
+    #[tokio::test]
+    async fn panic_is_caught_and_reported_as_file_error() {
+        let _temp_guard = temp_guard();
+        let (_root, app, out) = setup_app("1");
+
+        struct PanicProcessor;
+        impl CompressionProcessor for PanicProcessor {
+            fn category(&self) -> crate::models::Category {
+                crate::models::Category::Image
+            }
+            fn supported_extensions(&self) -> &[&str] {
+                &["jpg"]
+            }
+            fn compress_to_target(
+                &self,
+                _input: &std::path::Path,
+                _output: &std::path::Path,
+                _target_bytes: u64,
+                _quality_floor: &crate::settings::QualityFloors,
+                _cancel_token: CancellationToken,
+                _progress: ProgressSender,
+                _sidecar_paths: &crate::engine::SidecarPaths,
+                _temp_dir: &std::path::Path,
+            ) -> Result<CompressionResult, CompressionError> {
+                panic!("simulated processor panic");
+            }
+        }
+
+        // Exercise the same catch-unwind wrapper used by process_single_job
+        // and assert it maps a panic to a file-class error.
+        let result = run_processor_catch_panic(|| {
+            PanicProcessor.compress_to_target(
+                std::path::Path::new("/tmp/missing.jpg"),
+                &out.join("panic.jpg"),
+                1,
+                &crate::settings::QualityFloors::default(),
+                CancellationToken::new(),
+                ProgressSender::test_stub(),
+                &crate::engine::SidecarPaths {
+                    vips: Some("/bin/false".to_string()),
+                    ffmpeg: None,
+                    ffprobe: None,
+                    gs: None,
+                    qpdf: None,
+                    gs_resources: None,
+                },
+                &out,
+            )
+        });
+        match result {
+            Err(CompressionError::OutputFileError(msg)) => {
+                assert!(msg.contains("job panicked"), "got: {msg}");
+            }
+            other => panic!("expected OutputFileError, got {:?}", other),
+        }
+
+        // The batch itself continues: run a real batch with two failing files
+        // and verify both emit file:error and batch:complete fires.
+        let ids = add_entries(
+            &app,
+            &[
+                ("a.jpg", crate::models::Category::Image, "/tmp/missing-a.jpg"),
+                ("b.pdf", crate::models::Category::Pdf, "/tmp/missing-b.pdf"),
+            ],
+        );
+        let rx = events_of(&app.handle(), &["file:error", "batch:complete"]);
+        let queue = app.state::<QueueState<tauri::test::MockRuntime>>();
+        QueueState::start_batch(queue.inner(), &app.handle(), "panic-batch".into(), ids);
+        wait_idle(&queue, "panic-batch");
+
+        let mut file_errors = 0usize;
+        loop {
+            let (topic, _) = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+            match topic.as_str() {
+                "file:error" => file_errors += 1,
+                "batch:complete" => break,
+                other => panic!("unexpected event: {other}"),
+            }
+        }
+        assert_eq!(file_errors, 2, "both files must error and the batch must continue");
     }
 }

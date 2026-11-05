@@ -22,9 +22,9 @@ use crate::sidecar::{
     GsResources, prepend_engine_dir_to_path, resolve_engine_candidate, resolve_gs_resources,
     resolve_sidecar_candidate, suppress_console_window,
 };
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+
 use tokio_util::sync::CancellationToken;
 
 const WAIT_POLL_MILLIS: u64 = 30;
@@ -43,8 +43,7 @@ pub const GS_RESOURCES_MISSING: &str = "the staged gs-resources/ tree is not ava
 pub fn gs_failure_with_resources_hint(error: CompressionError) -> CompressionError {
     CompressionError::SidecarFailed(format!("{} — {GS_RESOURCES_MISSING}", error))
 }
-const STDERR_TAIL_CHARS: usize = 500;
-const STDERR_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+
 
 /// Exhaustive registry of engines a processor may require. Taking this enum
 /// instead of a `&str` makes `require` total: there is no stringly-typed
@@ -146,8 +145,13 @@ impl BestAttempt {
     }
 }
 
+const STDERR_TAIL_CHARS: usize = 500;
+const STDERR_TAIL_KEEP_BYTES: usize = 2048;
+const STDERR_DRAIN_CHUNK: usize = 4096;
+const DELIVER_COPY_CHUNK: usize = 65536;
+
 /// Copies `from` to the final output path and reports completion. One
-/// enforcement point for the fs::copy + send_progress(100) + result triple
+/// enforcement point for the copy + send_progress(100) + result triple
 /// shared by every processor's deliverable paths (early exit, fitting pass,
 /// best-effort).
 pub fn deliver_output(
@@ -158,9 +162,63 @@ pub fn deliver_output(
     quality_used: u32,
     met_target: bool,
     progress: &ProgressSender,
+    cancel_token: &CancellationToken,
 ) -> Result<CompressionResult, CompressionError> {
-    std::fs::copy(from, output)
+    if from == output {
+        progress.send_progress(100);
+        return Ok(CompressionResult {
+            output_path: output.to_path_buf(),
+            compressed_size: size,
+            quality_used,
+            met_target,
+            strategy_used,
+        });
+    }
+
+    let temp_path = output.with_extension("yard-tmp");
+    if let Err(e) = std::fs::remove_file(&temp_path) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            eprintln!("warn: could not remove stale temp {}: {e}", temp_path.display());
+        }
+    }
+
+    let mut src = std::fs::File::open(from)
         .map_err(|e| CompressionError::OutputFileError(e.to_string()))?;
+    let mut dst = std::fs::File::create(&temp_path)
+        .map_err(|e| CompressionError::OutputFileError(e.to_string()))?;
+
+    let mut buf = [0u8; DELIVER_COPY_CHUNK];
+    loop {
+        if cancel_token.is_cancelled() {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(CompressionError::Cancelled);
+        }
+        match src.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                if let Err(e) = dst.write_all(&buf[..n]) {
+                    let _ = std::fs::remove_file(&temp_path);
+                    return Err(CompressionError::OutputFileError(e.to_string()));
+                }
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&temp_path);
+                return Err(CompressionError::OutputFileError(e.to_string()));
+            }
+        }
+    }
+
+    if cancel_token.is_cancelled() {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(CompressionError::Cancelled);
+    }
+
+    drop(dst);
+    if let Err(e) = commit_output(&temp_path, output) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(CompressionError::OutputFileError(e.to_string()));
+    }
+
     progress.send_progress(100);
     Ok(CompressionResult {
         output_path: output.to_path_buf(),
@@ -171,10 +229,65 @@ pub fn deliver_output(
     })
 }
 
-/// Last ~`STDERR_TAIL_CHARS` characters of sidecar stderr — the failure
+/// Atomically commits a temp file to its final destination by rename. If the
+/// destination already exists, the temp is left for the caller to clean up
+/// and an `AlreadyExists` IO error is returned so the caller can surface an
+/// `OutputFileError` — a file created by another process after name resolution
+/// must never be overwritten.
+pub fn commit_output(temp: &Path, dest: &Path) -> std::io::Result<()> {
+    if dest.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("destination {} already exists", dest.display()),
+        ));
+    }
+    std::fs::rename(temp, dest)
+}
+
+/// Bounded stderr tail: retains the last ~2 KiB of a sidecar stream while
+/// still accounting for every byte that passed through, so callers can report
+/// diagnostics without unbounded memory growth.
+pub struct StderrTail {
+    buffer: Vec<u8>,
+    bytes_seen: u64,
+}
+
+impl Default for StderrTail {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StderrTail {
+    pub fn new() -> Self {
+        Self {
+            buffer: Vec::with_capacity(STDERR_TAIL_KEEP_BYTES),
+            bytes_seen: 0,
+        }
+    }
+
+    pub fn push(&mut self, chunk: &[u8]) {
+        self.bytes_seen += chunk.len() as u64;
+        self.buffer.extend_from_slice(chunk);
+        if self.buffer.len() > STDERR_TAIL_KEEP_BYTES {
+            let drop = self.buffer.len() - STDERR_TAIL_KEEP_BYTES;
+            self.buffer.drain(..drop);
+        }
+    }
+
+    pub fn bytes_seen(&self) -> u64 {
+        self.bytes_seen
+    }
+
+    pub fn tail(&self) -> &[u8] {
+        &self.buffer
+    }
+}
+
+/// Last ~`STDERR_TAIL_CHARS` characters of captured stderr — the failure
 /// reason is almost always the last thing printed.
-pub fn stderr_tail(bytes: &[u8]) -> String {
-    let stderr = String::from_utf8_lossy(bytes).into_owned();
+pub fn stderr_tail(tail: &StderrTail) -> String {
+    let stderr = String::from_utf8_lossy(tail.tail()).into_owned();
     let tail: String = {
         let count = stderr.chars().count();
         if count > STDERR_TAIL_CHARS {
@@ -206,15 +319,8 @@ pub fn strict_exit(_label: &str, _code: Option<i32>) -> bool {
 /// Runs a sidecar to completion, draining stderr on a reader thread so a
 /// chatty tool can never deadlock on a full pipe. Polls the cancel token:
 /// a cancel SIGKILLs the child process first, then surfaces as `Cancelled`
-/// — cancelled beats exit code.
-///
-/// SIGKILL trade-off: only the direct child is killed, so grandchild
-/// processes it spawned survive and hold the stderr pipe open. On cancel
-/// the drain thread is therefore abandoned, not joined (it self-terminates
-/// once the stragglers exit). On a normal exit the join is bounded: a
-/// lingering grandchild that outlives `STDERR_JOIN_TIMEOUT` forces a warned
-/// diagnostic loss instead of an indefinite block, since the child itself
-/// is already reaped and the pass result must not depend on stragglers.
+/// — cancelled beats exit code. The drain thread uses a shared `StderrTail`
+/// so the same bounded retention applies to every sidecar path.
 pub fn run_sidecar(
     sidecar_path: &str,
     label: &'static str,
@@ -236,13 +342,24 @@ pub fn run_sidecar(
 
     let mut stderr_pipe = child.stderr.take();
     let stderr_reader = std::thread::spawn(move || {
-        let mut buffer = Vec::new();
+        let mut tail = StderrTail::new();
         if let Some(pipe) = stderr_pipe.as_mut() {
-            if let Err(e) = pipe.read_to_end(&mut buffer) {
-                eprintln!("warn: {label}: stderr drain failed, diagnostics partial: {e}");
+            let mut buf = [0u8; STDERR_DRAIN_CHUNK];
+            loop {
+                match pipe.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => tail.push(&buf[..n]),
+                    Err(e) => {
+                        if e.kind() == std::io::ErrorKind::Interrupted {
+                            continue;
+                        }
+                        eprintln!("warn: {label}: stderr drain failed, diagnostics partial: {e}");
+                        break;
+                    }
+                }
             }
         }
-        buffer
+        tail
     });
 
     let status = loop {
@@ -250,8 +367,6 @@ pub fn run_sidecar(
             Ok(Some(status)) => break status,
             Ok(None) => {
                 if cancel_token.is_cancelled() {
-                    // Grandchildren survive SIGKILL and hold the stderr
-                    // pipe — the drain thread is abandoned, not joined.
                     let _ = child.kill();
                     let _ = child.wait();
                     return Err(CompressionError::Cancelled);
@@ -269,21 +384,14 @@ pub fn run_sidecar(
         }
     };
 
-    // A cancel racing the final poll must not be lost: the child exits 0,
-    // the caller would deliver Done, and no one re-checks the token. Verify
-    // once more after reaping — cancelled beats exit code.
     if cancel_token.is_cancelled() {
         return Err(CompressionError::Cancelled);
     }
-    let stderr_bytes = match recv_stderr_bounded(stderr_reader) {
-        Some(bytes) => bytes,
-        None => {
-            eprintln!(
-                "warn: {label} stderr drain did not finish within {:?} after exit \
-                 (lingering grandchild); diagnostics unavailable",
-                STDERR_JOIN_TIMEOUT
-            );
-            b"<stderr unreadable>".to_vec()
+    let tail = match stderr_reader.join() {
+        Ok(tail) => tail,
+        Err(_) => {
+            eprintln!("warn: {label} stderr drain thread panicked");
+            StderrTail::new()
         }
     };
 
@@ -295,28 +403,10 @@ pub fn run_sidecar(
             "{} exited with code {:?}: {}",
             label,
             status.code(),
-            stderr_tail(&stderr_bytes)
+            stderr_tail(&tail)
         )));
     }
     Ok(())
-}
-
-/// Bounded wait on the drain thread: poll `is_finished`, then join. A
-/// `None` return means "abandoned" — dropping the handle detaches the
-/// thread, which self-terminates once the pipe closes.
-pub fn recv_stderr_bounded<T: Send + 'static>(
-    handle: std::thread::JoinHandle<T>,
-) -> Option<T> {
-    let deadline = std::time::Instant::now() + STDERR_JOIN_TIMEOUT;
-    loop {
-        if handle.is_finished() {
-            return handle.join().ok();
-        }
-        if std::time::Instant::now() >= deadline {
-            return None;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(WAIT_POLL_MILLIS));
-    }
 }
 
 pub trait CompressionProcessor: Send + Sync {
@@ -340,6 +430,7 @@ pub trait CompressionProcessor: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[cfg(windows)]
     #[test]
@@ -599,5 +690,156 @@ mod tests {
         assert_eq!(winner.size, 400);
         assert_eq!(winner.path, PathBuf::from("b"));
         assert_eq!(winner.quality, 40);
+    }
+
+    #[test]
+    fn cancelled_copy_leaves_no_final_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.bin");
+        let output = dir.path().join("out.bin");
+        let temp_path = output.with_extension("yard-tmp");
+        let size = 64 * 1024 * 1024;
+        fs::write(&input, vec![0u8; size]).unwrap();
+        fs::write(&temp_path, b"stale").unwrap();
+
+        let token = CancellationToken::new();
+        let worker_token = token.clone();
+        let worker_input = input.clone();
+        let worker_output = output.clone();
+        let handle = std::thread::spawn(move || {
+            deliver_output(
+                &worker_input,
+                &worker_output,
+                size as u64,
+                "test".to_string(),
+                75,
+                true,
+                &ProgressSender::test_stub(),
+                &worker_token,
+            )
+        });
+
+        let mut triggered = false;
+        for _ in 0..10000 {
+            if temp_path.exists()
+                && fs::metadata(&temp_path).map(|m| m.len()).unwrap_or(0) > 0
+            {
+                triggered = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(triggered, "temp file was never created");
+        token.cancel();
+        let result = handle.join().unwrap();
+        assert!(
+            matches!(result, Err(CompressionError::Cancelled)),
+            "got: {:?}",
+            result
+        );
+        assert!(!output.exists(), "final output must not exist");
+        assert!(!temp_path.exists(), "temp file must be cleaned");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn failed_copy_removes_temp_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.bin");
+        fs::write(&input, b"x").unwrap();
+        let output_dir = dir.path().join("readonly");
+        fs::create_dir(&output_dir).unwrap();
+        fs::set_permissions(&output_dir, fs::Permissions::from_mode(0o500)).unwrap();
+        let output = output_dir.join("out.bin");
+
+        let result = deliver_output(
+            &input,
+            &output,
+            1,
+            "test".to_string(),
+            75,
+            true,
+            &ProgressSender::test_stub(),
+            &CancellationToken::new(),
+        );
+
+        assert!(
+            matches!(result, Err(CompressionError::OutputFileError(_))),
+            "got: {:?}",
+            result
+        );
+        assert!(
+            !output.with_extension("yard-tmp").exists(),
+            "temp file must not be left in the read-only directory"
+        );
+
+        fs::set_permissions(&output_dir,
+            fs::Permissions::from_mode(0o755)
+        ).unwrap();
+    }
+
+    #[test]
+    fn existing_destination_is_not_clobbered() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.bin");
+        fs::write(&input, b"new content").unwrap();
+        let output = dir.path().join("out.bin");
+        fs::write(&output, b"precious existing data").unwrap();
+
+        let result = deliver_output(
+            &input,
+            &output,
+            11,
+            "test".to_string(),
+            75,
+            true,
+            &ProgressSender::test_stub(),
+            &CancellationToken::new(),
+        );
+
+        assert!(
+            matches!(result, Err(CompressionError::OutputFileError(_))),
+            "got: {:?}",
+            result
+        );
+        assert!(!output.with_extension("yard-tmp").exists(), "temp must be removed");
+        assert_eq!(
+            fs::read(&output).unwrap(),
+            b"precious existing data",
+            "existing destination must not be clobbered"
+        );
+    }
+
+    #[test]
+    fn stderr_tail_retains_at_most_2_kib_but_drains_everything() {
+        let mut tail = StderrTail::new();
+        let total = 10 * 1024 * 1024;
+        let chunk_size = 4096;
+        let chunk = vec![b'x'; chunk_size];
+        for _ in 0..(total / chunk_size) {
+            tail.push(&chunk);
+        }
+        assert_eq!(tail.bytes_seen(), total as u64, "every byte must be accounted for");
+        assert!(
+            tail.tail().len() <= STDERR_TAIL_KEEP_BYTES,
+            "retained tail {} exceeds {STDERR_TAIL_KEEP_BYTES} bytes",
+            tail.tail().len()
+        );
+    }
+
+    #[test]
+    fn release_profile_keeps_unwind_panics() {
+        let manifest = fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")
+        ).unwrap();
+        let release = manifest
+            .split("[profile.release]")
+            .nth(1)
+            .expect("release profile must exist");
+        assert!(
+            release.contains("panic = \"unwind\""),
+            "release profile must keep panic = unwind"
+        );
     }
 }

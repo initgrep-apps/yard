@@ -199,6 +199,7 @@ impl CompressionProcessor for ImageProcessor {
                 100,
                 true,
                 &progress,
+                &cancel_token,
             );
         }
 
@@ -306,6 +307,7 @@ impl CompressionProcessor for ImageProcessor {
                 quality,
                 true,
                 &progress,
+                &cancel_token,
             );
         }
 
@@ -334,6 +336,7 @@ impl CompressionProcessor for ImageProcessor {
                     min_quality,
                     true,
                     &progress,
+                    &cancel_token,
                 );
             }
             if r.0 > target_bytes {
@@ -364,6 +367,7 @@ impl CompressionProcessor for ImageProcessor {
                 best.quality,
                 false,
                 &progress,
+                &cancel_token,
             );
         }
 
@@ -655,7 +659,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let path = dir.join("chatty-fail");
         let script =
-            "#!/bin/bash\nprintf 'HEAD_START%0585d' 0 >&2\nprintf 'TAIL_END\\n' >&2\nexit 1\n";
+            "#!/bin/bash\nprintf 'HEAD_START%3000d' 0 >&2\nprintf 'TAIL_END\\n' >&2\nexit 1\n";
         fs::write(&path, script).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
         path.to_string_lossy().to_string()

@@ -248,7 +248,7 @@ fn deliver_or_cancel(
         }
     };
     let output_was_free = !output.exists();
-    let result = deliver_output(&path, output, size, strategy, quality, met_target, progress);
+    let result = deliver_output(&path, output, size, strategy, quality, met_target, progress, cancel_token);
     if result.is_ok() && cancel_token.is_cancelled() {
         remove_all(temp_paths);
         if output_was_free {
@@ -345,6 +345,7 @@ impl CompressionProcessor for DocumentProcessor {
                 100,
                 true,
                 &progress,
+                &cancel_token,
             );
         }
 

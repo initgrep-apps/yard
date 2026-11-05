@@ -23,8 +23,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::engine::result::{CompressionError, CompressionResult, STRATEGY_ALREADY_UNDER_TARGET};
 use crate::engine::{
-    BestAttempt, CompressionProcessor, ProgressSender, SidecarName, SidecarPaths, deliver_output,
-    recv_stderr_bounded as recv_bounded, stderr_tail,
+    BestAttempt, CompressionProcessor, ProgressSender, SidecarName, SidecarPaths, StderrTail,
+    deliver_output, stderr_tail,
 };
 use crate::models::Category;
 use crate::settings::QualityFloors;
@@ -51,10 +51,6 @@ const AUDIO_BITRATE_K: u32 = 128;
 const WAIT_POLL_MILLIS: u64 = 30;
 /// Cap ffmpeg's stderr is allowed to burst per read chunk.
 const PROGRESS_CHUNK_SIZE: usize = 4096;
-/// Bounded wait for the stderr reader thread to finish after ffmpeg exits.
-const FFMPEG_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
-/// Stderr bytes retained for failure diagnostics (drained halfway on overflow).
-const TAIL_KEEP_BYTES: usize = 2048;
 
 /// Pass 1 discards its output. Windows has no `/dev/null`; cmd's `NUL`
 /// device is the equivalent sink.
@@ -452,35 +448,47 @@ impl VideoProcessor {
         });
         let mut stderr_pipe = child.stderr.take();
         let stderr_reader = std::thread::spawn(move || {
-            let mut buffer = Vec::new();
+            let mut tail = StderrTail::new();
             if let Some(pipe) = stderr_pipe.as_mut() {
-                if let Err(e) = pipe.read_to_end(&mut buffer) {
-                    eprintln!("warn: ffprobe stderr drain failed, diagnostics partial: {e}");
+                let mut buf = [0u8; PROGRESS_CHUNK_SIZE];
+                loop {
+                    match pipe.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => tail.push(&buf[..n]),
+                        Err(e) => {
+                            if e.kind() == std::io::ErrorKind::Interrupted {
+                                continue;
+                            }
+                            eprintln!("warn: ffprobe stderr drain failed, diagnostics partial: {e}");
+                            break;
+                        }
+                    }
                 }
             }
-            buffer
+            tail
         });
 
         let status = Self::poll_child_exit(&mut child, cancel_token, "ffprobe")?;
         if cancel_token.is_cancelled() {
             return Err(CompressionError::Cancelled);
         }
-        let stdout = recv_bounded(stdout_reader).unwrap_or_default();
-        let stderr = recv_bounded(stderr_reader).unwrap_or_default();
+        let stdout = stdout_reader.join().unwrap_or_default();
+        let stderr_tail_struct = stderr_reader.join().unwrap_or_default();
 
         if !status.success() {
             return Err(CompressionError::SidecarFailed(format!(
                 "File may be corrupt (ffprobe exited with code {:?}): {}",
                 status.code(),
-                stderr_tail(&stderr)
+                stderr_tail(&stderr_tail_struct)
             )));
         }
         Ok(String::from_utf8_lossy(&stdout).into_owned())
     }
 
-    /// Drains an ffmpeg stderr pipe into progress events. Returns the
-    /// retained diagnostics tail. Live percent tracking happens entirely in
-    /// the caller's `line_sink`; this function does not parse progress.
+    /// Drains an ffmpeg stderr pipe into progress events, retaining a
+    /// bounded tail in the shared `StderrTail`. Live percent tracking happens
+    /// entirely in the caller's `line_sink`; this function does not parse
+    /// progress.
     ///
     /// Lines end at `\n` OR `\r`: ffmpeg marks every `-stats` frame update
     /// with a carriage return and emits a single `\n` only for the final
@@ -499,24 +507,21 @@ impl VideoProcessor {
     pub(crate) fn drain_stderr_for_progress<R: std::io::Read>(
         pipe: &mut R,
         line_sink: &mut dyn FnMut(&[u8]),
-    ) -> Vec<u8> {
-        let mut tail: Vec<u8> = Vec::new();
+        tail: &mut StderrTail,
+    ) {
         let mut chunk = [0u8; PROGRESS_CHUNK_SIZE];
         let mut pending: Vec<u8> = Vec::new();
         loop {
             match pipe.read(&mut chunk) {
                 Ok(0) => break,
                 Ok(n) => {
+                    tail.push(&chunk[..n]);
                     pending.extend_from_slice(&chunk[..n]);
                     // Drain up to the LAST terminator so lines arriving as
                     // one burst are each parsed separately.
                     if let Some(pos) = pending.iter().rposition(|b| *b == b'\n' || *b == b'\r') {
                         let complete: Vec<u8> = pending.drain(..=pos).collect();
                         line_sink(&complete);
-                        tail.extend_from_slice(&complete);
-                    }
-                    if tail.len() > TAIL_KEEP_BYTES {
-                        tail.drain(..tail.len() - TAIL_KEEP_BYTES / 2);
                     }
                 }
                 Err(e) => {
@@ -532,9 +537,7 @@ impl VideoProcessor {
         // EOF: whatever has no trailing terminator is still real output.
         if !pending.is_empty() {
             line_sink(&pending);
-            tail.extend_from_slice(&pending);
         }
-        tail
     }
 
     /// Runs one ffmpeg invocation with live progress: stderr is streamed line
@@ -566,7 +569,7 @@ impl VideoProcessor {
         let progress_for_thread = progress.clone();
         let reader = std::thread::spawn(move || {
             let mut max_percent: u32 = 0;
-            let mut tail = Vec::new();
+            let mut tail = StderrTail::new();
             if let Some(pipe) = stderr_pipe.as_mut() {
                 let parse_and_record = |bytes: &[u8], max_percent: &mut u32| {
                     let text = String::from_utf8_lossy(bytes);
@@ -585,8 +588,7 @@ impl VideoProcessor {
                     }
                 };
                 let mut drain_sink = |bytes: &[u8]| parse_and_record(bytes, &mut max_percent);
-                let drained_tail = Self::drain_stderr_for_progress(pipe, &mut drain_sink);
-                tail = drained_tail;
+                Self::drain_stderr_for_progress(pipe, &mut drain_sink, &mut tail);
             }
             (max_percent, tail)
         });
@@ -594,14 +596,11 @@ impl VideoProcessor {
         if cancel_token.is_cancelled() {
             return Err(CompressionError::Cancelled);
         }
-        let (max_percent, tail) = match recv_bounded(reader) {
-            Some(pair) => pair,
-            None => {
-                eprintln!(
-                    "warn: ffmpeg stderr drain did not finish within {FFMPEG_JOIN_TIMEOUT:?}; \
-                     diagnostics unavailable"
-                );
-                (0, b"<stderr unreadable>".to_vec())
+        let (max_percent, tail) = match reader.join() {
+            Ok(pair) => pair,
+            Err(_) => {
+                eprintln!("warn: ffmpeg stderr drain thread panicked");
+                (0, StderrTail::new())
             }
         };
 
@@ -692,6 +691,7 @@ impl CompressionProcessor for VideoProcessor {
                 100,
                 true,
                 &progress,
+                &cancel_token,
             );
         }
 
@@ -817,6 +817,7 @@ impl CompressionProcessor for VideoProcessor {
                             attempt.quality(bitrate_k),
                             true,
                             &progress,
+                            &cancel_token,
                         );
                     }
                     BestAttempt::keep_smaller_in(
@@ -874,6 +875,7 @@ impl CompressionProcessor for VideoProcessor {
                             attempt.quality(bitrate_k),
                             true,
                             &progress,
+                            &cancel_token,
                         );
                     }
                     BestAttempt::keep_smaller_in(
@@ -907,6 +909,7 @@ impl CompressionProcessor for VideoProcessor {
                 best.quality,
                 false,
                 &progress,
+                &cancel_token,
             );
         }
 
@@ -989,7 +992,8 @@ mod tests {
             let mut sink = |bytes: &[u8]| {
                 lines.push(String::from_utf8_lossy(bytes).into_owned());
             };
-            VideoProcessor::drain_stderr_for_progress(pipe, &mut sink);
+            let mut tail = StderrTail::new();
+            VideoProcessor::drain_stderr_for_progress(pipe, &mut sink, &mut tail);
         }
         lines
     }
@@ -2112,6 +2116,84 @@ exit 1
         );
         assert!(lines[0].contains("00:00:01"), "{lines:?}");
         assert!(lines[1].contains("00:00:02"), "{lines:?}");
+    }
+
+    #[test]
+    fn video_and_generic_paths_share_one_stderr_tail() {
+        let src = fs::read_to_string(file!()).unwrap();
+        assert!(
+            src.contains("StderrTail"),
+            "video path must reuse the shared stderr tail"
+        );
+        let local_tail_constant = "const ".to_string() + "TAIL_KEEP_BYTES:";
+        assert!(
+            !src.contains(&local_tail_constant),
+            "no second tail constant in video.rs"
+        );
+        let recv_helper = "recv".to_string() + "_stderr_bounded";
+        assert!(
+            !src.contains(&recv_helper),
+            "no private bounded-stderr join helper in video.rs"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn progress_is_100_only_after_the_rename() {
+        let dir = tempfile::tempdir().unwrap();
+        let ffmpeg = make_executable_script(
+            &dir.path(),
+            "fake-ffmpeg",
+            r#"#!/bin/bash
+pass=""; pl=""; prev=""
+for a in "$@"; do
+  case "$prev" in
+    -pass) pass="$a" ;;
+    -passlogfile) pl="$a" ;;
+  esac
+  prev="$a"
+done
+if [ "$pass" = "1" ]; then
+  if [ -n "$pl" ]; then printf 'x' > "${pl}-0.log"; printf 'x' > "${pl}-0.log.mbtree"; fi
+  exit 0
+fi
+out="${@: -1}"
+printf '\x00\x00\x00\x18ftypmp42' > "$out"
+head -c 88 /dev/zero >> "$out"
+"#,
+        );
+        let ffprobe = fake_ffprobe(&dir.path(),
+            "1.0\n"
+        );
+        let input = oversized_input(&dir.path(), "in.mp4");
+        let tmp = temp_dir_under(&dir.path());
+        let output = dir.path().join("out.mp4");
+        let (progress, seen) = ProgressSender::test_collector();
+
+        let result = VideoProcessor
+            .compress_to_target(
+                &input,
+                &output,
+                2000,
+                &QualityFloors::default(),
+                CancellationToken::new(),
+                progress,
+                &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
+                &tmp,
+            )
+            .unwrap();
+
+        assert!(result.met_target);
+        let events = seen.lock().unwrap().clone();
+        for (i, &p) in events.iter().enumerate() {
+            if p == 100 {
+                assert!(
+                    output.exists(),
+                    "event {i} emitted 100 before dest existed: {events:?}"
+                );
+            }
+        }
+        assert_eq!(*events.last().unwrap(), 100, "terminal event must be 100: {events:?}");
     }
 }
 
