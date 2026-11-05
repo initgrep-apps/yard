@@ -100,9 +100,10 @@ Checked on 2026-11-05 against the pinned tool versions on this machine. Implemen
 ### Task 1: Safety floor
 
 **Files:**
-- Modify: `src-tauri/Cargo.toml:55`
+- Modify: `src-tauri/Cargo.toml:51-56`
 - Modify: `src-tauri/src/engine/processor.rs:153-172, 218-302`
-- Test: inline modules in `engine/processor.rs` and `queue.rs`
+- Modify: `src-tauri/src/processors/video.rs:27, 55-57, 468-469, 499-538, 597` — it imports and reuses the shared stderr reaper
+- Test: inline modules in `engine/processor.rs`, `video.rs`, and `queue.rs`
 
 **Interfaces:**
 - Consumes: nothing new.
@@ -143,11 +144,11 @@ Expected: FAIL — no temp file is created, stderr is unbounded, the manifest st
 
 - [ ] **Step 4: Commit by rename**
 
-`deliver_output` copies to `<dest-stem>.yard-tmp` in the **same directory** as `dest`, checks the cancel token, then `fs::rename(temp, dest)`. On any error or cancellation, remove the temp first. `dest` is never opened directly. If `dest` exists at rename time (created by another process after name resolution), delete the temp and return `OutputFileError` — never replace a file the app did not create.
+`deliver_output` removes any stale `<dest>.yard-tmp` from a previous crash, copies to that path in the **same directory** as `dest`, checks the cancel token, then `fs::rename(temp, dest)`. Move `send_progress(100)` to after the rename; today it fires after the copy (`processor.rs:164`). On any error or cancellation, remove the temp first. If `dest` exists at rename time (created by another process after name resolution), delete the temp and return `OutputFileError` — never replace a file the app did not create. Update the 13 production call sites (`image` 4, `video` 4, `pdf` 3, `document` 2).
 
-- [ ] **Step 5: Bound the stderr drain**
+- [ ] **Step 5: Bound the stderr drain in one place**
 
-Replace `read_to_end` with a loop over a 4 KiB buffer feeding `StderrTail`. Keep draining until EOF so the child cannot block. Delete the 5 s detach path; the reader thread ends when the pipe closes after kill.
+Replace `read_to_end` with a loop over a 4 KiB buffer feeding `StderrTail`. Keep draining until EOF so the child cannot block. Delete the 5 s detach path; the reader thread ends when the pipe closes after kill. `video.rs` already has a 2 KiB incremental tail (`drain_stderr_for_progress`, `:499-538`) plus `recv_stderr_bounded` imports; delete that duplicate and route the ffmpeg path through the shared `StderrTail`, leaving one implementation. `run_sidecar`'s new signature ripples to `image.rs:124`, `pdf.rs:301`, `document.rs:435`, and `video.rs`.
 
 - [ ] **Step 6: Update the two stderr assertions and run the gate**
 
@@ -175,6 +176,8 @@ git commit -m "fix(engine): atomic output commit, bounded stderr, unwind panics"
 - `failed_copy_removes_temp_file` — write failure cleanup.
 - `existing_destination_is_not_clobbered` — no data loss under a name race.
 - `stderr_tail_retains_at_most_2_kib_but_drains_everything` — bounded retention, unbounded drain.
+- `video_and_generic_paths_share_one_stderr_tail` — no second implementation survives.
+- `progress_is_100_only_after_the_rename` — no success signal before the file exists.
 - `panic_is_caught_and_reported_as_file_error` — containment behaviour.
 - `release_profile_keeps_unwind_panics` — the shipped profile cannot regress to abort.
 
@@ -201,7 +204,10 @@ git commit -m "fix(engine): atomic output commit, bounded stderr, unwind panics"
 
 ```rust
 #[test]
-fn streaming_never_holds_more_than_one_media_file() { /* fake vips inspects temp dir at spawn time, assert 1 media file */ }
+fn one_entry_is_decompressed_at_a_time() { /* test-only reader guard counts concurrent open entries, assert max 1 */ }
+
+#[test]
+fn extracted_media_is_cleaned_on_success_and_cancel() { /* temp dir has no media-* files after either path */ }
 
 #[test]
 fn non_media_entries_are_byte_identical() { /* XML part bytes equal after extraction */ }
@@ -233,7 +239,7 @@ Remove `ZipEntry { content: Vec<u8> }` and `snapshot_archive`. `read_index` open
 
 - [ ] **Step 4: Extract one media entry at a time**
 
-`extract_media` iterates `by_index`, writes each media entry to `temp/media-{index}.{ext}` with `std::io::copy`, and drops the `ZipFile` before the next iteration. Non-media entries are not extracted.
+`extract_media` iterates `by_index`, writes each media entry to `temp/media-{index}.{ext}` with `std::io::copy`, and drops the `ZipFile` before the next iteration. All extracted media files coexist on disk; only one is decompressed into memory at a time. Non-media entries are not extracted. `media_save_options` (`document.rs:91-96`) must drop `strip` and use `keep=icc`, matching Task 4 — document media currently loses its colour profile too.
 
 - [ ] **Step 5: Measure the fixed part, then search quality**
 
@@ -245,7 +251,7 @@ Write the chosen media files `Stored` (they are already compressed), falling bac
 
 - [ ] **Step 7: Update the tests whose premise changed, then run the gate**
 
-- `document_rezip_uses_deflate_level_9` asserts `Deflated` for **every** entry; change it to XML `Deflated`, media `Stored`.
+- `document_rezip_uses_deflate_level_9` asserts `Deflated` for **every** entry **and** compares each compressed size to a level-9 reference; change it to XML `Deflated`, media `Stored`, and drop the equality assertion for media.
 - The three `document_progress_*` and four `document_cancel_*` tests assume the old eight-pass rezip window; re-derive the expected bounds from the two-phase model.
 - `document_cancel_during_rezip_preserves_preexisting_output_file` no longer proves ownership; replace it with the Task 1 no-clobber test at this layer.
 
@@ -261,7 +267,7 @@ git commit -m "perf(document): stream archive entries instead of snapshotting to
 
 **Acceptance Criteria:**
 - No path reads a whole archive entry into a `Vec`.
-- At most one extracted media file exists at a time.
+- Peak RAM is one entry at a time; extracted media may coexist on disk.
 - The quality search never rebuilds the archive; at most one rebuild follows a failed size check.
 - Entry set and non-media decompressed bytes are identical to the input.
 - Archive ratio above 200:1 or declared total above 4 GiB is rejected before extraction.
@@ -269,7 +275,8 @@ git commit -m "perf(document): stream archive entries instead of snapshotting to
 - Boundary rules enforced per `AGENTS.md`.
 
 **Required Tests:**
-- `streaming_never_holds_more_than_one_media_file` — memory shape, observed at engine spawn.
+- `one_entry_is_decompressed_at_a_time` — memory shape, observed by a reader guard.
+- `extracted_media_is_cleaned_on_success_and_cancel` — no scratch leak.
 - `non_media_entries_are_byte_identical` — no silent document damage.
 - `already_compressed_media_is_stored_not_deflated` — wasted CPU removed, per extension.
 - `media_never_grows` — no entry larger than its original.
@@ -303,6 +310,7 @@ git commit -m "perf(document): stream archive entries instead of snapshotting to
   - `pub struct Performance { pub adaptive_memory: bool, pub memory_ceiling_mb: u32 }` with `#[serde(default)]` on the struct
   - `pub async fn run_budgeted_lanes<J, F, Fut, S, C, E>(lanes: Vec<LaneSpec<J>>, budget: u64, should_stop: S, run_job: F, on_skipped: C, estimate: E) -> u64` where `E: Fn(&J) -> u64`
   - `pub struct LaneSpec<J> { pub key: String, pub jobs: VecDeque<J> }` — `weight` is deleted
+  - `pub struct LaneJob { pub file_id: String, pub estimate: u64 }` — queue passes `J = LaneJob`, so admission never locks `FileListState`; `group_lanes` fills the estimate
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -340,19 +348,19 @@ Expected: FAIL — module does not exist and the scheduler has no budget argumen
 
 - [ ] **Step 4: Replace slot weights with the budget**
 
-`scheduler.rs` takes `budget` and `estimate`, admits when `used + estimate <= budget`, and keeps one job per lane. **A job whose estimate alone exceeds the budget is admitted when nothing is running, with one warning** — otherwise a 2 GiB video on a 300 MiB budget deadlocks. Delete `weight` from `LaneSpec` and `lane_weight` (`queue.rs:868-870`). Delete the `max_concurrent <= 1` sequential branch (`queue.rs:333-361`); the budget scheduler already runs one job at a time when the budget is small, and the one-slot parity test moves to a one-job-at-a-time budget test.
+`scheduler.rs` takes `budget` and `estimate`, admits when `used + estimate <= budget`, and keeps one job per lane. **A job whose estimate alone exceeds the budget is admitted when nothing is running, with one warning** — otherwise a 2 GiB video on a 300 MiB budget deadlocks. Delete `weight` from `LaneSpec` and `lane_weight` (`queue.rs:868-870`). Delete the `max_concurrent <= 1` sequential branch (`queue.rs:333-361`); the budget scheduler already runs one job at a time when the budget is small, and the one-slot parity test moves to a one-job-at-a-time budget test. Jobs carry their estimate in `LaneJob`; `group_lanes` (`queue.rs:872-899`) computes it once, so the scheduler never takes the file-list lock.
 
 - [ ] **Step 5: Migrate settings without resetting the file**
 
-`Performance` gains `adaptive_memory` (default true) and `memory_ceiling_mb` (default 2048), and gets `#[serde(default)]` at the struct level. Without that attribute an old `{ "performance": { "maxConcurrent": "3" } }` fails deserialization and `parse_settings_value` (`settings.rs:266-274`) silently replaces **every** setting with defaults. Delete `max_concurrent` and `resolve_max_concurrent*` (`settings.rs:90, 96, 240-263`). Update call sites `queue.rs:323, 333, 399, 868, 893`, tests `settings.rs:387-428` and `queue.rs:1292-1305`, `src/types.ts:60-64`, `SettingsDialog.tsx:354-359`, and the fixtures in `App.test.tsx:99`, `SettingsDialog.test.tsx:61`, `useSettings.test.ts:44`.
+`Performance` gains `adaptive_memory` (default true) and `memory_ceiling_mb` (default 2048), and gets `#[serde(default)]` at the struct level. Without that attribute an old `{ "performance": { "maxConcurrent": "3" } }` fails deserialization and `parse_settings_value` (`settings.rs:266-274`) silently replaces **every** setting with defaults. Delete `max_concurrent` and `resolve_max_concurrent*` (`settings.rs:90, 96, 240-263`). Update call sites `queue.rs:323, 333, 399, 868, 893`, tests `settings.rs:387-428`, and the seven queue fixtures that write `"performance": {"maxConcurrent": …}` (`queue.rs:1305, 2431, 2480, 2517, 2605, 2649, 2689`). Frontend: `src/types.ts:60-64`, `SettingsDialog.tsx:354-359`, fixtures `App.test.tsx:99`, `SettingsDialog.test.tsx:61`, `useSettings.test.ts:44`. Detect the legacy key on the raw `Value` inside `parse_settings_value` and warn once via `OnceLock` — `load_settings` runs per job, so a plain warning would spam.
 
 - [ ] **Step 6: Add disk preflight and the usage event**
 
-Before the first job, require `available_space(output_dir) >= largest_output * 1.1` and `available_space(temp_dir) >= largest_estimate * 0.5`. Emit `memory:usage` every 2 s while a batch runs: `{ budgetBytes, usedBytes, processRssBytes }`.
+Preflight order must be: create/verify the output dir (`queue.rs:309-321`), free-space check, then `SessionStartRecord` (`queue.rs:325-331`). On failure mirror the cleanup at `queue.rs:313-315` and emit `batch:error` only — the frontend resets on that event. Require `available_space(output_dir) >= largest_output * 1.1` and `available_space(app_temp_base) >= largest_estimate * 0.5`; the temp base is `app.path().temp_dir()` from `temp.rs:8-11`, not a per-job folder. Emit `memory:usage` every 2 s while a batch runs: `{ budgetBytes, usedBytes, processRssBytes }`. Register the new command/event in `invoke_handlers!` (`lib.rs:173-192`).
 
 - [ ] **Step 7: Migrate the slot-era tests, then run the gate**
 
-All 11 `scheduler.rs` tests and the 19 `queue.rs` tests that call `setup_app("1"|"2"|"3")` depend on the weight API. Rewrite them against explicit estimates and budgets; keep the invariants (one job per lane, stop-hook, panic isolation, output-name suffixes) and replace the `n1` sequential-order assertion with a one-job-at-a-time budget assertion.
+All 11 `scheduler.rs` tests and the 19 `queue.rs` tests that call `setup_app("1"|"2"|"3")` depend on the weight API. Rewrite them against explicit estimates and budgets; keep the invariants (one job per lane, stop-hook, panic isolation, output-name suffixes) and replace the `n1` sequential-order assertion with a one-job-at-a-time budget assertion (`queue.rs:1366-1388`).
 
 Run: `cd src-tauri && cargo test memory scheduler settings queue && cd .. && yarn test`
 Expected: PASS.
@@ -388,12 +396,14 @@ git commit -m "feat(memory): adaptive batch budget replaces fixed slots"
 
 **Files:**
 - Modify: `src-tauri/src/processors/image.rs:45-64, 131-355`
-- Test: inline module in `image.rs`
+- Modify: `src-tauri/src/settings.rs` (`ImageQualityFloor`), `src/types.ts`, `src/components/SettingsDialog.tsx`
+- Test: inline module in `image.rs`, `SettingsDialog.test.tsx`
 
 **Interfaces:**
 - Produces:
   - `fn save_options(extension: &str, quality: u32) -> String`
-  - `fn attempt_args(input: &Path, output: &Path, width: Option<u32>, quality: u32) -> Vec<String>`
+  - `fn attempt_args(input: &Path, output: &Path, width: u32, quality: u32) -> Vec<String>`
+  - `ImageQualityFloor { min_quality: u32, min_long_edge: u32 }`, default long edge `1280`; consumed by the consent gate in Tasks 9–10
 - Consumes: `JobContext` arrives in Task 8; keep the current signature until then.
 
 - [ ] **Step 1: Write the failing tests**
@@ -413,6 +423,9 @@ fn png_args_drop_the_ignored_colours_option() { /* no "colours" in args */ }
 
 #[test]
 fn icc_failure_fails_the_attempt_instead_of_flattening() { /* fake vips errors -> attempt failed, not delivered */ }
+
+#[test]
+fn dimension_ladder_is_pixels_not_percent() { /* 4000px input -> 3600/3200/.../2000px, stops at min_long_edge */ }
 ```
 
 - [ ] **Step 2: Run them and confirm they fail**
@@ -432,11 +445,13 @@ One invocation shape for all rungs:
 vips thumbnail <in> <out>[opts] <width> --size down --output-profile srgb --fail-on error
 ```
 
-Rotation is on by default (`no-rotate` default false). Quality-only rungs pass `width = 100000`; `--size down` guarantees no upscale, so the image keeps its dimensions while rotation and the sRGB transform still apply. Downscale rungs pass the target long edge. `vips copy` is deleted from the processor.
+Rotation is on by default (`no-rotate` default false). Quality-only rungs pass `width = 100000`; `--size down` guarantees no upscale, so the image keeps its dimensions while rotation and the sRGB transform still apply. Downscale rungs pass a **pixel** width — read the input width once with `vipsheader -f width` and replace the `scale_percent` ladder with pixel steps derived from it, stopping at `min_long_edge`. `vips copy` is deleted from the processor.
 
 - [ ] **Step 5: Run the tests and the gate**
 
-Run: `cd src-tauri && cargo test image`
+Update the tests whose premise changed: `write_fake_vips` gains `thumbnail`; `cancel_during_final_fitting_pass_yields_cancelled_not_done` keys on `attempt-1` + `resize`; `real_vips_compresses_oversized_jpeg_to_target` asserts `strategy_used.starts_with("quality=")` — keep that prefix on the quality rungs so history stays readable. The PNG test that pins `strip` must pin `keep=icc` instead.
+
+Run: `cd src-tauri && cargo test image && cd .. && yarn test`
 Expected: PASS. Then run the real-engine fixtures manually against the staged vips: `cargo test image::tests -- --ignored` — they are not part of the gate.
 
 - [ ] **Step 6: Commit**
@@ -461,6 +476,8 @@ git commit -m "fix(image): apply orientation, manage colour, use shrink-on-load"
 - `#[ignore] orientation_table_1_to_8_is_applied` — real vips fixtures, all eight tags.
 - `#[ignore] display_p3_is_transformed_and_tagged_srgb` — real vips fixture; assert the output profile is sRGB, not "any profile".
 - `icc_failure_fails_the_attempt_instead_of_flattening` — no silent colour shift.
+- `dimension_ladder_is_pixels_not_percent` — `thumbnail` takes pixels, so the percent ladder cannot survive.
+- `long_edge_floor_is_a_setting` — 1280 default, round-trips through settings and the dialog.
 
 ---
 
@@ -595,11 +612,11 @@ Add `run_sidecar_capture_stdout` (stderr still bounded, stdout piped and capped)
 
 - [ ] **Step 4: Reclassify, drop the duplicate rung, reorder**
 
-Mark `qpdf-image-opt` as a lossy rung. Delete the separate `/screen` pass: it is a 72 dpi cell with different defaults, it duplicates the grid, and it makes the order non-monotonic. The ladder becomes lossless → image-opt → `for dpi in [100,72,50,36] { for jpegq in [60,40,25,15] }`, filtered by floors. `gs_args` always passes explicit `-r` and `-dJPEGQ`. Keep qpdf exit 2 tolerated.
+Mark `qpdf-image-opt` as a lossy rung. Delete the separate `GsScreen` **rung**: it is a 72 dpi cell with different defaults, it duplicates the grid, and it makes the order non-monotonic. The ladder becomes lossless → image-opt → `for dpi in [100,72,50,36] { for jpegq in [60,40,25,15] }`, filtered by floors. `-dPDFSETTINGS=/screen` stays as the base device preset; the rung is defined by explicit `-r` and `-dJPEGQ`, so the preset is not a second rung. Keep qpdf exit 2 tolerated.
 
 - [ ] **Step 5: Update the PDF suite, then run the gate**
 
-Every PDF integration test now sees extra `--show-npages` invocations and a stdout pipe. Update the call-order assertions (`pdf_dpi_jpegq_grid_walks_descending`, `pdf_pass3_gs_screen_stops_early`, `pdf_floor_above_screen_rung_skips_gs_screen_pass`) and the invocation counts; do not delete the behavioural assertions.
+Every PDF integration test now sees extra `--show-npages` invocations and a stdout pipe. `pdf_dpi_jpegq_grid_walks_descending` currently asserts 17 gs invocations (1 screen + 16 cells); it becomes 16 cells. Delete `pdf_pass3_gs_screen_stops_early` and `pdf_floor_above_screen_rung_skips_gs_screen_pass` and replace them with ordering tests over the new ladder; keep every other behavioural assertion.
 
 Run: `cd src-tauri && cargo test pdf && cargo test`
 Expected: PASS.
@@ -630,7 +647,7 @@ git commit -m "fix(pdf): reject page loss, reclassify lossy pass, order rungs by
 
 **Files:**
 - Create: `src-tauri/src/registry.rs`
-- Modify: `src-tauri/src/detection.rs:19-32`, `src-tauri/src/processors/mod.rs:27-60`, `src-tauri/src/queue.rs:50-69`, `src-tauri/src/lib.rs` (module list)
+- Modify: `src-tauri/src/detection.rs:19-32`, `src-tauri/src/processors/mod.rs:27-60`, `src-tauri/src/queue.rs:50-69`, `src-tauri/src/processors/image.rs:45-54`, `src-tauri/src/lib.rs` (module list)
 - Test: inline module in `registry.rs`
 
 **Interfaces:**
@@ -670,7 +687,7 @@ Rows exactly as today: `jpg, jpeg, png, webp, heic, heif` (image); `mp4, mov` (v
 
 - [ ] **Step 4: Route the three call sites through it**
 
-`detection::detect_category`, each processor's `supported_extensions`, and `queue::output_file_name` all read the table. Delete the three local lists. `image::get_output_extension` (`image.rs:45-54`) is deleted and replaced by `registry::output_file_name`; the three `get_output_extension_*` tests move to `registry.rs` with their assertions intact.
+`detection::detect_category`, each processor's `supported_extensions`, and `queue::output_file_name` all read the table. Delete the three local lists. `image::get_output_extension` (`image.rs:45-54`) is deleted and replaced by `registry::output_file_name`; the three `get_output_extension_*` tests move to `registry.rs` with their assertions intact. `ProcessorRegistry::register` (`processors/mod.rs:45-51`) must reject a duplicate extension instead of silently overwriting. The parity suites in `detection.rs:51-146`, `processors/mod.rs:72-124`, `queue.rs:980-1054`, and `image.rs:402-440` are rewritten against the registry, not duplicated.
 
 - [ ] **Step 5: Run the tests and the gate**
 
@@ -755,11 +772,11 @@ Delete the eight-argument method. Each processor reads everything from `ctx`. `P
 
 - [ ] **Step 5: Move the job body to `spawn_blocking`**
 
-`process_single_job` becomes a thin async wrapper: `tokio::task::spawn_blocking(move || run_job(...)).await`. Add tokio `time` for the consent wait in Task 10. Scheduler uses `JoinSet`.
+`process_single_job` becomes a thin async wrapper: `tokio::task::spawn_blocking(move || run_job(...)).await`. `spawn_blocking` needs `'static`: resolve `SidecarPaths` inside the closure (as today, `queue.rs:583`) or derive `Clone` for it, and move the registry handle, settings, `Arc<ReservedNames>`, and temp path in. Add tokio `time` for the consent wait in Task 10. Scheduler uses `JoinSet`; each job returns `(lane_index, estimate, saved)` so the budget is released correctly.
 
 - [ ] **Step 6: Add the cross-platform fake engine**
 
-`src-tauri/src/bin/fake_engine.rs` is a small binary that reads `FAKE_ENGINE_MODE` and writes output files. Tests locate it via `std::env::current_exe()?.parent()?.join("fake_engine")`. Port one image test and one video test to run on Windows.
+`src-tauri/src/bin/fake_engine.rs` is a std-only binary that reads `FAKE_ENGINE_MODE` and writes output files. Declare it as a plain `[[bin]]` (no feature gate, no dev-dependencies): `env!("CARGO_BIN_EXE_…")` is not available to unit tests, and a `required-features` bin would never build under the existing gate. Tests locate it via `std::env::current_exe()?.parent()?.join("fake_engine")` and **fail** if it is missing. Port one image test and one video test to run on Windows.
 
 - [ ] **Step 7: Move the existing processor tests onto `Ladder` before deleting duplication**
 
@@ -801,7 +818,7 @@ git commit -m "refactor(engine): job context, ladder state, spawn_blocking job b
 
 **Files:**
 - Create: `src-tauri/src/policy.rs`
-- Modify: `src-tauri/src/settings.rs`, `src-tauri/src/lib.rs` (module list), `src-tauri/src/engine/result.rs:21-28`, `src-tauri/src/models.rs:29-40`, `src/types.ts:23-31`, `src-tauri/src/queue.rs:71-80`, `src-tauri/src/engine/context.rs`, `src-tauri/src/engine/ladder.rs`
+- Modify: `src-tauri/src/settings.rs`, `src-tauri/src/lib.rs` (module list), `src-tauri/src/engine/result.rs:21-28`, `src-tauri/src/models.rs:29-40`, `src-tauri/src/history.rs:71-80,225-242`, `src/types.ts:23-31`, `src-tauri/src/queue.rs:71-80,96-107`, `src-tauri/src/engine/context.rs`, `src-tauri/src/engine/ladder.rs`, `src/hooks/useCompression.ts`
 - Test: inline modules in `policy.rs`, `models.rs`
 
 **Interfaces:**
@@ -812,8 +829,10 @@ git commit -m "refactor(engine): job context, ladder state, spawn_blocking job b
   - `pub struct Policy { /* global + per-category + batch grants */ }`
   - `impl Policy { pub fn check(&self, category: Category, changes: &[Change]) -> Verdict }`
   - `pub enum ConsentSource { Default, Global, Category, Batch, Once }`
+  - `pub struct ConsentSettings { pub allow_destructive: bool, pub heic_to_jpg: bool }`, defaults `false` / `true`
   - `FileStatus::NeedsPermission` serialized as `needs_permission`
   - `CompressionResult { changes: Vec<Change>, consent: ConsentSource }`
+  - `FileCompletePayload` gains `reason: Option<String>` and carries `status: needs_permission`; `useCompression` must stop hardcoding `failed` for denied files
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -858,7 +877,7 @@ Seven changes; matrix exactly as agreed in ADR 0012. `MetadataStrip` is `Allowed
 
 - [ ] **Step 6: Update every exhaustive status consumer, then run the gate**
 
-Rust: `models.rs` exhaustive match and `[String; 8]`, `queue::status_key` (`all.len() == 8`), `queue::history_counts_of`, `history::Counts` and `record_schema_keys_are_pinned`. Frontend: `src/lib/tokens.ts` `STATUS_TONES`, `src/lib/tokens.test.ts` `STATUS_KEYS`, `src/lib/historyTable.ts` `HISTORY_STATUS_LABELS`, `src/lib/grouping.ts`, `RunCard`, `RunBoard`, `HistoryFilesTable`, `HistorySummaryCards`. Each is a `Record<FileStatus, …>` and fails typecheck until extended.
+Rust: `models.rs` exhaustive match and `[String; 8]`, `queue::status_key` (`all.len() == 8`), `queue::history_counts_of`, `history::outcome_from_files`, `history::Counts`, and `record_schema_keys_are_pinned`. Frontend: `src/lib/tokens.ts` `STATUS_TONES`, `src/lib/tokens.test.ts` `STATUS_KEYS`, `src/lib/historyTable.ts` `HISTORY_STATUS_LABELS`, `src/lib/historyFormat.ts`, `src/lib/grouping.ts`, `src/components/FileList.tsx`, `src/components/history/HistoryFilterDialog.tsx`, `RunCard`, `RunBoard`, `HistoryFilesTable`, `HistorySummaryCards`. Each is a `Record<FileStatus, …>` and fails typecheck until extended.
 
 Run: `cd src-tauri && cargo test policy models engine history queue && cd .. && yarn test && yarn build`
 Expected: PASS, including the file-reading union test.
@@ -899,7 +918,8 @@ git commit -m "feat(policy): capability matrix and consent resolution"
 - Produces:
   - Event `consent:required` payload `{ requestId, fileId, changes, detail }`
   - Command `answer_consent { requestId, allow, scope }` where `scope` is `once | batch`
-  - `FileResultRecord` and `HistoryFile` gain `changes: Vec<Change>` and `consent_source: Option<ConsentSource>`; `FileCompletePayload` gains the same two fields so the live card can show them
+  - `FileResultRecord` and `HistoryFile` gain `changes: Vec<Change>` and `consent_source: Option<ConsentSource>`, both `#[serde(default)]`; `FileCompletePayload` gains the same two fields plus `reason` so the live card can show them
+  - `BatchCompletePayload` gains `needsPermission: u32`; without a carrier, "reported once at the end" has nowhere to go
   - `ConsentSource` serialized `default | global | category | batch | once`
 
 - [ ] **Step 1: Write the failing tests**
@@ -947,15 +967,15 @@ Expected: FAIL — no event, no command, no hook.
 
 - [ ] **Step 3: Add the Rust consent registry**
 
-`Mutex<HashMap<String, oneshot::Sender<ConsentAnswer>>>` on `QueueState`. Emit `consent:required`, wait with `tokio::time::timeout(Duration::from_secs(1800))`, and default to deny. Cancel while waiting resolves as `Cancelled`.
+`Mutex<HashMap<String, oneshot::Sender<ConsentAnswer>>>` on `QueueState`. Emit `consent:required`, wait with `tokio::time::timeout(Duration::from_secs(1800))`, and default to deny. Cancel while waiting resolves as `Cancelled`. The wait runs inside the blocking job body, so use `recv_timeout` in short slices plus a `CancellationToken` poll (the repo's 30 ms pattern), not `tokio::select!`.
 
 - [ ] **Step 4: Add pre-flight classification**
 
-Before the first job, ask the registry which extensions imply a `FormatChange` (today only `heic|heif`). If any do and the policy needs consent, emit one `consent:required` with `fileCount` and wait once.
+Do it in the frontend before `compress_all`: `FileEntry` already carries the extension and category, so the dialog needs no new backend round-trip. Collect the grants and pass them to `compress_all` as an optional payload; the backend policy consumes them for the batch. This avoids turning `compress_all`/`start_batch` into a request/response pair.
 
 - [ ] **Step 5: Build the inline UI**
 
-The file card flips to `waiting` with Allow/Skip and "apply to the rest of this batch". The batch header shows a waiting count. No modal, no focus steal. Pre-flight uses a single dialog because it is one decision for the whole batch.
+`RunCard` is prop-only today; put the consent state in `useConsent` and read it in `RunCard` directly, so `CompressView → RunBoard → LaneView → RunCard` does not need four new props. The card flips to `waiting` with Allow/Skip and "apply to the rest of this batch". `RunHeader` shows the waiting count; `grouping.ts` needs the new bucket. No modal, no focus steal. Pre-flight uses a single dialog because it is one decision for the whole batch. Raise the frontend's 10-minute `TERMINAL_WATCHDOG_MS` (`useCompression.ts:72`) above the consent timeout, or the UI declares the batch lost while a request is pending.
 
 - [ ] **Step 6: Silence repeated denials**
 
@@ -963,7 +983,7 @@ Two denials of the same capability in one batch suppress further prompts for tha
 
 - [ ] **Step 7: Record consent in history**
 
-Append `changes` and `consentSource` on the file record; show them in the history detail card. Update `src/types.ts` and the history tests.
+Append `changes` and `consentSource` on the file record; show them in the history detail card. Both new fields need `#[serde(default)]`: `FileResultRecord` and `Counts` have no field defaults today, so a required field would make every old history line fail `parse_or_skip` and mark the session `interrupted`. Update the 13 `FileResultRecord { … }` literals in `queue.rs`, `commands.rs` and `history.rs`, the five `Counts { … }` literals, and `src/types.ts`.
 
 - [ ] **Step 8: Run the tests and the gate**
 
@@ -1004,7 +1024,7 @@ git commit -m "feat(ui): consent preflight, inline prompts, and consent history"
 ### Task 11: Documentation truth pass
 
 **Files:**
-- Modify: `README.md`, `docs/ARCHITECTURE.md`, `docs/FEATURES.md`, `GLOSSARY.md`, `docs/bugs.md`, `CHANGELOG.md`
+- Modify: `README.md`, `docs/ARCHITECTURE.md`, `docs/FEATURES.md`, `GLOSSARY.md`, `docs/bugs.md`, `CHANGELOG.md`, `AGENTS.md:39` (zip 8.x → 9.x)
 - Delete: this plan, after the final slice merges
 
 **Interfaces:**
@@ -1049,3 +1069,23 @@ git commit -m "docs: remove completed remediation plan"
 
 **Required Tests:**
 - No new tests; the task is verified by the full gate plus a manual claim-by-claim diff.
+
+---
+
+## Risks
+
+| Risk | Mitigation |
+|---|---|
+| libvips CLI flags drift across 8.18.x | Verified against 8.18.7 on this machine; `#[ignore]` real-engine fixtures |
+| `sysinfo` is not cached locally | First build needs network; run it once before the task starts |
+| Document rewrite changes archive bytes | Entry-set and byte-equality tests on XML parts |
+| Consent adds a way to stall a batch | Timeout + denial streak + cancel-while-waiting tests; budget-aware timeout |
+| XL consolidation regresses behaviour | Move tests onto `JobContext` first, delete duplication second |
+| Windows fake engine is skipped silently | Test asserts the binary exists |
+| Engine child memory is estimated, never measured | Estimates are conservative and logged; a 2× miss on a pathological PDF is possible |
+
+## Open questions
+
+1. **HDR / 10-bit video.** Tone-mapping needs a filter chain the static build may not carry. Passing through preserves HDR but hurts compatibility; converting without tone-mapping washes colours out. Separate ADR before touching it.
+2. **x264 preset.** `medium` is assumed (about 2× faster than `slow`, ~5 % larger files). Revisit if size matters more than speed.
+3. **Remux.** No remux path is added: remux changes the container, not the byte count. MOV→MP4 remains a lossy re-encode when over target and a rename when already under target.

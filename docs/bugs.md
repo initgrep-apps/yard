@@ -7,7 +7,7 @@ Open items only. Resolved investigations belong in git history or as a durable r
 1. **Windows kanban input unverified** — slice #20's wheel-to-horizontal panning, thin scrollbar styling, and `select-none` need a real Windows build check (WebView2); cua-driver cannot synthesize wheel events on WebKit on macOS. Trackpad scroll feel on the new history table likewise needs a human pass.
 2. **kanban-03 run board human-check pending** — dev-build pass on the new stock-kanban board: drag overlay ghost (item + column variants), always-visible lane grip opacity, pinned-card focus affordance (stock inert sortable attributes), and live compressing re-pin jump. dnd-kit cannot be drag-tested in jsdom; unit-level drag semantics are test-pinned in `src/lib/boardState.test.ts`.
 
-Items 3–8 come from the 2026-11 architecture review. Slice numbers point into `docs/superpowers/plans/2026-11-backend-remediation.md`.
+Items 3–8 come from the 2026-11 architecture review. Slice numbers point into `docs/superpowers/plans/2026-11-05-backend-remediation.md`.
 
 3. **Images lose orientation and colour profile** — `image.rs:59-64` appends `strip` to every save and never applies EXIF orientation, so portrait photos are delivered sideways; ICC profiles are discarded on non-sRGB inputs, so colours shift. S3.
 4. **Output is committed by direct copy** — `engine/processor.rs:162` copies straight to the final path, so a cancel or error mid-copy leaves a partial file in the user's output folder. S0.

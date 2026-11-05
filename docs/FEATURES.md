@@ -32,7 +32,7 @@ Per-file target override · batch presets · HEIC output · EMF/WMF conversion �
 
 ## Backlog
 
-Approved and sliced: `docs/superpowers/plans/2026-11-backend-remediation.md` (ADRs 0010–0014). It absorbs the following items from the 2026-10-18 review: collapse the four ladders, move runner capabilities into the shared seam, one outcome sink, one classification source, an honest IPC seam, history orchestration out of `QueueState`, resolve sidecars once, and let the ladder own progress.
+Approved and sliced: `docs/superpowers/plans/2026-11-05-backend-remediation.md` (ADRs 0010–0014). It absorbs the following items from the 2026-10-18 review: collapse the four ladders, move runner capabilities into the shared seam, one outcome sink, one classification source, an honest IPC seam, history orchestration out of `QueueState`, resolve sidecars once, and let the ladder own progress.
 
 Still unscheduled:
 

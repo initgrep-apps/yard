@@ -297,7 +297,7 @@ Poisoned mutexes are recovered with a warning, never a permanent stall. Missing 
 
 Practical worst cases: a 500 MB PPTX needs ~5 GB RAM; a 2 GB PPTX needs ~20 GB. Four 500 MB decks can spike temp disk to ~60 GB. Hardware tiers and the plain-language requirements are in `README.md → System requirements`.
 
-Planned replacement: ADR 0010 bounds per-file memory and replaces slots with a machine-derived memory budget; ADR 0011 changes what a delivered result means. The slice order is in `docs/superpowers/plans/2026-11-backend-remediation.md`.
+Planned replacement: ADR 0010 bounds per-file memory and replaces slots with a machine-derived memory budget; ADR 0011 changes what a delivered result means. The slice order is in `docs/superpowers/plans/2026-11-05-backend-remediation.md`.
 
 ## 11. Read next
 
