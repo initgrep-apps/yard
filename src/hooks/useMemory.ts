@@ -53,17 +53,22 @@ export function useMemory() {
   }, [])
 
   useEffect(() => {
-    let unlisten: (() => void) | undefined
+    const unlisteners: Array<() => void> = []
     let disposed = false
-    listen<BatchMemoryUsage>('memory:usage', (event) => {
-      setBatchUsage(event.payload)
-    }).then((fn) => {
-      if (disposed) fn()
-      else unlisten = fn
-    })
+    const attach = <T,>(event: string, handler: (payload: T) => void) => {
+      listen<T>(event, (e) => handler(e.payload))
+        .then((fn) => {
+          if (disposed) fn()
+          else unlisteners.push(fn)
+        })
+        .catch((err) => console.error(`${event} listen failed:`, err))
+    }
+    attach<BatchMemoryUsage>('memory:usage', setBatchUsage)
+    attach<unknown>('batch:complete', () => setBatchUsage(null))
+    attach<unknown>('batch:error', () => setBatchUsage(null))
     return () => {
       disposed = true
-      unlisten?.()
+      unlisteners.forEach((fn) => fn())
     }
   }, [])
 

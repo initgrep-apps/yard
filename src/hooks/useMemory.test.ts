@@ -50,13 +50,13 @@ describe('useMemory', () => {
     expect(invoke).toHaveBeenCalledWith('memory_stats')
   })
 
-  it('updates batch usage from memory:usage events', async () => {
-    let handler: ((event: { payload: BatchMemoryUsage }) => void) | undefined
+  it('updates batch usage from memory:usage events and clears it when the batch ends', async () => {
+    const handlers: Record<string, (event: { payload: BatchMemoryUsage }) => void> = {}
     vi.mocked(listen).mockImplementation((async (
-      _event: string,
-      cb: typeof handler,
+      event: string,
+      cb: (event: { payload: BatchMemoryUsage }) => void,
     ) => {
-      handler = cb
+      handlers[event] = cb
       return () => {}
     }) as typeof listen)
     vi.mocked(invoke).mockResolvedValue({
@@ -66,16 +66,27 @@ describe('useMemory', () => {
     })
 
     const { result } = renderHook(() => useMemory())
-    await waitFor(() => expect(handler).toBeDefined())
+    await waitFor(() => expect(handlers['memory:usage']).toBeDefined())
+
+    const usage = { budgetBytes: 1024, usedBytes: 600, processRssBytes: 300 }
+    act(() => {
+      handlers['memory:usage']({ payload: usage })
+    })
+    expect(result.current.batchUsage).toEqual(usage)
 
     act(() => {
-      handler?.({ payload: { budgetBytes: 1024, usedBytes: 600, processRssBytes: 300 } })
+      handlers['batch:complete']({ payload: usage })
     })
+    expect(result.current.batchUsage).toBeNull()
 
-    expect(result.current.batchUsage).toEqual({
-      budgetBytes: 1024,
-      usedBytes: 600,
-      processRssBytes: 300,
+    act(() => {
+      handlers['memory:usage']({ payload: usage })
     })
+    expect(result.current.batchUsage).toEqual(usage)
+
+    act(() => {
+      handlers['batch:error']({ payload: usage })
+    })
+    expect(result.current.batchUsage).toBeNull()
   })
 })

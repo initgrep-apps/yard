@@ -959,7 +959,7 @@ describe("SettingsDialog", () => {
         return Promise.resolve({
           totalRamBytes: 16 * 1024 * 1024 * 1024,
           budgetBytes: 512 * 1024 * 1024,
-          processRssBytes: 100 * 1024 * 1024,
+          processRssBytes: 0,
         })
       }
       return Promise.resolve(undefined)
@@ -972,8 +972,8 @@ describe("SettingsDialog", () => {
     expect(
       screen.getByLabelText("Memory ceiling in megabytes"),
     ).toHaveDisplayValue("512")
-    expect(screen.getByText("16.0 GB")).toBeInTheDocument()
+    expect(screen.getByText("16.00 GB")).toBeInTheDocument()
     expect(screen.getByText("512.0 MB")).toBeInTheDocument()
-    expect(screen.getByText("100.0 MB")).toBeInTheDocument()
+    expect(screen.getByText("—")).toBeInTheDocument()
   })
 })

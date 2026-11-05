@@ -186,7 +186,7 @@ mod tests {
     }
 
     #[test]
-    fn batch_fails_when_output_disk_is_short() {
+    fn check_disk_headroom_rejects_short_space() {
         assert!(check_disk_headroom(200, Some(100)).is_err());
     }
 

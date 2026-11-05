@@ -139,6 +139,8 @@ pub struct QueueState<R: Runtime = tauri::Wry> {
     sender: mpsc::UnboundedSender<BatchMessage>,
     #[cfg(test)]
     test_estimate: Mutex<Option<fn(crate::models::Category, u64, Option<u32>) -> u64>>,
+    #[cfg(test)]
+    test_available_space: Mutex<Option<fn(&std::path::Path) -> Option<u64>>>,
     _runtime: std::marker::PhantomData<fn() -> R>,
 }
 
@@ -159,6 +161,8 @@ impl<R: Runtime> QueueState<R> {
             sender,
             #[cfg(test)]
             test_estimate: Mutex::new(None),
+            #[cfg(test)]
+            test_available_space: Mutex::new(None),
             _runtime: std::marker::PhantomData,
         }
     }
@@ -217,6 +221,16 @@ impl<R: Runtime> QueueState<R> {
         }
     }
 
+    fn available_space_for(&self, path: &std::path::Path) -> Option<u64> {
+        #[cfg(test)]
+        {
+            if let Some(stub) = *poison_recover(self.test_available_space.lock()) {
+                return stub(path);
+            }
+        }
+        crate::memory::available_space(path)
+    }
+
     fn insert_token(&self, file_id: &str, token: CancellationToken) {
         poison_recover(self.token_map.lock()).insert(file_id.to_string(), token);
     }
@@ -243,6 +257,11 @@ impl<R: Runtime> QueueState<R> {
     #[cfg(test)]
     fn set_test_estimate(&self, estimate: fn(crate::models::Category, u64, Option<u32>) -> u64) {
         *poison_recover(self.test_estimate.lock()) = Some(estimate);
+    }
+
+    #[cfg(test)]
+    fn set_test_available_space(&self, available: fn(&std::path::Path) -> Option<u64>) {
+        *poison_recover(self.test_available_space.lock()) = Some(available);
     }
 
     #[cfg(test)]
@@ -371,7 +390,7 @@ impl<R: Runtime> QueueState<R> {
         let output_need = largest_output.saturating_mul(11) / 10;
         if let Err(e) = crate::memory::check_disk_headroom(
             output_need,
-            crate::memory::available_space(std::path::Path::new(&output_folder)),
+            queue.available_space_for(std::path::Path::new(&output_folder)),
         ) {
             Self::fail_preflight(app, &queue, &batch_id, e);
             return;
@@ -385,7 +404,7 @@ impl<R: Runtime> QueueState<R> {
         let temp_need = largest_estimate / 2;
         if let Err(e) = crate::memory::check_disk_headroom(
             temp_need,
-            crate::memory::available_space(&temp_base),
+            queue.available_space_for(&temp_base),
         ) {
             Self::fail_preflight(app, &queue, &batch_id, e);
             return;
@@ -2188,6 +2207,59 @@ mod tests {
 
         let store = app.state::<crate::history::HistoryStore>();
         assert!(store.load().unwrap().sessions.is_empty(), "no phantom session");
+    }
+
+    #[tokio::test]
+    async fn batch_fails_when_output_disk_is_short() {
+        let _temp_guard = temp_guard();
+        let (root, app, _out) = setup_app(450);
+        let source = root.path().join("big.jpg");
+        std::fs::write(&source, vec![7u8; 2 * 1024 * 1024]).unwrap();
+        let ids = add_entries(
+            &app,
+            &[(
+                "big.jpg",
+                crate::models::Category::Image,
+                source.to_str().unwrap(),
+            )],
+        );
+        let rx = events_of(
+            &app.handle(),
+            &["batch:error", "batch:complete", "file:error"],
+        );
+        let queue = app.state::<QueueState<tauri::test::MockRuntime>>();
+        queue.set_test_available_space(|_| Some(0));
+        queue.seed_history_state("disk-short");
+        QueueState::start_batch(queue.inner(), &app.handle(), "disk-short".into(), ids);
+        wait_idle(&queue, "disk-short");
+
+        let (topic, payload) = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(topic, "batch:error");
+        assert!(
+            payload["errorMessage"]
+                .as_str()
+                .unwrap()
+                .contains("Insufficient disk space"),
+            "disk preflight must fail the batch: {payload}"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "a preflight failure must emit no job or completion events"
+        );
+        assert!(
+            !queue.history_records_present("disk-short"),
+            "no per-batch records may survive a disk preflight failure"
+        );
+        assert!(
+            !queue.history_error_pending("disk-short"),
+            "no per-batch error flag may survive a disk preflight failure"
+        );
+
+        let store = app.state::<crate::history::HistoryStore>();
+        assert!(
+            store.load().unwrap().sessions.is_empty(),
+            "a disk preflight failure must write no session record"
+        );
     }
 
     #[test]

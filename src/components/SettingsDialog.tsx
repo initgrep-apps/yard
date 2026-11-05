@@ -57,6 +57,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { NumberStepper } from "@/components/NumberStepper"
 import { useMemory } from "@/hooks/useMemory"
 import { useSettings } from "@/hooks/useSettings"
+import { formatSize } from "@/lib/sizeFormat"
 import { useHistoryContext } from "@/providers/HistoryProvider"
 import type {
   Category,
@@ -394,41 +395,30 @@ function PerformanceSection({ draft, onChange }: SectionProps) {
         <div className={`mt-4 grid gap-2 text-sm ${batchUsage ? 'grid-cols-4' : 'grid-cols-3'}`}>
           <div>
             <div className="text-muted-foreground">Total RAM</div>
-            <div className="font-medium">{formatBytes(stats.totalRamBytes)}</div>
+            <div className="font-medium">{formatSize(stats.totalRamBytes)}</div>
           </div>
           <div>
             <div className="text-muted-foreground">Budget</div>
             <div className="font-medium">
-              {formatBytes(batchUsage?.budgetBytes ?? stats.budgetBytes)}
+              {formatSize(batchUsage?.budgetBytes ?? stats.budgetBytes)}
             </div>
           </div>
           <div>
             <div className="text-muted-foreground">App RSS</div>
             <div className="font-medium">
-              {formatBytes(batchUsage?.processRssBytes ?? stats.processRssBytes)}
+              {formatSize(batchUsage?.processRssBytes ?? stats.processRssBytes)}
             </div>
           </div>
           {batchUsage && (
             <div>
               <div className="text-muted-foreground">Batch used</div>
-              <div className="font-medium">{formatBytes(batchUsage.usedBytes)}</div>
+              <div className="font-medium">{formatSize(batchUsage.usedBytes)}</div>
             </div>
           )}
         </div>
       )}
     </FieldSet>
   )
-}
-
-function formatBytes(bytes: number): string {
-  const units = ['B', 'KB', 'MB', 'GB']
-  let value = bytes
-  let unitIndex = 0
-  while (value >= 1024 && unitIndex < units.length - 1) {
-    value /= 1024
-    unitIndex += 1
-  }
-  return `${value.toFixed(1)} ${units[unitIndex]}`
 }
 
 function HistorySection({ draft, onChange, clearHistory }: SectionProps & { clearHistory: () => Promise<void> }) {
