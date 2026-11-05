@@ -229,19 +229,40 @@ pub fn deliver_output(
     })
 }
 
-/// Atomically commits a temp file to its final destination by rename. If the
-/// destination already exists, the temp is left for the caller to clean up
-/// and an `AlreadyExists` IO error is returned so the caller can surface an
-/// `OutputFileError` — a file created by another process after name resolution
-/// must never be overwritten.
+/// Atomically commits a temp file to its final destination. `hard_link`
+/// fails if `dest` exists on both Unix and Windows, so the temp stays
+/// reachable and the caller can clean it up. On filesystems that do not
+/// support hard links (exFAT/FAT, cross-device), fall back to the previous
+/// checked-rename path.
 pub fn commit_output(temp: &Path, dest: &Path) -> std::io::Result<()> {
-    if dest.exists() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            format!("destination {} already exists", dest.display()),
-        ));
+    match std::fs::hard_link(temp, dest) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(temp);
+            Ok(())
+        }
+        Err(e) if link_unsupported(&e) => {
+            // shortcut: checked rename leaves a residual race on filesystems
+            // without hard-link support; production bundles target APFS/NTFS.
+            if dest.exists() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!("destination {} already exists", dest.display()),
+                ));
+            }
+            std::fs::rename(temp, dest)
+        }
+        Err(e) => Err(e),
     }
-    std::fs::rename(temp, dest)
+}
+
+fn link_unsupported(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::Unsupported
+            | std::io::ErrorKind::CrossesDevices
+            | std::io::ErrorKind::PermissionDenied
+            | std::io::ErrorKind::InvalidInput
+    )
 }
 
 /// Bounded stderr tail: retains the last ~2 KiB of a sidecar stream while
@@ -809,6 +830,7 @@ mod tests {
             b"precious existing data",
             "existing destination must not be clobbered"
         );
+        assert!(!dir.path().join("out.bin.yard-tmp").exists());
     }
 
     #[test]
