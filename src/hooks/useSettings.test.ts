@@ -36,7 +36,7 @@ const mockSettings: Settings = {
     other: { size: 5, unit: 'MB' },
   },
   qualityFloors: {
-    image: { minQuality: 60 },
+    image: { minQuality: 60, minLongEdge: 1280 },
     video: { minCrf: 28, minResolution: '1280x720' },
     pdf: { minDpi: 100, minJpegQuality: 55 },
     document: { minMediaQuality: 50 },

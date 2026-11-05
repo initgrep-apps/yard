@@ -51,7 +51,7 @@ export interface CategoryTarget {
 }
 
 export interface QualityFloors {
-  image: { minQuality: number }
+  image: { minQuality: number; minLongEdge: number }
   video: { minCrf: number; minResolution: string }
   pdf: { minDpi: number; minJpegQuality: number }
   document: { minMediaQuality: number }

@@ -31,11 +31,20 @@ pub struct CategoryTarget {
 #[serde(rename_all = "camelCase")]
 pub struct ImageQualityFloor {
     pub min_quality: u32,
+    #[serde(default = "default_min_long_edge")]
+    pub min_long_edge: u32,
+}
+
+fn default_min_long_edge() -> u32 {
+    1280
 }
 
 impl ImageQualityFloor {
     fn spec_default() -> Self {
-        ImageQualityFloor { min_quality: 30 }
+        ImageQualityFloor {
+            min_quality: 30,
+            min_long_edge: default_min_long_edge(),
+        }
     }
 }
 
@@ -280,6 +289,7 @@ mod tests {
         assert_eq!(s.category_targets.get("pdf").unwrap().size, 2);
         assert_eq!(s.category_targets.get("document").unwrap().size, 1);
         assert_eq!(s.quality_floors.image.min_quality, 30);
+        assert_eq!(s.quality_floors.image.min_long_edge, 1280);
         assert_eq!(s.quality_floors.video.min_crf, 28);
         assert_eq!(s.quality_floors.video.min_resolution, "480p");
         assert_eq!(s.quality_floors.pdf.min_dpi, 72);
@@ -303,6 +313,7 @@ mod tests {
         assert!(value.get("categoryTargets").is_some());
         let floors = value.get("qualityFloors").unwrap();
         assert!(floors.get("image").unwrap().get("minQuality").is_some());
+        assert!(floors.get("image").unwrap().get("minLongEdge").is_some());
         assert!(floors.get("video").unwrap().get("minCrf").is_some());
         assert!(floors.get("pdf").unwrap().get("minJpegQuality").is_some());
         assert!(floors
@@ -533,10 +544,33 @@ mod tests {
         assert_eq!(parsed.output_folder, "/tmp/out");
         assert_eq!(parsed.category_targets.get("image").unwrap().size, 200);
         assert_eq!(parsed.quality_floors.image.min_quality, 30);
+        assert_eq!(parsed.quality_floors.image.min_long_edge, 1280);
         assert_eq!(parsed.quality_floors.video.min_crf, 28);
         assert_eq!(parsed.quality_floors.video.min_resolution, "480p");
         assert_eq!(parsed.quality_floors.pdf.min_dpi, 72);
         assert_eq!(parsed.quality_floors.pdf.min_jpeg_quality, 15);
         assert_eq!(parsed.quality_floors.document.min_media_quality, 40);
+    }
+
+    #[test]
+    fn long_edge_floor_is_a_setting() {
+        let defaults = Settings::default();
+        assert_eq!(defaults.quality_floors.image.min_long_edge, 1280);
+
+        let mut custom = defaults.clone();
+        custom.quality_floors.image.min_long_edge = 1600;
+        let value = serde_json::to_value(&custom).unwrap();
+        assert_eq!(value["qualityFloors"]["image"]["minLongEdge"], 1600);
+        let roundtripped: Settings = serde_json::from_value(value).unwrap();
+        assert_eq!(roundtripped, custom);
+    }
+
+    #[test]
+    fn stored_image_floor_without_long_edge_keeps_its_quality() {
+        let parsed = parse_settings_value(Some(serde_json::json!({
+            "qualityFloors": { "image": { "minQuality": 60 } }
+        })));
+        assert_eq!(parsed.quality_floors.image.min_quality, 60);
+        assert_eq!(parsed.quality_floors.image.min_long_edge, 1280);
     }
 }

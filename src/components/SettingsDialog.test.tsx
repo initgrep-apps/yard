@@ -56,7 +56,7 @@ const baseSettings: Settings = {
     document: { size: 2, unit: "MB" },
   },
   qualityFloors: {
-    image: { minQuality: 30 },
+    image: { minQuality: 30, minLongEdge: 1280 },
     video: { minCrf: 28, minResolution: "720p" },
     pdf: { minDpi: 72, minJpegQuality: 15 },
     document: { minMediaQuality: 40 },
@@ -199,6 +199,26 @@ describe("SettingsDialog", () => {
       video: { size: 5, unit: "MB" },
       pdf: { size: 1, unit: "MB" },
       document: { size: 2, unit: "MB" },
+    })
+  })
+
+  it("saves the image long-edge floor without dropping the quality floor", async () => {
+    render(<SettingsDialog open onOpenChange={vi.fn()} />)
+    await screen.findByRole("tab", { name: "General" })
+    fireEvent.click(screen.getByRole("tab", { name: "Quality floors" }))
+    const input = screen.getByLabelText("Images minimum long edge")
+    expect(input).toHaveDisplayValue("1,280")
+
+    vi.useFakeTimers()
+    fireEvent.change(input, { target: { value: "1600" } })
+
+    await act(async () => {
+      vi.advanceTimersByTime(400)
+    })
+
+    expect(savedSettings().qualityFloors.image).toEqual({
+      minQuality: 30,
+      minLongEdge: 1600,
     })
   })
 

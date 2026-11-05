@@ -226,7 +226,10 @@ function FloorsSection({ draft, onChange }: SectionProps) {
               id="image-min-quality"
               value={floors.image.minQuality}
               onValueChange={(minQuality) =>
-                setFloors({ ...floors, image: { minQuality } })
+                setFloors({
+                  ...floors,
+                  image: { ...floors.image, minQuality },
+                })
               }
               min={0}
               max={100}
@@ -234,6 +237,28 @@ function FloorsSection({ draft, onChange }: SectionProps) {
               className="w-32"
             />
             <span className="w-4 text-xs text-muted-foreground">%</span>
+          </div>
+        </Field>
+        <Field orientation="horizontal">
+          <FieldLabel htmlFor="image-min-long-edge">
+            Images minimum long edge
+          </FieldLabel>
+          <div className="flex shrink-0 items-center gap-1.5">
+            <NumberStepper
+              id="image-min-long-edge"
+              value={floors.image.minLongEdge}
+              onValueChange={(minLongEdge) =>
+                setFloors({
+                  ...floors,
+                  image: { ...floors.image, minLongEdge },
+                })
+              }
+              min={1}
+              max={10000}
+              ariaLabel="Images minimum long edge"
+              className="w-32"
+            />
+            <span className="w-6 text-xs text-muted-foreground">px</span>
           </div>
         </Field>
         <Field orientation="horizontal">

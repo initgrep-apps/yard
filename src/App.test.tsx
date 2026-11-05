@@ -91,7 +91,7 @@ const settings: Settings = {
     document: { size: 2, unit: "MB" },
   },
   qualityFloors: {
-    image: { minQuality: 30 },
+    image: { minQuality: 30, minLongEdge: 1280 },
     video: { minCrf: 28, minResolution: "720p" },
     pdf: { minDpi: 72, minJpegQuality: 15 },
     document: { minMediaQuality: 40 },
