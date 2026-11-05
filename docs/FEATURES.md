@@ -30,19 +30,13 @@ What shipped, in the order the slices were built. This replaces the per-slice sp
 
 Per-file target override · batch presets · HEIC output · EMF/WMF conversion · magic-byte file detection · telemetry · auto-update · Linux packages.
 
-## Backlog (research, not approved)
+## Backlog
 
-From the 2026-10-18 architecture review. Pick one, grill it, then design:
+Approved and sliced: `docs/superpowers/plans/2026-11-backend-remediation.md` (ADRs 0010–0014). It absorbs the following items from the 2026-10-18 review: collapse the four ladders, move runner capabilities into the shared seam, one outcome sink, one classification source, an honest IPC seam, history orchestration out of `QueueState`, resolve sidecars once, and let the ladder own progress.
 
-1. Collapse the four compression ladders into one deep engine module.
-2. Move video-only runner capabilities (live progress, attempt cleanup) into the shared runner seam.
-3. One terminal-outcome sink instead of per-path event/record plumbing.
-4. One classification source; delete the dead registry interface.
-5. Make the IPC contract honest at a single seam.
-6. Move history orchestration out of `QueueState`.
-7. Resolve sidecar paths once behind an injectable seam.
-8. Let the ladder own progress-percent scale instead of the runner.
-9. Scheduled upstream drift check (`binaries:refresh --dry-run` opens an issue).
+Still unscheduled:
+
+- Scheduled upstream drift check (`binaries:refresh --dry-run` opens an issue).
 
 ## Known performance debt
 
