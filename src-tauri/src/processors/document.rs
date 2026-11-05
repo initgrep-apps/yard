@@ -389,30 +389,25 @@ pub fn write_archive(
         let chosen_path = media.get(&meta.index).ok_or_else(|| {
             CompressionError::OutputFileError(format!("missing media for {}", meta.name))
         })?;
-        let original_len = archive.by_index(meta.index)
-            .map_err(|e| {
-                eprintln!("warn: cannot read zip entry {} of {}: {e}", meta.name, input.display());
-                CompressionError::SidecarFailed(CORRUPT.to_string())
-            })?
-            .size();
         let chosen_len = std::fs::metadata(chosen_path)
             .map_err(|e| output_file_error(chosen_path, e))?
             .len();
 
-        let use_original = chosen_len > original_len;
-        let method = if use_original { deflate_options() } else { stored_options() };
-        writer
-            .start_file(meta.name.clone(), method)
-            .map_err(|e| CompressionError::OutputFileError(format!("rezip: {e}")))?;
+        let mut entry = archive.by_index(meta.index).map_err(|e| {
+            eprintln!("warn: cannot read zip entry {} of {}: {e}", meta.name, input.display());
+            CompressionError::SidecarFailed(CORRUPT.to_string())
+        })?;
+        let original_len = entry.size();
 
-        if use_original {
-            let mut entry = archive.by_index(meta.index).map_err(|e| {
-                eprintln!("warn: cannot read zip entry {} of {}: {e}", meta.name, input.display());
-                CompressionError::SidecarFailed(CORRUPT.to_string())
-            })?;
-            std::io::copy(&mut entry, &mut writer)
+        if chosen_len > original_len {
+            writer
+                .raw_copy_file(entry)
                 .map_err(|e| CompressionError::OutputFileError(format!("rezip entry {}: {e}", meta.name)))?;
         } else {
+            drop(entry);
+            writer
+                .start_file(meta.name.clone(), stored_options())
+                .map_err(|e| CompressionError::OutputFileError(format!("rezip: {e}")))?;
             let mut src = std::fs::File::open(chosen_path)
                 .map_err(|e| output_file_error(chosen_path, e))?;
             std::io::copy(&mut src, &mut writer)
@@ -1232,6 +1227,100 @@ awk -v n=9500 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
             .find(|(n, _)| n == "word/media/image1.jpg")
             .expect("media entry must survive");
         assert_eq!(media_entry.1, original, "media must not grow");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn media_fallback_preserves_original_method_and_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = make_executable_script(
+            dir.path(),
+            "fake-vips-grow",
+            r#"#!/bin/bash
+out="$3"
+base="${out%%\[*]}"
+# Always emit 9500 bytes, larger than the 9000-byte original.
+awk -v n=9500 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11) % 2147483647; printf "%c", int(s / 32768) % 255 + 1 } }' > "$base"
+"#,
+        );
+        let input = dir.path().join("in.docx");
+        let original_media = noise_bytes(9000);
+        // Build the input with a *stored* media entry so the method is observable.
+        let file = fs::File::create(&input).unwrap();
+        let mut writer = ZipWriter::new(file);
+        writer
+            .start_file(
+                "[Content_Types].xml",
+                SimpleFileOptions::default().compression_method(CompressionMethod::Deflated),
+            )
+            .unwrap();
+        writer.write_all(CONTENT_TYPES).unwrap();
+        writer
+            .start_file(
+                "word/document.xml",
+                SimpleFileOptions::default().compression_method(CompressionMethod::Deflated),
+            )
+            .unwrap();
+        writer.write_all(DOCUMENT_XML).unwrap();
+        writer
+            .start_file(
+                "word/media/image1.jpg",
+                SimpleFileOptions::default().compression_method(CompressionMethod::Stored),
+            )
+            .unwrap();
+        writer.write_all(&original_media).unwrap();
+        writer.finish().unwrap();
+
+        let input_compressed_size = {
+            let file = fs::File::open(&input).unwrap();
+            let mut archive = ZipArchive::new(file).unwrap();
+            let mut size = 0u64;
+            for i in 0..archive.len() {
+                let entry = archive.by_index(i).unwrap();
+                if entry.name().unwrap() == "word/media/image1.jpg" {
+                    size = entry.compressed_size();
+                    break;
+                }
+            }
+            size
+        };
+
+        let tmp = dir.path().join("tmp");
+        fs::create_dir_all(&tmp).unwrap();
+
+        DocumentProcessor
+            .compress_to_target(
+                &input,
+                &dir.path().join("out.docx"),
+                100,
+                &floors_with(40),
+                CancellationToken::new(),
+                ProgressSender::test_stub(),
+                &test_sidecar_paths(Some(fake)),
+                &tmp,
+            )
+            .unwrap();
+
+        let output_path = dir.path().join("out.docx");
+        let file = fs::File::open(&output_path).unwrap();
+        let mut archive = ZipArchive::new(file).unwrap();
+        for i in 0..archive.len() {
+            let entry = archive.by_index(i).unwrap();
+            if entry.name().unwrap() == "word/media/image1.jpg" {
+                assert_eq!(
+                    entry.compression(),
+                    CompressionMethod::Stored,
+                    "fallback media must keep the original Stored method"
+                );
+                assert_eq!(
+                    entry.compressed_size(),
+                    input_compressed_size,
+                    "fallback media compressed size must equal the original entry"
+                );
+                return;
+            }
+        }
+        panic!("media entry missing in output");
     }
 
     fn crc32(data: &[u8]) -> u32 {
