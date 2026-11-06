@@ -61,11 +61,18 @@ impl ProcessorRegistry {
 
     #[cfg(test)]
     pub(crate) fn with_processor(processor: Box<dyn CompressionProcessor>) -> Self {
+        Self::with_processors(vec![processor])
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_processors(processors: Vec<Box<dyn CompressionProcessor>>) -> Self {
         let mut registry = ProcessorRegistry {
             processors: HashMap::new(),
             extension_map: HashMap::new(),
         };
-        registry.register(processor);
+        for processor in processors {
+            registry.register(processor);
+        }
         registry
     }
 

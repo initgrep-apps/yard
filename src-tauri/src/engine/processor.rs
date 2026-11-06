@@ -122,8 +122,8 @@ impl SidecarPaths {
 
 /// The best attempt seen so far in a multi-pass search. `size` is the byte
 /// length of the output at `path`; `strategy`/`quality` describe the pass
-/// that produced it. `keep_smaller_in` is the single smallest-wins
-/// enforcement point shared by every processor's best-effort selection.
+/// that produced it. `Ladder::record` is the only caller of
+/// `keep_smaller_in`, so every processor shares one smallest-wins rule.
 #[derive(Debug, Clone)]
 pub struct BestAttempt {
     pub size: u64,

@@ -497,7 +497,7 @@ impl CompressionProcessor for DocumentProcessor {
             .map_err(|e| CompressionError::InputFileError(e.to_string()))?;
 
         let mut ladder = Ladder::new();
-        if let Some(result) = ladder.shortcut(ctx, input_size) {
+        if let Some(result) = ladder.shortcut(ctx, input_size)? {
             return Ok(result);
         }
 
@@ -567,10 +567,19 @@ impl CompressionProcessor for DocumentProcessor {
         if media_total == 0 {
             let attempt_path = ctx.temp_dir.join(format!("attempt-0.{ext}"));
             ladder.track(&attempt_path);
-            write_archive(ctx.input, &metas, &media_map, &attempt_path)?;
-            let size = std::fs::metadata(&attempt_path)
-                .map_err(|e| output_file_error(&attempt_path, e))?
-                .len();
+            if let Err(error) = write_archive(ctx.input, &metas, &media_map, &attempt_path) {
+                remove_all(&temp_paths.borrow());
+                ladder.abandon();
+                return Err(error);
+            }
+            let size = match std::fs::metadata(&attempt_path) {
+                Ok(metadata) => metadata.len(),
+                Err(error) => {
+                    remove_all(&temp_paths.borrow());
+                    ladder.abandon();
+                    return Err(output_file_error(&attempt_path, error));
+                }
+            };
             let decision = ladder.record(
                 ctx,
                 AttemptOutcome::Produced {

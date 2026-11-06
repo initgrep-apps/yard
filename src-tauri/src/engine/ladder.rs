@@ -87,13 +87,17 @@ impl Ladder {
     }
 
     /// Copies an already-fitting input through the atomic commit path. `None`
-    /// means the input is over target (or the copy failed, which is reported
-    /// by the following attempt/finish instead of replacing the destination).
-    pub fn shortcut(&self, ctx: &JobContext<'_>, input_size: u64) -> Option<CompressionResult> {
+    /// means the input is over target; delivery failures are propagated so an
+    /// under-target job cannot silently fall into the compression pipeline.
+    pub fn shortcut(
+        &self,
+        ctx: &JobContext<'_>,
+        input_size: u64,
+    ) -> Result<Option<CompressionResult>, CompressionError> {
         if input_size > ctx.target_bytes {
-            return None;
+            return Ok(None);
         }
-        match deliver_output(
+        deliver_output(
             ctx.input,
             ctx.output,
             input_size,
@@ -102,13 +106,8 @@ impl Ladder {
             true,
             &ctx.progress,
             &ctx.cancel,
-        ) {
-            Ok(result) => Some(result),
-            Err(error) => {
-                eprintln!("warn: already-under-target copy failed: {error}");
-                None
-            }
-        }
+        )
+        .map(Some)
     }
 
     pub fn record(&mut self, ctx: &JobContext<'_>, outcome: AttemptOutcome) -> AttemptDecision {
@@ -388,7 +387,8 @@ mod tests {
 
         let result = ladder
             .shortcut(&ctx, input_size)
-            .expect("under-target input must take the copy path");
+            .expect("under-target input must take the copy path")
+            .expect("under-target input must return the copy result");
         assert!(result.met_target);
         assert_eq!(result.strategy_used, STRATEGY_ALREADY_UNDER_TARGET);
         assert_eq!(result.compressed_size, input_size);
@@ -405,9 +405,97 @@ mod tests {
         std::fs::write(&fixture.output, b"precious").unwrap();
         let input_size = std::fs::metadata(&ctx.input).unwrap().len();
 
-        assert!(Ladder::new().shortcut(&ctx, input_size).is_none());
+        let error = Ladder::new()
+            .shortcut(&ctx, input_size)
+            .expect_err("an existing destination must fail the copy");
+        assert!(
+            matches!(error, CompressionError::OutputFileError(_)),
+            "got {error:?}"
+        );
         assert_eq!(std::fs::read(&fixture.output).unwrap(), b"precious");
         assert!(ctx.input.exists(), "the input must never be moved or removed");
+    }
+
+    #[test]
+    fn shortcut_propagates_output_file_error() {
+        let fixture = Fixture::new();
+        let ctx = fixture.ctx(CancellationToken::new(), ProgressSender::test_stub());
+        std::fs::write(&fixture.output, b"precious").unwrap();
+        let input_size = std::fs::metadata(&ctx.input).unwrap().len();
+
+        assert!(
+            ctx.sidecars.vips.is_none(),
+            "no engine may be required to observe the copy error"
+        );
+        let error = Ladder::new()
+            .shortcut(&ctx, input_size)
+            .expect_err("a copy onto an existing destination must fail");
+        assert!(
+            matches!(error, CompressionError::OutputFileError(_)),
+            "shortcut must surface OutputFileError, got {error:?}"
+        );
+        assert_eq!(std::fs::read(&fixture.output).unwrap(), b"precious");
+        assert!(ctx.input.exists(), "the input must survive a failed copy");
+        assert_eq!(
+            std::fs::read_dir(ctx.temp_dir).unwrap().count(),
+            0,
+            "a failed shortcut must not leave attempt files"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn shortcut_propagates_cancelled() {
+        use std::io::Write;
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("in.fifo");
+        let c_path = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+
+        let output = dir.path().join("out.bin");
+        let temp = dir.path().join("tmp");
+        let floors = QualityFloors::default();
+        let sidecars = sidecars();
+        let token = CancellationToken::new();
+        let worker_token = token.clone();
+        let worker_fifo = fifo.clone();
+        let worker_output = output.clone();
+        let worker_temp = temp.clone();
+
+        let worker = std::thread::spawn(move || {
+            let ctx = JobContext::new(
+                &worker_fifo,
+                &worker_output,
+                2 * 1024 * 1024,
+                &floors,
+                worker_token,
+                ProgressSender::test_stub(),
+                &sidecars,
+                &worker_temp,
+            );
+            Ladder::new().shortcut(&ctx, 1024 * 1024)
+        });
+
+        let mut writer = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&fifo)
+            .unwrap();
+        writer.write_all(&[0u8; 8192]).unwrap();
+        token.cancel();
+        drop(writer);
+
+        let result = worker.join().unwrap();
+        assert!(
+            matches!(result, Err(CompressionError::Cancelled)),
+            "cancelled shortcut must surface Cancelled, got {result:?}"
+        );
+        assert!(!output.exists(), "cancelled shortcut must not deliver");
+        assert!(
+            !output.with_extension("yard-tmp").exists(),
+            "the partial copy must be removed on cancel"
+        );
     }
 
     #[test]

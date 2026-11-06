@@ -1102,6 +1102,49 @@ mod tests {
         assert_eq!(panic_payload_message(&payload), "job panicked");
     }
 
+    struct BlockingProcessor {
+        category: crate::models::Category,
+        started: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        cancel_delay_ms: u64,
+    }
+
+    impl CompressionProcessor for BlockingProcessor {
+        fn category(&self) -> crate::models::Category {
+            self.category
+        }
+
+        fn supported_extensions(&self) -> &[&str] {
+            &[]
+        }
+
+        fn compress(
+            &self,
+            ctx: &crate::engine::JobContext<'_>,
+        ) -> Result<CompressionResult, CompressionError> {
+            self.started
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while std::time::Instant::now() < deadline {
+                if ctx.cancel.is_cancelled() {
+                    if self.cancel_delay_ms > 0 {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            self.cancel_delay_ms,
+                        ));
+                    }
+                    return Err(CompressionError::Cancelled);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Ok(CompressionResult {
+                output_path: ctx.output.to_path_buf(),
+                compressed_size: 1,
+                quality_used: 100,
+                met_target: true,
+                strategy_used: "blocking".to_string(),
+            })
+        }
+    }
+
     struct SleepingEngineProcessor;
 
     impl CompressionProcessor for SleepingEngineProcessor {
@@ -1466,13 +1509,32 @@ mod tests {
         root: &std::path::Path,
         settings_json: serde_json::Value,
     ) -> tauri::App<tauri::test::MockRuntime> {
-        make_app_inner(root, settings_json, true)
+        make_app_with_registry(
+            root,
+            settings_json,
+            true,
+            std::sync::Arc::new(ProcessorRegistry::new()),
+        )
     }
 
     fn make_app_inner(
         root: &std::path::Path,
         settings_json: serde_json::Value,
         manage_history: bool,
+    ) -> tauri::App<tauri::test::MockRuntime> {
+        make_app_with_registry(
+            root,
+            settings_json,
+            manage_history,
+            std::sync::Arc::new(ProcessorRegistry::new()),
+        )
+    }
+
+    fn make_app_with_registry(
+        root: &std::path::Path,
+        settings_json: serde_json::Value,
+        manage_history: bool,
+        registry: std::sync::Arc<ProcessorRegistry>,
     ) -> tauri::App<tauri::test::MockRuntime> {
         let settings_store = root.join("settings.json");
         std::fs::write(
@@ -1492,7 +1554,7 @@ mod tests {
             .manage(FileListState(std::sync::Mutex::new(Vec::new())))
             .build(ctx)
             .unwrap();
-        app.manage(QueueState::new(app.handle().clone(), std::sync::Arc::new(ProcessorRegistry::new())));
+        app.manage(QueueState::new(app.handle().clone(), registry));
         if manage_history {
             app.manage(crate::history::HistoryStore::new_in(root));
         }
@@ -1514,15 +1576,31 @@ mod tests {
         tauri::App<tauri::test::MockRuntime>,
         std::path::PathBuf,
     ) {
+        setup_app_with_registry(
+            budget_mb,
+            std::sync::Arc::new(ProcessorRegistry::new()),
+        )
+    }
+
+    fn setup_app_with_registry(
+        budget_mb: u32,
+        registry: std::sync::Arc<ProcessorRegistry>,
+    ) -> (
+        tempfile::TempDir,
+        tauri::App<tauri::test::MockRuntime>,
+        std::path::PathBuf,
+    ) {
         let root = tempfile::TempDir::new().unwrap();
         let out = root.path().join("out");
         std::fs::create_dir_all(&out).unwrap();
-        let app = make_app(
+        let app = make_app_with_registry(
             root.path(),
             serde_json::json!({
                 "outputFolder": out.to_str().unwrap(),
                 "performance": { "adaptiveMemory": false, "memoryCeilingMb": budget_mb }
             }),
+            true,
+            registry,
         );
         app.state::<QueueState<tauri::test::MockRuntime>>()
             .set_test_estimate(fixed_estimate);
@@ -1691,6 +1769,106 @@ mod tests {
                     entry.status
                 ),
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_all_lets_in_flight_jobs_write_terminal_history() {
+        use std::sync::atomic::Ordering;
+
+        let _temp_guard = temp_guard();
+        let started = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let registry = std::sync::Arc::new(ProcessorRegistry::with_processors(vec![
+            Box::new(BlockingProcessor {
+                category: crate::models::Category::Image,
+                started: started.clone(),
+                cancel_delay_ms: 0,
+            }),
+            Box::new(BlockingProcessor {
+                category: crate::models::Category::Pdf,
+                started: started.clone(),
+                cancel_delay_ms: 300,
+            }),
+            Box::new(BlockingProcessor {
+                category: crate::models::Category::Document,
+                started: started.clone(),
+                cancel_delay_ms: 0,
+            }),
+        ]));
+        let (_root, app, _out) = setup_app_with_registry(600, registry);
+        let ids = add_entries(
+            &app,
+            &[
+                ("i1.jpg", crate::models::Category::Image, "/tmp/i1.jpg"),
+                ("p1.pdf", crate::models::Category::Pdf, "/tmp/p1.pdf"),
+                ("d1.docx", crate::models::Category::Document, "/tmp/d1.docx"),
+            ],
+        );
+        let store = app.state::<crate::history::HistoryStore>();
+        let store = store.inner();
+        let rx = events_of(
+            &app.handle(),
+            &["file:error", "file:cancelled", "file:complete", "batch:complete"],
+        );
+        let queue = app.state::<QueueState<tauri::test::MockRuntime>>();
+        QueueState::start_batch(
+            queue.inner(),
+            &app.handle(),
+            "cancel-inflight".into(),
+            ids.clone(),
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while started.load(Ordering::SeqCst) < 2 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "both lanes must be in flight before cancel-all"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        queue.cancel_all();
+        wait_idle(&queue, "cancel-inflight");
+
+        let mut cancelled = std::collections::HashSet::new();
+        loop {
+            let (topic, payload) = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+            if topic == "batch:complete" {
+                break;
+            }
+            assert_eq!(
+                topic, "file:cancelled",
+                "an in-flight job must finalize as cancelled, got {topic} {payload}"
+            );
+            cancelled.insert(payload["fileId"].as_str().unwrap().to_string());
+        }
+        for id in &ids {
+            assert!(
+                cancelled.contains(id),
+                "in-flight row {id} never emitted file:cancelled"
+            );
+        }
+
+        {
+            let state = app.state::<FileListState>();
+            let list = state.0.lock().unwrap();
+            for entry in list.iter() {
+                assert_eq!(
+                    entry.status,
+                    crate::models::FileStatus::Cancelled,
+                    "row {} must be terminal after cancel-all",
+                    entry.name
+                );
+            }
+        }
+
+        let records = raw_file_records(store);
+        for id in &ids {
+            assert!(
+                records
+                    .iter()
+                    .any(|record| &record.file_id == id && record.status == "cancelled"),
+                "in-flight row {id} has no cancelled history record: {records:?}"
+            );
         }
     }
 

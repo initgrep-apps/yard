@@ -318,7 +318,7 @@ impl CompressionProcessor for ImageProcessor {
             .map_err(|e| CompressionError::InputFileError(e.to_string()))?;
 
         let mut ladder = Ladder::new();
-        if let Some(result) = ladder.shortcut(ctx, input_size) {
+        if let Some(result) = ladder.shortcut(ctx, input_size)? {
             return Ok(result);
         }
 
@@ -652,6 +652,40 @@ mod tests {
         assert_eq!(result.strategy_used, "already-under-target");
         assert_eq!(result.compressed_size, 4);
         assert_eq!(fs::read(&output).unwrap(), b"tiny");
+    }
+
+    #[test]
+    fn under_target_copy_failure_precedes_engine_lookup() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.jpg");
+        let output = dir.path().join("out.jpg");
+        fs::write(&input, b"tiny").unwrap();
+        fs::write(&output, b"precious").unwrap();
+
+        let result = ImageProcessor.compress(&JobContext::new(
+            &input,
+            &output,
+            200 * 1024,
+            &crate::settings::QualityFloors::default(),
+            CancellationToken::new(),
+            ProgressSender::test_stub(),
+            &SidecarPaths {
+                vips: None,
+                ffmpeg: None,
+                ffprobe: None,
+                gs: None,
+                qpdf: None,
+                gs_resources: None,
+            },
+            &dir.path().join("tmp"),
+        ));
+
+        assert!(
+            matches!(result, Err(CompressionError::OutputFileError(_))),
+            "an under-target copy failure must not degrade to SidecarNotFound: {result:?}"
+        );
+        assert_eq!(fs::read(&output).unwrap(), b"precious");
+        assert_eq!(fs::read(&input).unwrap(), b"tiny");
     }
 
     #[test]

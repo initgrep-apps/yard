@@ -802,7 +802,7 @@ impl CompressionProcessor for VideoProcessor {
         // Checked BEFORE requiring ffmpeg/ffprobe so a video under target
         // never fails on missing sidecars.
         let mut ladder = Ladder::new();
-        if let Some(result) = ladder.shortcut(ctx, input_size) {
+        if let Some(result) = ladder.shortcut(ctx, input_size)? {
             return Ok(result);
         }
 

@@ -49,53 +49,59 @@ where
     let mut estimates: HashMap<tokio::task::Id, (usize, u64)> = HashMap::new();
     let mut active_lanes: HashSet<usize> = HashSet::new();
     let mut oversize_warned = false;
+    let mut stopping = false;
 
     loop {
         let mut dispatched = false;
-        for idx in 0..lanes.len() {
-            if lanes[idx].jobs.is_empty() {
-                continue;
-            }
-            if active_lanes.contains(&idx) {
-                continue;
-            }
-            let job = lanes[idx].jobs.front().expect("checked non-empty");
-            let est = estimate(job);
-            let can_admit = if used + est <= budget {
-                true
-            } else if est > budget && tasks.is_empty() {
-                if !oversize_warned {
-                    oversize_warned = true;
-                    eprintln!(
-                        "warn: job estimate {est} exceeds memory budget {budget}; running oversize jobs alone to avoid deadlock"
-                    );
+        if !stopping {
+            for idx in 0..lanes.len() {
+                if lanes[idx].jobs.is_empty() {
+                    continue;
                 }
-                true
-            } else {
-                false
-            };
-            if !can_admit {
-                continue;
-            }
-            if should_stop() {
-                for lane in lanes.iter_mut() {
-                    while let Some(job) = lane.jobs.pop_front() {
-                        on_skipped(&job);
+                if active_lanes.contains(&idx) {
+                    continue;
+                }
+                let job = lanes[idx].jobs.front().expect("checked non-empty");
+                let est = estimate(job);
+                let can_admit = if used + est <= budget {
+                    true
+                } else if est > budget && tasks.is_empty() {
+                    if !oversize_warned {
+                        oversize_warned = true;
+                        eprintln!(
+                            "warn: job estimate {est} exceeds memory budget {budget}; running oversize jobs alone to avoid deadlock"
+                        );
                     }
+                    true
+                } else {
+                    false
+                };
+                if !can_admit {
+                    continue;
                 }
+                if should_stop() {
+                    for lane in lanes.iter_mut() {
+                        while let Some(job) = lane.jobs.pop_front() {
+                            on_skipped(&job);
+                        }
+                    }
+                    // JoinSet aborts its tasks on drop; keep the loop alive so
+                    // in-flight jobs finish their terminal row/history writes.
+                    stopping = true;
+                    break;
+                }
+                let job = lanes[idx].jobs.pop_front().expect("checked non-empty");
+                used = used.saturating_add(est);
+                active_lanes.insert(idx);
+                let future = run_job(job);
+                let handle = tasks.spawn(async move {
+                    let saved = future.await;
+                    (idx, est, saved)
+                });
+                estimates.insert(handle.id(), (idx, est));
+                dispatched = true;
                 break;
             }
-            let job = lanes[idx].jobs.pop_front().expect("checked non-empty");
-            used = used.saturating_add(est);
-            active_lanes.insert(idx);
-            let future = run_job(job);
-            let handle = tasks.spawn(async move {
-                let saved = future.await;
-                (idx, est, saved)
-            });
-            estimates.insert(handle.id(), (idx, est));
-            dispatched = true;
-            break;
         }
 
         if !dispatched {
@@ -299,6 +305,53 @@ mod tests {
         }, |_| {}, estimate).await;
         assert_eq!(total, 400);
         assert_eq!(*probe.max_seen.lock().unwrap().get("video").unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn stop_with_a_second_lane_in_flight_drains_both() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let completed = Arc::new(Mutex::new(Vec::new()));
+        let lanes = make_lanes(&[
+            ("image", 100, vec!["a", "queued"]),
+            ("pdf", 100, vec!["p"]),
+        ]);
+        let stop2 = stop.clone();
+        let completed2 = completed.clone();
+        let total = run_budgeted_lanes(
+            lanes,
+            200,
+            move || stop2.load(Ordering::SeqCst),
+            move |j| {
+                let stop = stop.clone();
+                let completed = completed2.clone();
+                async move {
+                    if j == "image:a" {
+                        stop.store(true, Ordering::SeqCst);
+                    } else if j == "pdf:p" {
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    }
+                    completed.lock().unwrap().push(j.clone());
+                    estimate(&j)
+                }
+            },
+            |_| {},
+            estimate,
+        )
+        .await;
+
+        assert_eq!(total, 200);
+        let completed = completed.lock().unwrap().clone();
+        assert!(completed.contains(&"image:a".to_string()));
+        assert!(
+            completed.contains(&"pdf:p".to_string()),
+            "the in-flight lane must finish, never be aborted: {completed:?}"
+        );
+        assert!(
+            !completed.contains(&"image:queued".to_string()),
+            "queued work must still be skipped: {completed:?}"
+        );
     }
 
     #[tokio::test]
