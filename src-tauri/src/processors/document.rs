@@ -1021,7 +1021,7 @@ awk -v n="$n" 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake.clone())),
                 &tmp,
-            ))
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         let remaining: Vec<_> = fs::read_dir(&tmp).unwrap().flatten().collect();
@@ -1049,7 +1049,7 @@ awk -v n="$n" 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(worker_fake)),
                 &worker_tmp,
-            ))
+            ).with_declared(&Change::ALL))
         });
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -1194,7 +1194,7 @@ awk -v n="$n" 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            ))
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         let out = dir.path().join("out.docx");
@@ -1253,7 +1253,7 @@ awk -v n=9500 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            ))
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         let output = read_zip_contents(&dir.path().join("out.docx"));
@@ -1333,7 +1333,7 @@ awk -v n=9500 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            ))
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         let output_path = dir.path().join("out.docx");
@@ -1385,7 +1385,7 @@ awk -v n=9500 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            ))
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         let log = fs::read_to_string(dir.path().join("args.log")).unwrap();
@@ -1452,7 +1452,7 @@ head -c 9000 /dev/zero > "$base"
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            ))
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         let output = dir.path().join("out.docx");
@@ -1667,7 +1667,7 @@ head -c 9000 /dev/zero > "$base"
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            ))
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         assert!(result.met_target, "strategy: {}", result.strategy_used);
@@ -1772,7 +1772,7 @@ head -c 9000 /dev/zero > "$base"
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            ))
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         assert!(result.met_target, "strategy: {}", result.strategy_used);
@@ -1825,7 +1825,7 @@ head -c 9000 /dev/zero > "$base"
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            ))
+            ).with_declared(&Change::ALL))
             .unwrap();
         assert!(!result.met_target, "strategy: {}", result.strategy_used);
 
@@ -1910,7 +1910,7 @@ head -c 9000 /dev/zero > "$base"
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake.clone())),
                 &tmp,
-            ))
+            ).with_declared(&Change::ALL))
             .unwrap();
         assert!(!result.met_target);
         let q40_run = read_q_log(&dir.path());
@@ -1936,7 +1936,7 @@ head -c 9000 /dev/zero > "$base"
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            ))
+            ).with_declared(&Change::ALL))
             .unwrap();
         let q10_run = read_q_log(&dir.path());
         assert!(
@@ -1978,7 +1978,7 @@ head -c 9000 /dev/zero > "$base"
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            ))
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         assert!(!result.met_target, "strategy: {}", result.strategy_used);
@@ -2028,7 +2028,7 @@ head -c 9000 /dev/zero > "$base"
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            ))
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         assert!(result.met_target, "strategy: {}", result.strategy_used);
@@ -2102,7 +2102,7 @@ head -c 9000 /dev/zero > "$base"
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            ))
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         assert!(
@@ -2165,7 +2165,7 @@ exit 1
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            ))
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         let raw_log = fs::read_to_string(dir.path().join("q.log")).unwrap_or_default();
@@ -2213,7 +2213,7 @@ exit 1
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            ))
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         assert!(
@@ -2266,7 +2266,7 @@ exit 1
             ProgressSender::test_stub(),
             &test_sidecar_paths(Some(fake)),
             &tmp,
-        ));
+        ).with_declared(&Change::ALL));
 
         match result {
             Err(e) => {
@@ -2317,7 +2317,7 @@ exit 1
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            ))
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         assert_eq!(result.strategy_used, "already-under-target");
@@ -2387,7 +2387,7 @@ exit 1
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(worker_fake)),
                 &worker_tmp,
-            ))
+            ).with_declared(&Change::ALL))
         });
 
         wait_for_q_entries(&dir.path(), 1);
@@ -2465,7 +2465,7 @@ awk -v n="$n" 'BEGIN { for (i = 0; i < n; i++) printf "%c", i % 251 }' > "$base"
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(worker_fake)),
                 &worker_tmp,
-            ))
+            ).with_declared(&Change::ALL))
         });
 
         wait_for_q_entries(&dir.path(), 2);
@@ -2523,7 +2523,7 @@ awk -v n="$n" 'BEGIN { for (i = 0; i < n; i++) printf "%c", i % 251 }' > "$base"
             ProgressSender::test_stub(),
             &test_sidecar_paths(Some(fake)),
             &tmp,
-        ));
+        ).with_declared(&Change::ALL));
 
         assert!(
             matches!(result, Err(CompressionError::OutputFileError(_))),
@@ -2582,7 +2582,7 @@ awk -v n="$n" 'BEGIN { for (i = 0; i < n; i++) printf "%c", i % 251 }' > "$base"
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(worker_fake)),
                 &worker_tmp,
-            ))
+            ).with_declared(&Change::ALL))
         });
 
         wait_for_file(&tmp, "fixed.docx");
@@ -2634,7 +2634,7 @@ awk -v n="$n" 'BEGIN { for (i = 0; i < n; i++) printf "%c", i % 251 }' > "$base"
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            ))
+            ).with_declared(&Change::ALL))
             .unwrap();
         assert!(result.met_target, "strategy: {}", result.strategy_used);
 
@@ -2699,7 +2699,7 @@ awk -v n="$n" 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            ))
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         assert!(
@@ -2769,7 +2769,7 @@ awk -v n="$n" 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
                 progress,
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            ))
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         assert!(result.met_target, "strategy: {}", result.strategy_used);
@@ -2829,7 +2829,7 @@ base="${out%%\[*]}"
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            ))
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         let output = read_zip_contents(&dir.path().join("out.docx"));
@@ -2880,7 +2880,7 @@ rm "$base"
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            ))
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         let output = read_zip_contents(&dir.path().join("out.docx"));
@@ -2924,7 +2924,7 @@ rm "$base"
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(sidecar)),
                 &tmp,
-            ))
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         let output = read_zip_contents(&dir.path().join("out.docx"));
@@ -2967,7 +2967,7 @@ rm "$base"
             ProgressSender::test_stub(),
             &test_sidecar_paths(Some(fake)),
             &tmp,
-        ));
+        ).with_declared(&Change::ALL));
 
         // zip 9.x reads the central directory and exposes only one entry per
         // name, so the processor sees a normal two-entry archive.
@@ -3019,7 +3019,7 @@ rm "$base"
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            ))
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         assert_eq!(
@@ -3116,7 +3116,7 @@ rm "$base"
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(sidecar)),
                 &tmp,
-            ))
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         assert!(result.compressed_size < input_size, "strategy: {}", result.strategy_used);
@@ -3180,7 +3180,7 @@ rm "$base"
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            ))
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         let output = read_zip_contents(&dir.path().join("out.docx"));

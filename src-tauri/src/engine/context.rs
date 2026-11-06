@@ -85,7 +85,7 @@ impl<'a> JobContext<'a> {
             temp_dir,
             policy: default_policy(),
             category: crate::detection::detect_category(&input.to_string_lossy()),
-            declared: &Change::ALL,
+            declared: &[],
             consent_gate: None,
         }
     }
@@ -172,6 +172,10 @@ mod tests {
         assert!(std::ptr::eq(ctx.sidecars, &sidecars));
         assert!(std::ptr::eq(ctx.temp_dir, temp.as_path()));
         assert_eq!(ctx.target_bytes, 42);
+        assert!(
+            ctx.declared.is_empty(),
+            "undeclared contexts must not silently claim every capability"
+        );
         assert_eq!(ctx.sidecars.require(SidecarName::Vips).unwrap(), "/engines/vips");
 
         token.cancel();

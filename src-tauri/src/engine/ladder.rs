@@ -386,7 +386,7 @@ mod tests {
                 progress,
                 &self.sidecars,
                 &self.temp,
-            )
+            ).with_declared(&Change::ALL)
         }
     }
 
@@ -608,7 +608,7 @@ mod tests {
                 ProgressSender::test_stub(),
                 &sidecars,
                 &worker_temp,
-            );
+            ).with_declared(&Change::ALL);
             Ladder::new().shortcut(&ctx, 1024 * 1024)
         });
 

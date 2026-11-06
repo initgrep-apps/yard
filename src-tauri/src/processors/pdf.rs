@@ -850,7 +850,7 @@ esac
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
                 &tmp,
-            ))
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         assert!(result.met_target, "strategy: {}", result.strategy_used);
@@ -892,7 +892,7 @@ esac
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
                 &tmp,
-            ))
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         assert!(result.met_target, "strategy: {}", result.strategy_used);
@@ -996,7 +996,7 @@ esac
                 ProgressSender::test_stub(),
                 &paths,
                 &tmp,
-            ))
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         assert_eq!(result.strategy_used, "gs dpi=100,jpegq=15");
@@ -1042,7 +1042,7 @@ esac
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
                 &tmp,
-            ))
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         assert!(
@@ -1135,7 +1135,7 @@ esac
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
                 &tmp,
-            ))
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         assert!(!result.met_target);
@@ -1178,7 +1178,7 @@ esac
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
                 &tmp,
-            ))
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         assert!(result.met_target);
@@ -1208,7 +1208,7 @@ esac
             ProgressSender::test_stub(),
             &test_sidecar_paths(Some(fake_qpdf), None),
             &tmp,
-        ));
+        ).with_declared(&Change::ALL));
         match result {
             Err(e) => {
                 assert!(
@@ -1244,7 +1244,7 @@ esac
             ProgressSender::test_stub(),
             &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
             &tmp,
-        ));
+        ).with_declared(&Change::ALL));
         match result {
             Err(CompressionError::SidecarFailed(msg)) => {
                 assert!(
@@ -1281,7 +1281,7 @@ esac
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
                 &tmp,
-            ))
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         assert!(
@@ -1318,7 +1318,7 @@ esac
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
                 &tmp,
-            ))
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         assert!(
@@ -1463,7 +1463,7 @@ exit 0
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(worker_qpdf), Some(worker_gs)),
                 &worker_tmp,
-            ))
+            ).with_declared(&Change::ALL))
         });
         std::thread::sleep(Duration::from_millis(300));
         token.cancel();
@@ -1505,7 +1505,7 @@ exit 0
             ProgressSender::test_stub(),
             &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
             &tmp,
-        ));
+        ).with_declared(&Change::ALL));
         match result {
             Err(CompressionError::SidecarFailed(msg)) => {
                 assert!(msg.contains("exited with code Some(1)"), "msg: {}", msg);
@@ -1543,7 +1543,7 @@ exit 0
                 Some(fake_gs_stderr_chatter_failer(&dir.path())),
             ),
             &tmp,
-        ));
+        ).with_declared(&Change::ALL));
         match without {
             Err(CompressionError::SidecarFailed(msg)) => {
                 assert!(
@@ -1576,7 +1576,7 @@ exit 0
             ProgressSender::test_stub(),
             &paths,
             &tmp,
-        ));
+        ).with_declared(&Change::ALL));
         match with {
             Err(CompressionError::SidecarFailed(msg)) => {
                 assert!(msg.contains("exited with code Some(1)"), "msg: {}", msg);
@@ -1608,7 +1608,7 @@ exit 0
             ProgressSender::test_stub(),
             &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
             &tmp,
-        ));
+        ).with_declared(&Change::ALL));
         match result {
             Err(e) => {
                 assert!(
@@ -1644,7 +1644,7 @@ exit 0
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
                 &tmp,
-            ))
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         assert!(!result.met_target);
@@ -1712,7 +1712,7 @@ exit 0
             ProgressSender::test_stub(),
             &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
             &tmp,
-        ));
+        ).with_declared(&Change::ALL));
 
         match result {
             Err(CompressionError::SidecarFailed(msg)) => {
@@ -1768,7 +1768,7 @@ exit 0
             ProgressSender::test_stub(),
             &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
             &tmp,
-        ));
+        ).with_declared(&Change::ALL));
 
         match result {
             Err(CompressionError::SidecarFailed(msg)) => {
@@ -1818,7 +1818,7 @@ exit 0
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(qpdf, gs),
                 &tmp,
-            ));
+            ).with_declared(&Change::ALL));
             match result {
                 Err(CompressionError::SidecarNotFound(name)) => assert_eq!(
                     name, expected,
@@ -1893,7 +1893,7 @@ exit 0
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(qpdf), Some(gs)),
                 &tmp,
-            ))
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         assert!(

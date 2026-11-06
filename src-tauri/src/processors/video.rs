@@ -1830,7 +1830,7 @@ duration=12.5
             ProgressSender::test_stub(),
             &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
             &tmp,
-        ).with_policy(permissive_policy()));
+        ).with_declared(&Change::ALL).with_policy(permissive_policy()));
 
         let err = result.unwrap_err();
         assert!(
@@ -1862,7 +1862,7 @@ duration=12.5
                     ProgressSender::test_stub(),
                     &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
                     &tmp,
-                ).with_policy(permissive_policy()))
+                ).with_declared(&Change::ALL).with_policy(permissive_policy()))
                 .unwrap();
             assert!(result.met_target, "got: {}", result.strategy_used);
         }
@@ -1889,7 +1889,7 @@ duration=12.5
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
                 &tmp,
-            ).with_policy(permissive_policy()));
+            ).with_declared(&Change::ALL).with_policy(permissive_policy()));
 
             let err = result.unwrap_err();
             assert!(
@@ -1921,7 +1921,7 @@ duration=12.5
             ProgressSender::test_stub(),
             &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
             &tmp,
-        ).with_policy(permissive_policy()));
+        ).with_declared(&Change::ALL).with_policy(permissive_policy()));
 
         let err = result.unwrap_err();
         assert!(
@@ -1953,7 +1953,7 @@ duration=12.5
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
                 &tmp,
-            ).with_policy(permissive_policy()))
+            ).with_declared(&Change::ALL).with_policy(permissive_policy()))
             .unwrap();
 
         assert!(result.met_target, "strategy: {}", result.strategy_used);
@@ -2012,7 +2012,7 @@ duration=12.5
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
                 &tmp,
-            ).with_policy(permissive_policy()))
+            ).with_declared(&Change::ALL).with_policy(permissive_policy()))
             .unwrap();
 
         assert!(
@@ -2046,7 +2046,7 @@ duration=12.5
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
                 &tmp,
-            ).with_policy(permissive_policy()))
+            ).with_declared(&Change::ALL).with_policy(permissive_policy()))
             .unwrap();
 
         assert!(
@@ -2081,7 +2081,7 @@ duration=12.5
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
                 &tmp,
-            ).with_policy(permissive_policy()))
+            ).with_declared(&Change::ALL).with_policy(permissive_policy()))
             .unwrap();
 
         assert!(!result.met_target);
@@ -2147,7 +2147,7 @@ duration=12.5
                     ProgressSender::test_stub(),
                     &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
                     &tmp,
-                ).with_policy(permissive_policy()))
+                ).with_declared(&Change::ALL).with_policy(permissive_policy()))
             }
         });
 
@@ -2216,7 +2216,7 @@ duration=12.5
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
                 &tmp,
-            ).with_policy(permissive_policy()))
+            ).with_declared(&Change::ALL).with_policy(permissive_policy()))
             .unwrap();
 
         assert!(result.met_target);
@@ -2246,7 +2246,7 @@ duration=12.5
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(engine.clone()), Some(engine)),
                 &tmp,
-            ).with_policy(permissive_policy()))
+            ).with_declared(&Change::ALL).with_policy(permissive_policy()))
             .unwrap();
 
         assert!(result.met_target, "strategy: {}", result.strategy_used);
@@ -2273,7 +2273,7 @@ duration=12.5
             ProgressSender::test_stub(),
             &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
             &tmp,
-        ).with_policy(permissive_policy()));
+        ).with_declared(&Change::ALL).with_policy(permissive_policy()));
 
         let err = result.unwrap_err();
         assert!(
@@ -2303,7 +2303,7 @@ duration=12.5
                 // None sidecars: any spawn attempt would fail the job.
                 &test_sidecar_paths(None, None),
                 &tmp,
-            ).with_policy(permissive_policy()))
+            ).with_declared(&Change::ALL).with_policy(permissive_policy()))
             .unwrap();
 
         assert!(result.met_target);
@@ -2333,7 +2333,7 @@ duration=12.5
             ProgressSender::test_stub(),
             &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
             &tmp,
-        ).with_policy(permissive_policy()));
+        ).with_declared(&Change::ALL).with_policy(permissive_policy()));
 
         let err = result.unwrap_err();
         assert!(err.to_string().contains("File may be corrupt"), "got: {err}");
@@ -2360,7 +2360,7 @@ duration=12.5
             ProgressSender::test_stub(),
             &test_sidecar_paths(None, Some(ffprobe)),
             &tmp,
-        ).with_policy(permissive_policy()));
+        ).with_declared(&Change::ALL).with_policy(permissive_policy()));
 
         let err = result.unwrap_err();
         assert!(
@@ -2400,7 +2400,7 @@ duration=12.5
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
                 &tmp,
-            ).with_policy(permissive_policy()))
+            ).with_declared(&Change::ALL).with_policy(permissive_policy()))
             .unwrap();
 
         let log = ffmpeg_log(&dir.path());
@@ -2493,7 +2493,7 @@ head -c $(( size - 12 )) /dev/zero >> "$out"
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
                 &tmp,
-            ).with_policy(permissive_policy()))
+            ).with_declared(&Change::ALL).with_policy(permissive_policy()))
             .unwrap();
 
         let log = ffmpeg_log(&dir.path());
@@ -2556,7 +2556,7 @@ exit 1
             ProgressSender::test_stub(),
             &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
             &tmp,
-        ).with_policy(permissive_policy()));
+        ).with_declared(&Change::ALL).with_policy(permissive_policy()));
 
         let err = result.unwrap_err();
         // The last attempt is the final CRF rung at the 480p cap width.
@@ -2622,7 +2622,7 @@ head -c 88 /dev/zero >> "$out"
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
                 &tmp,
-            ).with_policy(permissive_policy()))
+            ).with_declared(&Change::ALL).with_policy(permissive_policy()))
             .unwrap();
 
         let log = ffmpeg_log(&dir.path());
@@ -2687,7 +2687,7 @@ head -c 88 /dev/zero >> "$out"
                 progress,
                 &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
                 &tmp,
-            ).with_policy(permissive_policy()))
+            ).with_declared(&Change::ALL).with_policy(permissive_policy()))
             .unwrap();
 
         assert!(result.met_target);
@@ -2925,7 +2925,7 @@ head -c 88 /dev/zero >> "$out"
                 progress,
                 &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
                 &tmp,
-            ).with_policy(permissive_policy()))
+            ).with_declared(&Change::ALL).with_policy(permissive_policy()))
             .unwrap();
 
         assert!(result.met_target);
