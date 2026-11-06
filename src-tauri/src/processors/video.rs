@@ -219,11 +219,11 @@ impl VideoProcessor {
         if input_ext != crate::registry::output_extension(input.to_string_lossy().as_ref()) {
             changes.push(Change::FormatChange);
         }
-        if input_streams.video > 1 || input_streams.data > 0 {
+        if input_streams.video > 1 || input_streams.data > 0 || input_streams.attachment > 0 {
             changes.push(Change::DropStream);
         }
-        if let (Some(cap), Some(input_width)) = (scale_width, input_streams.width) {
-            if cap < input_width {
+        if let Some(cap) = scale_width {
+            if input_streams.width.map_or(true, |input_width| cap < input_width) {
                 changes.push(Change::Downscale);
             }
         }
@@ -411,7 +411,7 @@ impl VideoProcessor {
 
     /// Content-equivalence gate: a smaller file that lost a track or a chunk
     /// of duration is not a successful compression. Dropping a stream needs
-    /// consent (Task 10); until then the input counts are the floor.
+    /// the `DropStream` grant; until then the input counts are the floor.
     fn validate_output(
         input: &StreamInfo,
         output: &StreamInfo,
@@ -596,6 +596,7 @@ impl VideoProcessor {
         let mut audio = 0;
         let mut subtitle = 0;
         let mut data = 0;
+        let mut attachment = 0;
         let mut width = None;
         let mut pending_width = None;
         let mut current_is_video = false;
@@ -614,6 +615,7 @@ impl VideoProcessor {
                             "audio" => audio += 1,
                             "subtitle" => subtitle += 1,
                             "data" => data += 1,
+                            "attachment" => attachment += 1,
                             _ => {}
                         }
                     }
@@ -644,6 +646,7 @@ impl VideoProcessor {
                 "audio" => audio += 1,
                 "subtitle" => subtitle += 1,
                 "data" => data += 1,
+                "attachment" => attachment += 1,
                 _ => {
                     if duration_secs.is_none() {
                         duration_secs = Self::parse_duration_output(line);
@@ -657,6 +660,7 @@ impl VideoProcessor {
             audio,
             subtitle,
             data,
+            attachment,
             width,
         })
     }
@@ -819,6 +823,7 @@ struct StreamInfo {
     audio: u32,
     subtitle: u32,
     data: u32,
+    attachment: u32,
     width: Option<u32>,
 }
 
@@ -1290,11 +1295,15 @@ fi
                 match *line {
                     "video" => {
                         keyed.push("codec_type=video".to_string());
-                        keyed.push(format!("width={}", width.unwrap_or(0)));
+                        match width {
+                            Some(width) => keyed.push(format!("width={width}")),
+                            None => keyed.push("width=N/A".to_string()),
+                        }
                     }
                     "audio" => keyed.push("codec_type=audio".to_string()),
                     "subtitle" => keyed.push("codec_type=subtitle".to_string()),
                     "data" => keyed.push("codec_type=data".to_string()),
+                    "attachment" => keyed.push("codec_type=attachment".to_string()),
                     duration => keyed.push(format!("duration={duration}")),
                 }
             }
@@ -1377,6 +1386,7 @@ codec_type=audio
 codec_type=audio
 codec_type=subtitle
 codec_type=data
+codec_type=attachment
 width=N/A
 duration=12.5
 ";
@@ -1389,6 +1399,7 @@ duration=12.5
                 audio: 2,
                 subtitle: 1,
                 data: 1,
+                attachment: 1,
                 width: Some(1920),
             }
         );
@@ -1404,6 +1415,7 @@ duration=12.5
             audio: 1,
             subtitle: 0,
             data: 0,
+            attachment: 0,
             width: Some(640),
         };
         let changes =
@@ -1422,13 +1434,14 @@ duration=12.5
     }
 
     #[test]
-    fn extra_video_and_data_streams_report_drop_stream() {
+    fn extra_video_data_and_attachment_streams_report_drop_stream() {
         let input = StreamInfo {
             duration_secs: 1.0,
             video: 2,
             audio: 1,
             subtitle: 0,
             data: 1,
+            attachment: 0,
             width: Some(1920),
         };
         let changes =
@@ -1436,6 +1449,38 @@ duration=12.5
         assert!(
             changes.contains(&Change::DropStream),
             "discarded video/data streams must be reported: {changes:?}"
+        );
+
+        let with_attachment = StreamInfo {
+            video: 1,
+            data: 0,
+            attachment: 1,
+            ..input
+        };
+        let changes =
+            VideoProcessor::attempt_changes(Path::new("in.mp4"), &with_attachment, Some(1920));
+        assert!(
+            changes.contains(&Change::DropStream),
+            "unmapped attachments are dropped and must be reported: {changes:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_width_with_a_scale_cap_reports_downscale() {
+        let input = StreamInfo {
+            duration_secs: 1.0,
+            video: 1,
+            audio: 1,
+            subtitle: 0,
+            data: 0,
+            attachment: 0,
+            width: None,
+        };
+        let changes =
+            VideoProcessor::attempt_changes(Path::new("in.mp4"), &input, Some(1920));
+        assert!(
+            changes.contains(&Change::Downscale),
+            "a missing width must not bypass the downscale consent: {changes:?}"
         );
     }
 
@@ -1822,8 +1867,8 @@ duration=12.5
             assert!(result.met_target, "got: {}", result.strategy_used);
         }
 
-        // One audio track out of two is a silent drop. Task 10 wires the
-        // DropStream grant; until then the input count is the floor.
+        // One audio track out of two is a silent drop, so the input count is
+        // the validation floor.
         {
             let dir = tempfile::tempdir().unwrap();
             let ffmpeg = fake_ffmpeg(&dir.path(), 100, 100, "  *) size=100 ;;");
@@ -1941,6 +1986,74 @@ duration=12.5
             .filter(|e| e.file_name().to_string_lossy().starts_with("passlog-"))
             .collect();
         assert!(leftovers.is_empty(), "orphan passlogs: {leftovers:?}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn unknown_width_from_ffprobe_still_reports_downscale() {
+        let dir = tempfile::tempdir().unwrap();
+        let ffmpeg = fake_ffmpeg(&dir.path(), 90000, 90000, "  *) size=100 ;;");
+        let ffprobe = fake_ffprobe_with_width(
+            &dir.path(),
+            &["1.0", "video", "audio"],
+            &["1.0", "video", "audio"],
+            None,
+        );
+        let input = oversized_input(&dir.path(), "in.mp4");
+        let tmp = temp_dir_under(&dir.path());
+
+        let result = VideoProcessor
+            .compress(&JobContext::new(
+                &input,
+                &dir.path().join("out.mp4"),
+                50000,
+                &QualityFloors::default(),
+                CancellationToken::new(),
+                ProgressSender::test_stub(),
+                &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
+                &tmp,
+            ).with_policy(permissive_policy()))
+            .unwrap();
+
+        assert!(
+            result.changes.contains(&Change::Downscale),
+            "a scale cap with unknown input width must be reported as downscaling: {:?}",
+            result.changes
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn attachment_streams_from_ffprobe_report_drop_stream() {
+        let dir = tempfile::tempdir().unwrap();
+        let ffmpeg = fake_ffmpeg(&dir.path(), 90000, 90000, "  *) size=100 ;;");
+        let ffprobe = fake_ffprobe_with_width(
+            &dir.path(),
+            &["1.0", "video", "attachment", "audio"],
+            &["1.0", "video", "audio"],
+            Some(1920),
+        );
+        let input = oversized_input(&dir.path(), "in.mp4");
+        let tmp = temp_dir_under(&dir.path());
+
+        let result = VideoProcessor
+            .compress(&JobContext::new(
+                &input,
+                &dir.path().join("out.mp4"),
+                50000,
+                &QualityFloors::default(),
+                CancellationToken::new(),
+                ProgressSender::test_stub(),
+                &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
+                &tmp,
+            ).with_policy(permissive_policy()))
+            .unwrap();
+
+        assert!(
+            result.changes.contains(&Change::DropStream),
+            "unmapped attachment streams must be declared as dropped: {:?}",
+            result.changes
+        );
     }
 
     #[test]
