@@ -4,6 +4,7 @@ version = "1.0.0"
 description = "Yard — offline batch file processing"
 authors = ["you"]
 edition = "2021"
+default-run = "yard"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
