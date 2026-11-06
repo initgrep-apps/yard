@@ -90,6 +90,17 @@ describe('planPreflight', () => {
     expect(planPreflight(heicFiles(10), consentGlobal)).toBeNull()
     expect(planPreflight(heicFiles(10), consentHeicDefault)).toBeNull()
   })
+
+  it('already-under-target heic files never prompt, even fifty of them', () => {
+    const alreadySmall = Array.from({ length: 50 }, (_, index) =>
+      entry(`small-${index}.heic`, index, {
+        originalSize: 100_000,
+        targetBytes: 204_800,
+      })
+    )
+
+    expect(planPreflight(alreadySmall, consentOff)).toBeNull()
+  })
 })
 
 describe('useConsent requests', () => {

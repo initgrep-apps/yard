@@ -105,7 +105,12 @@ export function planPreflight(
   files: FileEntry[],
   settings: ConsentSettings
 ): PreflightPlan | null {
-  const heic = files.filter((file) => file.status === 'pending' && isHeicFile(file))
+  const heic = files.filter(
+    (file) =>
+      file.status === 'pending' &&
+      isHeicFile(file) &&
+      file.originalSize > file.targetBytes
+  )
   if (heic.length === 0 || settings.allowDestructive) return null
 
   const needing = heic.filter(
@@ -130,7 +135,16 @@ export function planPreflight(
 }
 
 export async function requestPreflight(files: FileEntry[]): Promise<ConsentGrant[] | null> {
-  if (!files.some((file) => file.status === 'pending' && isHeicFile(file))) return []
+  if (
+    !files.some(
+      (file) =>
+        file.status === 'pending' &&
+        isHeicFile(file) &&
+        file.originalSize > file.targetBytes
+    )
+  ) {
+    return []
+  }
 
   const settings = await invoke<Settings>('get_settings').catch(() => null)
   const plan = planPreflight(files, settings?.consent ?? DEFAULT_CONSENT)

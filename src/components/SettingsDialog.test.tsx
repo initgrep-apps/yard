@@ -128,7 +128,7 @@ afterEach(() => {
 })
 
 describe("SettingsDialog", () => {
-  it("renders the five section tabs in a labelled tablist", async () => {
+  it("renders the six section tabs in a labelled tablist", async () => {
     render(<SettingsDialog open onOpenChange={vi.fn()} />)
 
     const tabs = await screen.findAllByRole("tab")
@@ -137,6 +137,7 @@ describe("SettingsDialog", () => {
       "General",
       "Targets",
       "Quality floors",
+      "Consent",
       "Performance",
       "History",
     ])
@@ -201,6 +202,34 @@ describe("SettingsDialog", () => {
       video: { size: 5, unit: "MB" },
       pdf: { size: 1, unit: "MB" },
       document: { size: 2, unit: "MB" },
+    })
+  })
+
+  it("round-trips both consent toggles through save_settings", async () => {
+    render(<SettingsDialog open onOpenChange={vi.fn()} />)
+    await screen.findByRole("tab", { name: "General" })
+    fireEvent.click(screen.getByRole("tab", { name: "Consent" }))
+
+    const destructive = screen.getByRole("button", {
+      name: "Allow destructive changes",
+    })
+    const heic = screen.getByRole("button", {
+      name: "Convert HEIC/HEIF to JPEG",
+    })
+    expect(destructive).toHaveAttribute("aria-pressed", "false")
+    expect(heic).toHaveAttribute("aria-pressed", "true")
+
+    vi.useFakeTimers()
+    fireEvent.click(destructive)
+    fireEvent.click(heic)
+
+    await act(async () => {
+      vi.advanceTimersByTime(400)
+    })
+
+    expect(savedSettings().consent).toEqual({
+      allowDestructive: true,
+      heicToJpg: false,
     })
   })
 

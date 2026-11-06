@@ -32,7 +32,7 @@ What shipped, in the order the slices were built. This replaces the per-slice sp
 | 26 | One file-type registry | Extension → category → output extension in `registry.rs`; detection, accepted-extension lists and output naming read the same rows | ADR 0012; TypeScript unions are checked by file-reading tests |
 | 27 | Shared job context and ladder | `JobContext` resolves sidecars, temp, output and policy once; `Ladder` owns progress, best attempt, denial state and cleanup; job bodies run in `spawn_blocking`; release panics unwind | ADR 0013, 0014 |
 | 28 | Capability matrix and consent | Seven change kinds × five categories; rung declarations checked before delivery; allowed / needs consent / denied verdicts; a denied rung is removed | ADR 0012; an earlier authorised attempt may still deliver as best effort; `needs_permission` only when none remains |
-| 29 | Consent surfaces | HEIC pre-flight dialog when `heicToJpg` is off; inline per-file prompts with once/batch scope; two denials silence repeat prompts; `consent:required` event + `answer_consent` command | ADR 0011; 30-minute answer timeout; cancel observed while waiting |
+| 29 | Consent surfaces | Settings → Consent toggles for destructive changes and HEIC→JPEG; HEIC pre-flight dialog only for files still over target when `heicToJpg` is off; inline per-file prompts with once/batch scope; two denials silence repeat prompts; `consent:required` event + `answer_consent` command | ADR 0011; 30-minute answer timeout; cancel observed while waiting |
 | 30 | History truth | File records carry `changes` and `consentSource`; old JSONL lines default to empty/none; session outcome counts `needs_permission` | ADR 0005; history detail shows the granted changes and source |
 
 ## Not shipped (deliberately)
