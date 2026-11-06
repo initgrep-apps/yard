@@ -33,6 +33,7 @@ pub enum Change {
 }
 
 impl Change {
+    #[cfg(test)]
     pub const ALL: [Change; 7] = [
         Change::LossyEncode,
         Change::Downscale,
