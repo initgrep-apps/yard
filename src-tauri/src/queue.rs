@@ -15,20 +15,24 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use crate::commands::FileListState;
-use crate::engine::{CompressionError, CompressionResult, ProgressSender};
+use crate::engine::{
+    CompressionError, CompressionResult, ConsentDecision, ConsentGate, ProgressSender,
+};
 use crate::history::{
     Counts, FileResultRecord, HistoryRecordRef, HistoryStore, SessionEndRecord, SessionStartRecord,
 };
-use crate::models::{FileEntry, FileStatus};
-use crate::policy::{Policy, Verdict};
+use crate::models::{Category, FileEntry, FileStatus};
+use crate::policy::{Change, ConsentSource, Policy, Verdict};
 use crate::processors::ProcessorRegistry;
 use crate::scheduler;
 use crate::sidecar;
 use crate::temp;
 use std::collections::{HashMap, HashSet};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{LockResult, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
-use tokio::sync::mpsc;
+use tokio::sync::mpsc as async_mpsc;
 use tokio_util::sync::CancellationToken;
 
 fn poison_recover<T>(lock: LockResult<MutexGuard<'_, T>>) -> MutexGuard<'_, T> {
@@ -56,15 +60,16 @@ fn run_processor_catch_panic(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_job(
+fn run_job<R: Runtime>(
     registry: std::sync::Arc<ProcessorRegistry>,
     entry: FileEntry,
     output_path: std::path::PathBuf,
     settings: crate::settings::Settings,
-    policy: std::sync::Arc<Policy>,
+    policy: std::sync::Arc<Mutex<Policy>>,
     cancel_token: CancellationToken,
     progress: ProgressSender,
     temp_dir: std::path::PathBuf,
+    consent: Option<JobConsent<R>>,
 ) -> Result<CompressionResult, CompressionError> {
     let processor = registry.get_processor(entry.category).ok_or_else(|| {
         CompressionError::Unknown("No processor registered for this file type".to_string())
@@ -73,7 +78,13 @@ fn run_job(
         Ok(paths) => paths,
         Err(error) => return Err(CompressionError::Unknown(error)),
     };
-    let ctx = crate::engine::JobContext::new(
+    let policy_snapshot = poison_recover(policy.lock()).clone();
+    let gate = consent.map(|job| JobConsentGate {
+        job,
+        policy: policy.clone(),
+        cancel: cancel_token.clone(),
+    });
+    let mut ctx = crate::engine::JobContext::new(
         std::path::Path::new(&entry.path),
         &output_path,
         entry.target_bytes,
@@ -83,22 +94,26 @@ fn run_job(
         &sidecar_paths,
         &temp_dir,
     )
-    .with_policy(policy.as_ref())
+    .with_policy(&policy_snapshot)
     .with_category(entry.category)
     .with_declared(processor.declared_changes());
+    if let Some(gate) = gate.as_ref() {
+        ctx = ctx.with_consent_gate(gate);
+    }
     run_processor_catch_panic(|| processor.compress(&ctx))
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_job_blocking(
+async fn run_job_blocking<R: Runtime>(
     registry: std::sync::Arc<ProcessorRegistry>,
     entry: FileEntry,
     output_path: std::path::PathBuf,
     settings: crate::settings::Settings,
-    policy: std::sync::Arc<Policy>,
+    policy: std::sync::Arc<Mutex<Policy>>,
     cancel_token: CancellationToken,
     progress: ProgressSender,
     temp_dir: std::path::PathBuf,
+    consent: Option<JobConsent<R>>,
 ) -> Result<CompressionResult, CompressionError> {
     let job = tokio::task::spawn_blocking(move || {
         let result = run_job(
@@ -110,6 +125,7 @@ async fn run_job_blocking(
             cancel_token,
             progress,
             temp_dir.clone(),
+            consent,
         );
         temp::cleanup_temp_dir(&temp_dir);
         result
@@ -194,6 +210,8 @@ struct FileCompletePayload<'a> {
     quality_used: Option<u32>,
     strategy_used: Option<String>,
     reason: Option<String>,
+    changes: Vec<Change>,
+    consent_source: Option<ConsentSource>,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -208,6 +226,150 @@ struct BatchCompletePayload<'a> {
     batch_id: &'a str,
     total_saved_bytes: u64,
     cancelled: bool,
+    needs_permission: u32,
+}
+
+pub const CONSENT_TIMEOUT: Duration = Duration::from_secs(1800);
+const CONSENT_POLL_INTERVAL: Duration = Duration::from_millis(30);
+const CONSENT_DENIAL_LIMIT: u32 = 2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ConsentScope {
+    Once,
+    Batch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ConsentAnswer {
+    allow: bool,
+    scope: ConsentScope,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsentGrant {
+    pub category: Category,
+    pub changes: Vec<Change>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConsentWait {
+    Answer(ConsentAnswer),
+    TimedOut,
+    Cancelled,
+}
+
+/// Waits for the user's answer in short slices so a cancellation is observed
+/// while the blocking job body is parked on the channel. `std::sync::mpsc`
+/// rather than a tokio oneshot: the job body needs a timed blocking receive,
+/// which oneshot does not offer.
+#[derive(Debug, Clone, Copy)]
+pub struct ConsentWaiter {
+    timeout: Duration,
+}
+
+impl Default for ConsentWaiter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ConsentWaiter {
+    pub fn new() -> Self {
+        Self::with_timeout(CONSENT_TIMEOUT)
+    }
+
+    pub fn with_timeout(timeout: Duration) -> Self {
+        ConsentWaiter { timeout }
+    }
+
+    fn wait(&self, rx: mpsc::Receiver<ConsentAnswer>, cancel: &CancellationToken) -> ConsentWait {
+        let deadline = Instant::now() + self.timeout;
+        loop {
+            if cancel.is_cancelled() {
+                return ConsentWait::Cancelled;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return match rx.try_recv() {
+                    Ok(answer) => ConsentWait::Answer(answer),
+                    Err(_) => ConsentWait::TimedOut,
+                };
+            }
+            match rx.recv_timeout(remaining.min(CONSENT_POLL_INTERVAL)) {
+                Ok(answer) => return ConsentWait::Answer(answer),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => {
+                    return if cancel.is_cancelled() {
+                        ConsentWait::Cancelled
+                    } else {
+                        ConsentWait::TimedOut
+                    };
+                }
+            }
+        }
+    }
+}
+
+struct PendingConsent {
+    batch_id: String,
+    category: Category,
+    changes: Vec<Change>,
+    sender: mpsc::Sender<ConsentAnswer>,
+}
+
+struct JobConsent<R: Runtime> {
+    app: AppHandle<R>,
+    batch_id: String,
+    file_id: String,
+    waiter: ConsentWaiter,
+}
+
+struct JobConsentGate<R: Runtime> {
+    job: JobConsent<R>,
+    policy: std::sync::Arc<Mutex<Policy>>,
+    cancel: CancellationToken,
+}
+
+impl<R: Runtime> ConsentGate for JobConsentGate<R> {
+    fn authorize(&self, category: Category, changes: &[Change]) -> ConsentDecision {
+        let queue = self.job.app.state::<QueueState<R>>();
+        queue.authorize_with_consent(
+            &self.job.app,
+            &self.job.batch_id,
+            &self.job.file_id,
+            category,
+            changes,
+            &self.policy,
+            &self.job.waiter,
+            &self.cancel,
+        )
+    }
+}
+
+fn consent_change_label(change: Change) -> &'static str {
+    match change {
+        Change::LossyEncode => "re-encode with quality loss",
+        Change::Downscale => "downscale",
+        Change::DropStream => "drop a stream",
+        Change::FormatChange => "change format",
+        Change::MetadataStrip => "strip metadata",
+        Change::Rasterize => "rasterize",
+        Change::PageDrop => "drop a page",
+    }
+}
+
+fn consent_labels(changes: &[Change]) -> String {
+    let labels: Vec<&str> = changes
+        .iter()
+        .map(|change| consent_change_label(*change))
+        .collect();
+    labels.join(", ")
+}
+
+fn consent_reason(changes: &[Change]) -> String {
+    format!("Needs permission: {}", consent_labels(changes))
 }
 
 /// Managed state shared by commands and the worker task.
@@ -219,7 +381,11 @@ pub struct QueueState<R: Runtime = tauri::Wry> {
     batch_tokens: Mutex<HashMap<String, CancellationToken>>,
     history_records: Mutex<HashMap<String, Vec<FileResultRecord>>>,
     history_error_sent: Mutex<HashSet<String>>,
-    sender: mpsc::UnboundedSender<BatchMessage>,
+    consent_pending: Mutex<HashMap<String, PendingConsent>>,
+    consent_grants: Mutex<HashMap<String, HashSet<(Category, Change)>>>,
+    consent_denials: Mutex<HashMap<String, HashMap<(Category, Change), u32>>>,
+    consent_timeout: Mutex<Duration>,
+    sender: async_mpsc::UnboundedSender<BatchMessage>,
     registry: std::sync::Arc<ProcessorRegistry>,
     #[cfg(test)]
     test_estimate: Mutex<Option<fn(crate::models::Category, u64, Option<u32>) -> u64>>,
@@ -230,7 +396,7 @@ pub struct QueueState<R: Runtime = tauri::Wry> {
 
 impl<R: Runtime> QueueState<R> {
     pub fn new(app: AppHandle<R>, registry: std::sync::Arc<ProcessorRegistry>) -> Self {
-        let (sender, mut receiver) = mpsc::unbounded_channel::<BatchMessage>();
+        let (sender, mut receiver) = async_mpsc::unbounded_channel::<BatchMessage>();
         let worker_app = app.clone();
         tauri::async_runtime::spawn(async move {
             while let Some(msg) = receiver.recv().await {
@@ -242,6 +408,10 @@ impl<R: Runtime> QueueState<R> {
             batch_tokens: Mutex::new(HashMap::new()),
             history_records: Mutex::new(HashMap::new()),
             history_error_sent: Mutex::new(HashSet::new()),
+            consent_pending: Mutex::new(HashMap::new()),
+            consent_grants: Mutex::new(HashMap::new()),
+            consent_denials: Mutex::new(HashMap::new()),
+            consent_timeout: Mutex::new(CONSENT_TIMEOUT),
             sender,
             registry,
             #[cfg(test)]
@@ -271,6 +441,221 @@ impl<R: Runtime> QueueState<R> {
                 serde_json::json!({ "batchId": batch_id, "errorMessage": "Job worker unavailable" }),
             );
             poison_recover(self.batch_tokens.lock()).remove(&batch_id);
+            self.clear_batch_consent(&batch_id);
+        }
+    }
+
+    pub fn answer_consent(&self, request_id: &str, allow: bool, scope: ConsentScope) {
+        let pending = poison_recover(self.consent_pending.lock()).remove(request_id);
+        let Some(pending) = pending else { return };
+        if allow && scope == ConsentScope::Batch {
+            self.grant_waiting_batch(&pending);
+        } else if !allow && scope == ConsentScope::Batch {
+            let mut denials = poison_recover(self.consent_denials.lock());
+            let entry = denials.entry(pending.batch_id.clone()).or_default();
+            for change in &pending.changes {
+                entry.insert((pending.category, *change), CONSENT_DENIAL_LIMIT);
+            }
+        }
+        let _ = pending.sender.send(ConsentAnswer { allow, scope });
+    }
+
+    fn grant_waiting_batch(&self, answered: &PendingConsent) {
+        let mut waiting = poison_recover(self.consent_pending.lock());
+        let mut grants = poison_recover(self.consent_grants.lock());
+        let entry = grants.entry(answered.batch_id.clone()).or_default();
+        for change in &answered.changes {
+            entry.insert((answered.category, *change));
+        }
+        let ids: Vec<String> = waiting
+            .iter()
+            .filter(|(_, pending)| pending.batch_id == answered.batch_id)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &ids {
+            if let Some(pending) = waiting.get(id) {
+                for change in &pending.changes {
+                    entry.insert((pending.category, *change));
+                }
+            }
+        }
+        for id in ids {
+            if let Some(pending) = waiting.remove(&id) {
+                let _ = pending
+                    .sender
+                    .send(ConsentAnswer { allow: true, scope: ConsentScope::Batch });
+            }
+        }
+    }
+
+    pub fn register_batch_grants(&self, batch_id: &str, grants: &[ConsentGrant]) {
+        if grants.is_empty() {
+            return;
+        }
+        let mut all = poison_recover(self.consent_grants.lock());
+        let entry = all.entry(batch_id.to_string()).or_default();
+        for grant in grants {
+            for change in &grant.changes {
+                entry.insert((grant.category, *change));
+            }
+        }
+    }
+
+    fn apply_batch_grants(&self, batch_id: &str, policy: &mut Policy) {
+        let grants = poison_recover(self.consent_grants.lock());
+        if let Some(changes) = grants.get(batch_id) {
+            for (category, change) in changes {
+                policy.grant_batch(*category, &[*change]);
+            }
+        }
+    }
+
+    fn batch_grant_covers(&self, batch_id: &str, category: Category, changes: &[Change]) -> bool {
+        let grants = poison_recover(self.consent_grants.lock());
+        grants.get(batch_id).is_some_and(|set| {
+            changes
+                .iter()
+                .all(|change| set.contains(&(category, *change)))
+        })
+    }
+
+    pub(crate) fn clear_batch_consent(&self, batch_id: &str) {
+        poison_recover(self.consent_grants.lock()).remove(batch_id);
+        poison_recover(self.consent_denials.lock()).remove(batch_id);
+        let mut pending = poison_recover(self.consent_pending.lock());
+        pending.retain(|_, request| request.batch_id != batch_id);
+    }
+
+    fn record_consent_denials(&self, batch_id: &str, category: Category, changes: &[Change]) {
+        let mut denials = poison_recover(self.consent_denials.lock());
+        let entry = denials.entry(batch_id.to_string()).or_default();
+        for change in changes {
+            *entry.entry((category, *change)).or_insert(0) += 1;
+        }
+    }
+
+    fn consent_waiter(&self) -> ConsentWaiter {
+        ConsentWaiter::with_timeout(*poison_recover(self.consent_timeout.lock()))
+    }
+
+    #[cfg(test)]
+    fn set_consent_timeout(&self, timeout: Duration) {
+        *poison_recover(self.consent_timeout.lock()) = timeout;
+    }
+
+    #[cfg(test)]
+    fn pending_consent_count(&self) -> usize {
+        poison_recover(self.consent_pending.lock()).len()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn authorize_with_consent(
+        &self,
+        app: &AppHandle<R>,
+        batch_id: &str,
+        file_id: &str,
+        category: Category,
+        changes: &[Change],
+        policy: &Mutex<Policy>,
+        waiter: &ConsentWaiter,
+        cancel: &CancellationToken,
+    ) -> ConsentDecision {
+        let (verdict, required) = {
+            let policy = poison_recover(policy.lock());
+            (policy.check(category, changes), policy.needs_consent(category, changes))
+        };
+        if verdict == Verdict::Denied {
+            return ConsentDecision::Deny(
+                poison_recover(policy.lock())
+                    .denial_reason(category, changes)
+                    .unwrap_or_else(|| consent_reason(changes)),
+            );
+        }
+        if required.is_empty() {
+            return ConsentDecision::Allow(
+                poison_recover(policy.lock())
+                    .consent(category, changes)
+                    .unwrap_or(ConsentSource::Default),
+            );
+        }
+        if self.batch_grant_covers(batch_id, category, &required) {
+            poison_recover(policy.lock()).grant_batch(category, &required);
+            return ConsentDecision::Allow(ConsentSource::Batch);
+        }
+
+        let (promptable, silenced) = {
+            let denials = poison_recover(self.consent_denials.lock());
+            let entry = denials.get(batch_id);
+            let mut promptable = Vec::new();
+            let mut silenced = Vec::new();
+            for change in &required {
+                let denied = entry
+                    .and_then(|counts| counts.get(&(category, *change)))
+                    .copied()
+                    .unwrap_or(0);
+                if denied >= CONSENT_DENIAL_LIMIT {
+                    silenced.push(*change);
+                } else {
+                    promptable.push(*change);
+                }
+            }
+            (promptable, silenced)
+        };
+        if promptable.is_empty() {
+            return ConsentDecision::Deny(consent_reason(&silenced));
+        }
+
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let (sender, receiver) = mpsc::channel();
+        poison_recover(self.consent_pending.lock()).insert(
+            request_id.clone(),
+            PendingConsent {
+                batch_id: batch_id.to_string(),
+                category,
+                changes: promptable.clone(),
+                sender,
+            },
+        );
+        let detail = format!("Needs permission to {}", consent_labels(&promptable));
+        let _ = app.emit(
+            "consent:required",
+            serde_json::json!({
+                "requestId": request_id,
+                "fileId": file_id,
+                "changes": promptable,
+                "detail": detail,
+            }),
+        );
+
+        match waiter.wait(receiver, cancel) {
+            ConsentWait::Answer(answer) if answer.allow => {
+                let source = if answer.scope == ConsentScope::Batch {
+                    poison_recover(policy.lock()).grant_batch(category, &promptable);
+                    ConsentSource::Batch
+                } else {
+                    poison_recover(policy.lock()).grant_once(category, &promptable);
+                    ConsentSource::Once
+                };
+                let remaining = poison_recover(policy.lock()).needs_consent(category, changes);
+                if remaining.is_empty() {
+                    ConsentDecision::Allow(source)
+                } else {
+                    ConsentDecision::Deny(consent_reason(&remaining))
+                }
+            }
+            ConsentWait::Answer(_) => {
+                self.record_consent_denials(batch_id, category, &promptable);
+                ConsentDecision::Deny(consent_reason(&promptable))
+            }
+            ConsentWait::TimedOut => {
+                poison_recover(self.consent_pending.lock()).remove(&request_id);
+                self.record_consent_denials(batch_id, category, &promptable);
+                ConsentDecision::Deny(consent_reason(&promptable))
+            }
+            ConsentWait::Cancelled => {
+                poison_recover(self.consent_pending.lock()).remove(&request_id);
+                ConsentDecision::Cancelled
+            }
         }
     }
 
@@ -374,6 +759,8 @@ impl<R: Runtime> QueueState<R> {
             strategy_used: None,
             error: None,
             duration_ms: 0,
+            changes: Vec::new(),
+            consent_source: None,
         };
         poison_recover(self.history_records.lock())
             .entry(batch_id.to_string())
@@ -394,6 +781,8 @@ impl<R: Runtime> QueueState<R> {
         strategy_used: Option<String>,
         error: Option<String>,
         duration_ms: u64,
+        changes: Vec<Change>,
+        consent_source: Option<ConsentSource>,
     ) {
         let record = FileResultRecord {
             session_id: batch_id.to_string(),
@@ -411,6 +800,8 @@ impl<R: Runtime> QueueState<R> {
             strategy_used,
             error,
             duration_ms,
+            changes,
+            consent_source,
         };
         poison_recover(self.history_records.lock())
             .entry(batch_id.to_string())
@@ -437,6 +828,8 @@ impl<R: Runtime> QueueState<R> {
             None,
             None,
             duration_ms,
+            Vec::new(),
+            None,
         );
     }
 
@@ -610,6 +1003,7 @@ impl<R: Runtime> QueueState<R> {
     }
 
     fn fail_preflight(app: &AppHandle<R>, queue: &tauri::State<'_, QueueState<R>>, batch_id: &str, error: String) {
+        queue.clear_batch_consent(batch_id);
         poison_recover(queue.history_records.lock()).remove(batch_id);
         poison_recover(queue.history_error_sent.lock()).remove(batch_id);
         poison_recover(queue.batch_tokens.lock()).remove(batch_id);
@@ -629,7 +1023,9 @@ impl<R: Runtime> QueueState<R> {
     ) -> u64 {
         let queue = app.state::<QueueState<R>>();
         let state = app.state::<FileListState>();
-        let policy = std::sync::Arc::new(Policy::new(settings.consent.clone()));
+        let mut initial_policy = Policy::new(settings.consent.clone());
+        queue.apply_batch_grants(&batch_id, &mut initial_policy);
+        let policy = std::sync::Arc::new(Mutex::new(initial_policy));
         let mut total_saved: u64 = 0;
         let started = std::time::Instant::now();
         let elapsed_ms = || (started.elapsed().as_millis() as u64).max(1);
@@ -710,6 +1106,8 @@ impl<R: Runtime> QueueState<R> {
                     None,
                     None,
                     elapsed_ms(),
+                    Vec::new(),
+                    None,
                 );
                 let _ = app.emit(
                     "file:complete",
@@ -723,6 +1121,8 @@ impl<R: Runtime> QueueState<R> {
                         quality_used: None,
                         strategy_used: None,
                         reason: None,
+                        changes: Vec::new(),
+                        consent_source: None,
                     },
                 );
                 queue.remove_token(&file_id);
@@ -751,6 +1151,8 @@ impl<R: Runtime> QueueState<R> {
                             None,
                             Some(error_msg.clone()),
                             elapsed_ms(),
+                            Vec::new(),
+                            None,
                         );
                         let _ = app.emit(
                             "file:error",
@@ -777,6 +1179,12 @@ impl<R: Runtime> QueueState<R> {
                     cancel_token,
                     progress,
                     temp_dir,
+                    Some(JobConsent {
+                        app: app.clone(),
+                        batch_id: batch_id.clone(),
+                        file_id: file_id.clone(),
+                        waiter: queue.consent_waiter(),
+                    }),
                 )
                 .await
             }
@@ -785,12 +1193,13 @@ impl<R: Runtime> QueueState<R> {
         match result {
             Ok(compression_result) => {
                 let status =
-                    settle_result_status(&compression_result, entry.category, policy.as_ref());
+                    settle_result_status(&compression_result, entry.category, &poison_recover(policy.lock()));
                 let delivered = status != FileStatus::NeedsPermission;
                 let reason = if delivered {
                     None
                 } else {
-                    policy.denial_reason(entry.category, &compression_result.changes)
+                    poison_recover(policy.lock())
+                        .denial_reason(entry.category, &compression_result.changes)
                 };
                 let out_path = delivered
                     .then(|| compression_result.output_path.to_string_lossy().to_string());
@@ -826,6 +1235,8 @@ impl<R: Runtime> QueueState<R> {
                     strategy_used.clone(),
                     reason.clone(),
                     elapsed_ms(),
+                    compression_result.changes.clone(),
+                    Some(compression_result.consent),
                 );
 
                 let _ = app.emit(
@@ -840,6 +1251,8 @@ impl<R: Runtime> QueueState<R> {
                         quality_used,
                         strategy_used,
                         reason,
+                        changes: compression_result.changes.clone(),
+                        consent_source: Some(compression_result.consent),
                     },
                 );
             }
@@ -874,6 +1287,8 @@ impl<R: Runtime> QueueState<R> {
                     None,
                     Some(reason.clone()),
                     elapsed_ms(),
+                    Vec::new(),
+                    None,
                 );
                 let _ = app.emit(
                     "file:complete",
@@ -887,6 +1302,8 @@ impl<R: Runtime> QueueState<R> {
                         quality_used: None,
                         strategy_used: None,
                         reason: Some(reason),
+                        changes: Vec::new(),
+                        consent_source: None,
                     },
                 );
             }
@@ -910,6 +1327,8 @@ impl<R: Runtime> QueueState<R> {
                     None,
                     Some(error_msg.clone()),
                     elapsed_ms(),
+                    Vec::new(),
+                    None,
                 );
                 let _ = app.emit(
                     "file:error",
@@ -927,12 +1346,14 @@ impl<R: Runtime> QueueState<R> {
 
     fn finish_batch(app: &AppHandle<R>, batch_id: &str, total_saved: u64) {
         let queue = app.state::<QueueState<R>>();
+        queue.clear_batch_consent(batch_id);
         let cancelled = queue.batch_cancelled(batch_id);
         poison_recover(queue.batch_tokens.lock()).remove(batch_id);
 
         let records = poison_recover(queue.history_records.lock()).remove(batch_id);
         let records = records.unwrap_or_default();
         let counts = history_counts_of(&records);
+        let needs_permission = counts.needs_permission;
         let end = SessionEndRecord {
             session_id: batch_id.to_string(),
             ended_at: now_ms(),
@@ -970,6 +1391,7 @@ impl<R: Runtime> QueueState<R> {
                 batch_id,
                 total_saved_bytes: total_saved,
                 cancelled,
+                needs_permission,
             },
         );
     }
@@ -1293,16 +1715,16 @@ mod tests {
         let output = dir.path().join("out.mp4");
         let temp = dir.path().join("tmp");
         std::fs::create_dir_all(&temp).unwrap();
-        let policy = std::sync::Arc::new(
+        let policy = std::sync::Arc::new(std::sync::Mutex::new(
             Policy::new(crate::policy::ConsentSettings::default())
                 .with_batch_grant(crate::models::Category::Video, &[Change::Downscale]),
-        );
+        ));
         let registry = std::sync::Arc::new(ProcessorRegistry::with_processor(Box::new(
             GrantAwareProcessor,
         )));
         let entry = crate::models::FileEntry::new(input.to_str().unwrap(), 512);
 
-        let result = run_job_blocking(
+        let result = run_job_blocking::<tauri::test::MockRuntime>(
             registry,
             entry,
             output,
@@ -1311,12 +1733,17 @@ mod tests {
             CancellationToken::new(),
             ProgressSender::test_stub(),
             temp,
+            None,
         )
         .await
         .expect("the granted rung must produce a result");
 
         assert_eq!(
-            decide_result_status(&result, crate::models::Category::Video, policy.as_ref()),
+            decide_result_status(
+                &result,
+                crate::models::Category::Video,
+                &policy.lock().unwrap()
+            ),
             FileStatus::Done,
             "the decision must see the same grant the context saw"
         );
@@ -1369,9 +1796,9 @@ mod tests {
         let registry = std::sync::Arc::new(ProcessorRegistry::with_processor(Box::new(
             SleepingEngineProcessor,
         )));
-        let policy = std::sync::Arc::new(Policy::default());
+        let policy = std::sync::Arc::new(std::sync::Mutex::new(Policy::default()));
 
-        let job = run_job_blocking(
+        let job = run_job_blocking::<tauri::test::MockRuntime>(
             registry,
             entry,
             output,
@@ -1380,6 +1807,7 @@ mod tests {
             CancellationToken::new(),
             ProgressSender::test_stub(),
             temp_dir,
+            None,
         );
         tokio::pin!(job);
         let started = std::time::Instant::now();
@@ -2286,6 +2714,8 @@ mod tests {
             strategy_used: None,
             error: None,
             duration_ms: 0,
+            changes: Vec::new(),
+            consent_source: None,
         };
         let files = vec![
             rec("done"),
@@ -2357,8 +2787,19 @@ mod tests {
     }
 
     #[test]
-    fn file_complete_payload_carries_strategy_fields() {
-        let payload = FileCompletePayload {
+    fn batch_complete_payload_carries_needs_permission() {
+        let payload = BatchCompletePayload {
+            batch_id: "b1",
+            total_saved_bytes: 0,
+            cancelled: false,
+            needs_permission: 2,
+        };
+        let value = serde_json::to_value(&payload).unwrap();
+        assert_eq!(value["needsPermission"], 2);
+    }
+
+    #[test]
+    fn file_complete_payload_carries_strategy_fields() {        let payload = FileCompletePayload {
             file_id: "f1",
             output_path: "out".into(),
             original_size: 2,
@@ -2368,6 +2809,8 @@ mod tests {
             quality_used: Some(70),
             strategy_used: Some("quality=70".into()),
             reason: Some("Needs permission: page_drop".into()),
+            changes: Vec::new(),
+            consent_source: None,
         };
         let v = serde_json::to_value(&payload).unwrap();
         assert_eq!(v["qualityUsed"], 70);
@@ -3463,5 +3906,570 @@ mod tests {
             }
         }
         assert_eq!(file_errors, 2, "both files must error and the batch must continue");
+    }
+
+    fn consent_test_app() -> (
+        tempfile::TempDir,
+        tauri::App<tauri::test::MockRuntime>,
+    ) {
+        let root = tempfile::TempDir::new().unwrap();
+        let out = root.path().join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let app = make_app(
+            root.path(),
+            serde_json::json!({ "outputFolder": out.to_str().unwrap() }),
+        );
+        (root, app)
+    }
+
+    fn spawn_authorize(
+        app: tauri::AppHandle<tauri::test::MockRuntime>,
+        batch_id: &str,
+        file_id: &str,
+        category: crate::models::Category,
+        changes: Vec<Change>,
+        policy: std::sync::Arc<std::sync::Mutex<Policy>>,
+        cancel: CancellationToken,
+        timeout: std::time::Duration,
+    ) -> std::thread::JoinHandle<crate::engine::ConsentDecision> {
+        let batch_id = batch_id.to_string();
+        let file_id = file_id.to_string();
+        std::thread::spawn(move || {
+            let queue = app.state::<QueueState<tauri::test::MockRuntime>>();
+            queue.authorize_with_consent(
+                &app,
+                &batch_id,
+                &file_id,
+                category,
+                &changes,
+                &policy,
+                &ConsentWaiter::with_timeout(timeout),
+                &cancel,
+            )
+        })
+    }
+
+    fn next_consent(
+        rx: &std::sync::mpsc::Receiver<(String, serde_json::Value)>,
+    ) -> serde_json::Value {
+        let (topic, payload) = rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .expect("a consent request must be emitted");
+        assert_eq!(topic, "consent:required");
+        payload
+    }
+
+    fn authorize_now(
+        app: &tauri::AppHandle<tauri::test::MockRuntime>,
+        batch_id: &str,
+        file_id: &str,
+        category: crate::models::Category,
+        changes: &[Change],
+        policy: &std::sync::Mutex<Policy>,
+        timeout: std::time::Duration,
+    ) -> crate::engine::ConsentDecision {
+        let queue = app.state::<QueueState<tauri::test::MockRuntime>>();
+        queue.authorize_with_consent(
+            app,
+            batch_id,
+            file_id,
+            category,
+            changes,
+            policy,
+            &ConsentWaiter::with_timeout(timeout),
+            &CancellationToken::new(),
+        )
+    }
+
+    struct ConsentLadderProcessor {
+        category: crate::models::Category,
+    }
+
+    impl crate::engine::CompressionProcessor for ConsentLadderProcessor {
+        fn category(&self) -> crate::models::Category {
+            self.category
+        }
+
+        fn supported_extensions(&self) -> &[&str] {
+            &[]
+        }
+
+        fn declared_changes(&self) -> &'static [Change] {
+            &[Change::Downscale]
+        }
+
+        fn compress(
+            &self,
+            ctx: &crate::engine::JobContext<'_>,
+        ) -> Result<CompressionResult, CompressionError> {
+            let attempt = ctx.temp_dir.join("attempt.bin");
+            std::fs::write(&attempt, b"small").unwrap();
+            let mut ladder = crate::engine::Ladder::new();
+            ladder.track(&attempt);
+            let decision = ladder.record(
+                ctx,
+                crate::engine::AttemptOutcome::Produced {
+                    path: attempt,
+                    size: 5,
+                    quality: 1,
+                    strategy: "consent-test".to_string(),
+                    changes: vec![Change::Downscale],
+                    consent: ConsentSource::Default,
+                },
+            );
+            match decision {
+                crate::engine::AttemptDecision::Stop(result) => Ok(result),
+                crate::engine::AttemptDecision::Continue => ladder.finish(ctx),
+            }
+        }
+    }
+
+    #[test]
+    fn consent_request_resolves_with_the_answer() {
+        let (_root, app) = consent_test_app();
+        let rx = events_of(&app.handle(), &["consent:required"]);
+        let policy = std::sync::Arc::new(std::sync::Mutex::new(Policy::new(
+            crate::policy::ConsentSettings::default(),
+        )));
+        let task = spawn_authorize(
+            app.handle().clone(),
+            "consent-round-trip",
+            "f1",
+            crate::models::Category::Video,
+            vec![Change::Downscale],
+            policy.clone(),
+            CancellationToken::new(),
+            std::time::Duration::from_secs(2),
+        );
+
+        let payload = next_consent(&rx);
+        assert_eq!(payload["fileId"], "f1");
+        assert_eq!(payload["changes"], serde_json::json!(["downscale"]));
+        assert!(
+            payload["detail"].as_str().unwrap().contains("downscale"),
+            "detail must name the capability: {payload}"
+        );
+        let request_id = payload["requestId"].as_str().unwrap().to_string();
+
+        let queue = app.state::<QueueState<tauri::test::MockRuntime>>();
+        queue.answer_consent(&request_id, true, ConsentScope::Once);
+
+        assert_eq!(
+            task.join().unwrap(),
+            crate::engine::ConsentDecision::Allow(ConsentSource::Once)
+        );
+        assert_eq!(
+            policy
+                .lock()
+                .unwrap()
+                .consent(crate::models::Category::Video, &[Change::Downscale]),
+            Some(ConsentSource::Once),
+            "a once grant must reach the job policy"
+        );
+        assert_eq!(queue.pending_consent_count(), 0);
+    }
+
+    #[test]
+    fn consent_timeout_denies() {
+        let (_root, app) = consent_test_app();
+        let rx = events_of(&app.handle(), &["consent:required"]);
+        let policy = std::sync::Arc::new(std::sync::Mutex::new(Policy::new(
+            crate::policy::ConsentSettings::default(),
+        )));
+        let task = spawn_authorize(
+            app.handle().clone(),
+            "consent-timeout",
+            "f1",
+            crate::models::Category::Video,
+            vec![Change::Downscale],
+            policy.clone(),
+            CancellationToken::new(),
+            std::time::Duration::from_millis(80),
+        );
+
+        let _payload = next_consent(&rx);
+        let decision = task.join().unwrap();
+        assert!(
+            matches!(decision, crate::engine::ConsentDecision::Deny(_)),
+            "an unanswered request must default to deny: {decision:?}"
+        );
+        let queue = app.state::<QueueState<tauri::test::MockRuntime>>();
+        assert_eq!(queue.pending_consent_count(), 0);
+    }
+
+    #[test]
+    fn batch_grant_resolves_future_requests() {
+        let (_root, app) = consent_test_app();
+        let rx = events_of(&app.handle(), &["consent:required"]);
+        let batch = "consent-batch";
+        let policy = std::sync::Arc::new(std::sync::Mutex::new(Policy::new(
+            crate::policy::ConsentSettings::default(),
+        )));
+        let task = spawn_authorize(
+            app.handle().clone(),
+            batch,
+            "f1",
+            crate::models::Category::Video,
+            vec![Change::Downscale],
+            policy.clone(),
+            CancellationToken::new(),
+            std::time::Duration::from_secs(2),
+        );
+        let payload = next_consent(&rx);
+        let queue = app.state::<QueueState<tauri::test::MockRuntime>>();
+        queue.answer_consent(
+            payload["requestId"].as_str().unwrap(),
+            true,
+            ConsentScope::Batch,
+        );
+        assert_eq!(
+            task.join().unwrap(),
+            crate::engine::ConsentDecision::Allow(ConsentSource::Batch)
+        );
+
+        let second_policy = std::sync::Mutex::new(Policy::new(
+            crate::policy::ConsentSettings::default(),
+        ));
+        let decision = authorize_now(
+            &app.handle(),
+            batch,
+            "f2",
+            crate::models::Category::Video,
+            &[Change::Downscale],
+            &second_policy,
+            std::time::Duration::from_millis(200),
+        );
+        assert_eq!(
+            decision,
+            crate::engine::ConsentDecision::Allow(ConsentSource::Batch),
+            "a batch grant must cover later files without prompting"
+        );
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(150)).is_err(),
+            "the second file must not emit a second prompt"
+        );
+        assert_eq!(
+            second_policy
+                .lock()
+                .unwrap()
+                .consent(crate::models::Category::Video, &[Change::Downscale]),
+            Some(ConsentSource::Batch)
+        );
+    }
+
+    #[test]
+    fn batch_grant_is_cleared_when_the_batch_ends() {
+        let (_root, app) = consent_test_app();
+        let rx = events_of(&app.handle(), &["consent:required"]);
+        let batch = "consent-cleared";
+        let policy = std::sync::Arc::new(std::sync::Mutex::new(Policy::new(
+            crate::policy::ConsentSettings::default(),
+        )));
+        let task = spawn_authorize(
+            app.handle().clone(),
+            batch,
+            "f1",
+            crate::models::Category::Video,
+            vec![Change::Downscale],
+            policy,
+            CancellationToken::new(),
+            std::time::Duration::from_secs(2),
+        );
+        let payload = next_consent(&rx);
+        let queue = app.state::<QueueState<tauri::test::MockRuntime>>();
+        queue.answer_consent(
+            payload["requestId"].as_str().unwrap(),
+            true,
+            ConsentScope::Batch,
+        );
+        task.join().unwrap();
+
+        queue.clear_batch_consent(batch);
+
+        let next_policy = std::sync::Arc::new(std::sync::Mutex::new(Policy::new(
+            crate::policy::ConsentSettings::default(),
+        )));
+        let next_task = spawn_authorize(
+            app.handle().clone(),
+            "next-batch",
+            "f2",
+            crate::models::Category::Video,
+            vec![Change::Downscale],
+            next_policy,
+            CancellationToken::new(),
+            std::time::Duration::from_secs(2),
+        );
+        let payload = next_consent(&rx);
+        assert_ne!(
+            payload["requestId"].as_str().unwrap(),
+            "",
+            "the next batch must prompt again"
+        );
+        let queue = app.state::<QueueState<tauri::test::MockRuntime>>();
+        queue.answer_consent(
+            payload["requestId"].as_str().unwrap(),
+            false,
+            ConsentScope::Once,
+        );
+        assert!(matches!(
+            next_task.join().unwrap(),
+            crate::engine::ConsentDecision::Deny(_)
+        ));
+    }
+
+    #[test]
+    fn late_answer_after_timeout_cannot_flip_to_allow() {
+        let (_root, app) = consent_test_app();
+        let rx = events_of(&app.handle(), &["consent:required"]);
+        let batch = "consent-late";
+        let policy = std::sync::Arc::new(std::sync::Mutex::new(Policy::new(
+            crate::policy::ConsentSettings::default(),
+        )));
+        let task = spawn_authorize(
+            app.handle().clone(),
+            batch,
+            "f1",
+            crate::models::Category::Video,
+            vec![Change::Downscale],
+            policy.clone(),
+            CancellationToken::new(),
+            std::time::Duration::from_millis(60),
+        );
+        let payload = next_consent(&rx);
+        let stale_id = payload["requestId"].as_str().unwrap().to_string();
+        assert!(matches!(
+            task.join().unwrap(),
+            crate::engine::ConsentDecision::Deny(_)
+        ));
+
+        let queue = app.state::<QueueState<tauri::test::MockRuntime>>();
+        queue.answer_consent(&stale_id, true, ConsentScope::Once);
+        assert_eq!(queue.pending_consent_count(), 0);
+        assert_eq!(
+            policy
+                .lock()
+                .unwrap()
+                .consent(crate::models::Category::Video, &[Change::Downscale]),
+            None,
+            "a stale answer must not grant anything"
+        );
+
+        let next_task = spawn_authorize(
+            app.handle().clone(),
+            batch,
+            "f2",
+            crate::models::Category::Video,
+            vec![Change::Downscale],
+            policy.clone(),
+            CancellationToken::new(),
+            std::time::Duration::from_secs(2),
+        );
+        let payload = next_consent(&rx);
+        assert_ne!(payload["requestId"], serde_json::json!(stale_id));
+        queue.answer_consent(
+            payload["requestId"].as_str().unwrap(),
+            false,
+            ConsentScope::Once,
+        );
+        next_task.join().unwrap();
+    }
+
+    #[test]
+    fn denying_one_capability_does_not_silence_another() {
+        let (_root, app) = consent_test_app();
+        let rx = events_of(&app.handle(), &["consent:required"]);
+        let batch = "consent-streak";
+        let queue = app.state::<QueueState<tauri::test::MockRuntime>>();
+
+        for round in 0..2 {
+            let policy = std::sync::Arc::new(std::sync::Mutex::new(Policy::new(
+                crate::policy::ConsentSettings::default(),
+            )));
+            let task = spawn_authorize(
+                app.handle().clone(),
+                batch,
+                &format!("deny-{round}"),
+                crate::models::Category::Video,
+                vec![Change::Downscale],
+                policy,
+                CancellationToken::new(),
+                std::time::Duration::from_secs(2),
+            );
+            let payload = next_consent(&rx);
+            queue.answer_consent(
+                payload["requestId"].as_str().unwrap(),
+                false,
+                ConsentScope::Once,
+            );
+            assert!(matches!(
+                task.join().unwrap(),
+                crate::engine::ConsentDecision::Deny(_)
+            ));
+        }
+
+        let silenced = std::sync::Mutex::new(Policy::new(
+            crate::policy::ConsentSettings::default(),
+        ));
+        let decision = authorize_now(
+            &app.handle(),
+            batch,
+            "silenced",
+            crate::models::Category::Video,
+            &[Change::Downscale],
+            &silenced,
+            std::time::Duration::from_millis(200),
+        );
+        assert!(matches!(
+            decision,
+            crate::engine::ConsentDecision::Deny(_)
+        ));
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(150))
+                .is_err(),
+            "two denials of downscale must silence further downscale prompts"
+        );
+
+        let other_policy = std::sync::Arc::new(std::sync::Mutex::new(Policy::new(
+            crate::policy::ConsentSettings::default(),
+        )));
+        let other = spawn_authorize(
+            app.handle().clone(),
+            batch,
+            "other",
+            crate::models::Category::Video,
+            vec![Change::FormatChange],
+            other_policy,
+            CancellationToken::new(),
+            std::time::Duration::from_secs(2),
+        );
+        let payload = next_consent(&rx);
+        assert_eq!(payload["changes"], serde_json::json!(["format_change"]));
+        queue.answer_consent(
+            payload["requestId"].as_str().unwrap(),
+            true,
+            ConsentScope::Once,
+        );
+        assert_eq!(
+            other.join().unwrap(),
+            crate::engine::ConsentDecision::Allow(ConsentSource::Once),
+            "denying downscale must not silence format_change"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cancel_while_waiting_ends_the_job() {
+        let _temp_guard = temp_guard();
+        let registry = std::sync::Arc::new(ProcessorRegistry::with_processors(vec![
+            Box::new(ConsentLadderProcessor {
+                category: crate::models::Category::Image,
+            }),
+            Box::new(ConsentLadderProcessor {
+                category: crate::models::Category::Video,
+            }),
+        ]));
+        let (_root, app, out) = setup_app_with_registry(1000, registry);
+        let queue = app.state::<QueueState<tauri::test::MockRuntime>>();
+        queue.set_consent_timeout(std::time::Duration::from_secs(5));
+        let ids = add_entries(
+            &app,
+            &[
+                ("a.jpg", crate::models::Category::Image, "/tmp/consent-a.jpg"),
+                ("b.mp4", crate::models::Category::Video, "/tmp/consent-b.mp4"),
+            ],
+        );
+        let rx = events_of(
+            &app.handle(),
+            &["consent:required", "file:cancelled", "batch:complete"],
+        );
+        QueueState::start_batch(
+            queue.inner(),
+            &app.handle(),
+            "consent-cancel".into(),
+            ids.clone(),
+        );
+
+        let mut requests = Vec::new();
+        for _ in 0..2 {
+            requests.push(next_consent(&rx)["requestId"].as_str().unwrap().to_string());
+        }
+        assert_eq!(requests.len(), 2, "both lanes must be waiting");
+
+        queue.cancel_all();
+
+        let mut cancelled = 0usize;
+        loop {
+            let (topic, _) = rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("the batch must finish after cancellation");
+            match topic.as_str() {
+                "file:cancelled" => cancelled += 1,
+                "batch:complete" => break,
+                "consent:required" => panic!("consent must not be re-emitted while cancelling"),
+                other => panic!("unexpected event: {other}"),
+            }
+        }
+        wait_idle(&queue, "consent-cancel");
+        assert_eq!(cancelled, 2, "every pending request must resolve as cancelled");
+        assert_eq!(queue.pending_consent_count(), 0);
+        assert!(
+            std::fs::read_dir(&out).unwrap().next().is_none(),
+            "a cancelled consent wait must leave no output"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn history_records_changes_and_consent_source() {
+        let _temp_guard = temp_guard();
+        let registry = std::sync::Arc::new(ProcessorRegistry::with_processor(Box::new(
+            ConsentLadderProcessor {
+                category: crate::models::Category::Video,
+            },
+        )));
+        let (_root, app, _out) = setup_app_with_registry(900, registry);
+        let queue = app.state::<QueueState<tauri::test::MockRuntime>>();
+        queue.set_consent_timeout(std::time::Duration::from_secs(5));
+        let ids = add_entries(
+            &app,
+            &[("v.mp4", crate::models::Category::Video, "/tmp/consent-v.mp4")],
+        );
+        let rx = events_of(&app.handle(), &["consent:required", "batch:complete"]);
+        QueueState::start_batch(
+            queue.inner(),
+            &app.handle(),
+            "consent-history".into(),
+            ids.clone(),
+        );
+        let payload = next_consent(&rx);
+        queue.answer_consent(
+            payload["requestId"].as_str().unwrap(),
+            true,
+            ConsentScope::Once,
+        );
+        loop {
+            let (topic, _) = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+            if topic == "batch:complete" {
+                break;
+            }
+        }
+        wait_idle(&queue, "consent-history");
+
+        let store = app.state::<crate::history::HistoryStore>();
+        let store = store.inner();
+        let records = raw_file_records(store);
+        let record = records
+            .iter()
+            .find(|record| record.file_id == ids[0])
+            .expect("the file record must exist");
+        assert_eq!(record.changes, vec![Change::Downscale]);
+        assert_eq!(record.consent_source, Some(ConsentSource::Once));
+
+        let folded = crate::history::fold_records(&store.read_lines().unwrap());
+        assert_eq!(folded.skipped_lines, 0);
+        let file = &folded.sessions[0].files[0];
+        assert_eq!(file.changes, vec![Change::Downscale]);
+        assert_eq!(file.consent_source, Some(ConsentSource::Once));
+        let value = serde_json::to_value(file).unwrap();
+        assert_eq!(value["changes"], serde_json::json!(["downscale"]));
+        assert_eq!(value["consentSource"], "once");
     }
 }

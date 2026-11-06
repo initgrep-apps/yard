@@ -177,6 +177,7 @@ describe('RunHeader', () => {
           belowTarget: 1,
           failed: 0,
           queued: 1,
+          waiting: 0,
           processed: 4,
         }}
       />
@@ -203,6 +204,7 @@ describe('RunHeader', () => {
           belowTarget: 0,
           failed: 1,
           queued: 1,
+          waiting: 0,
           processed: 3,
         }}
       />
@@ -222,6 +224,7 @@ describe('RunHeader', () => {
           belowTarget: 0,
           failed: 1,
           queued: 1,
+          waiting: 0,
           processed: 3,
         }}
       />
@@ -272,6 +275,7 @@ describe('RunHeader', () => {
           belowTarget: 0,
           failed: 1,
           queued: 0,
+          waiting: 0,
           processed: 4,
         }}
       />

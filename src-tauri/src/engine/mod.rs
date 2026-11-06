@@ -20,7 +20,7 @@ pub mod processor;
 pub mod progress;
 pub mod result;
 
-pub use context::JobContext;
+pub use context::{ConsentDecision, ConsentGate, JobContext};
 pub use ladder::{AttemptDecision, AttemptOutcome, Ladder};
 pub use processor::{
     CompressionProcessor, SidecarName, SidecarPaths, StderrTail,

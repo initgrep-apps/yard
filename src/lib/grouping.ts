@@ -28,6 +28,7 @@ export interface BatchCounts {
   belowTarget: number
   failed: number
   queued: number
+  waiting: number
   processed: number
 }
 
@@ -69,7 +70,10 @@ export function isTerminal(status: FileStatus): boolean {
   return countsTowardProcessed(bucketOf(status))
 }
 
-export function batchCounts(files: FileEntry[]): BatchCounts {
+export function batchCounts(
+  files: FileEntry[],
+  waitingFileIds: ReadonlySet<string> = new Set()
+): BatchCounts {
   const counts: BatchCounts = {
     all: 0,
     processing: 0,
@@ -77,12 +81,14 @@ export function batchCounts(files: FileEntry[]): BatchCounts {
     belowTarget: 0,
     failed: 0,
     queued: 0,
+    waiting: 0,
     processed: 0,
   }
   for (const file of files) {
     const bucket = bucketOf(file.status)
     if (bucket === 'unsupported') continue
     counts.all += 1
+    if (waitingFileIds.has(file.id)) counts.waiting += 1
     if (countsTowardProcessed(bucket)) counts.processed += 1
     if (bucket !== 'processedOnly') counts[bucket] += 1
   }

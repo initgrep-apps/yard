@@ -17,6 +17,7 @@
 import { createContext, useCallback, useContext, useRef, useState, type ReactNode } from 'react'
 import { useFileList } from '@/hooks/useFileList'
 import { useCompression } from '@/hooks/useCompression'
+import { requestPreflight } from '@/hooks/useConsent'
 import { toast } from 'sonner'
 import { formatSize } from '@/lib/sizeFormat'
 import type { FileEntry } from '@/types'
@@ -77,17 +78,17 @@ export function CompressionProvider({ children }: { children: ReactNode }) {
   const [batchCancelled, setBatchCancelled] = useState(false)
   const [roster, setRoster] = useState<Array<FileEntry['id']>>([])
 
-  const startRun = useCallback(() => {
+  const startRun = useCallback(async () => {
     if (isCompressing) return
-    const pendingIds = filesRef.current
-      .filter((f) => f.status === 'pending')
-      .map((f) => f.id)
-    if (pendingIds.length === 0) return
-    setRoster(pendingIds)
+    const pending = filesRef.current.filter((f) => f.status === 'pending')
+    if (pending.length === 0) return
+    const grants = await requestPreflight(pending)
+    if (grants === null) return
+    setRoster(pending.map((f) => f.id))
     setBatchNumber((n) => n + 1)
     setBatchCancelled(false)
     setRunScreen('run')
-    void compressAll()
+    void compressAll(grants.length > 0 ? grants : undefined)
   }, [compressAll, isCompressing])
 
   const endRun = useCallback(() => {

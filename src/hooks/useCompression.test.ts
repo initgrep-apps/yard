@@ -32,7 +32,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { toast } from 'sonner'
 import type { FileEntry } from '@/types'
 
-const WATCHDOG_MS = 10 * 60 * 1000
+const WATCHDOG_MS = 35 * 60 * 1000
 
 const emit = (event: string, payload: unknown) =>
   act(() => {

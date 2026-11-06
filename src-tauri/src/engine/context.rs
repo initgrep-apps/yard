@@ -22,12 +22,26 @@ use tokio_util::sync::CancellationToken;
 use crate::engine::processor::SidecarPaths;
 use crate::engine::progress::ProgressSender;
 use crate::models::Category;
-use crate::policy::{Change, ConsentSource, Policy};
+use crate::policy::{Change, ConsentSource, Policy, Verdict};
 use crate::settings::QualityFloors;
 
 fn default_policy() -> &'static Policy {
     static POLICY: OnceLock<Policy> = OnceLock::new();
     POLICY.get_or_init(Policy::default)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConsentDecision {
+    Allow(ConsentSource),
+    Deny(String),
+    Cancelled,
+}
+
+/// Runs the request/response exchange for a consent-gated change. The queue
+/// implements this over its pending-request registry; without a gate the
+/// policy's static grants decide.
+pub trait ConsentGate: Send + Sync {
+    fn authorize(&self, category: Category, changes: &[Change]) -> ConsentDecision;
 }
 
 /// Everything a processor needs for one job. Values are resolved once by the
@@ -45,6 +59,7 @@ pub struct JobContext<'a> {
     pub policy: &'a Policy,
     pub category: Category,
     pub declared: &'a [Change],
+    pub consent_gate: Option<&'a dyn ConsentGate>,
 }
 
 impl<'a> JobContext<'a> {
@@ -71,6 +86,7 @@ impl<'a> JobContext<'a> {
             policy: default_policy(),
             category: crate::detection::detect_category(&input.to_string_lossy()),
             declared: &Change::ALL,
+            consent_gate: None,
         }
     }
 
@@ -89,10 +105,29 @@ impl<'a> JobContext<'a> {
         self
     }
 
+    pub fn with_consent_gate(mut self, gate: &'a dyn ConsentGate) -> Self {
+        self.consent_gate = Some(gate);
+        self
+    }
+
     pub fn consent_for(&self, changes: &[Change]) -> ConsentSource {
         self.policy
             .consent(self.category, changes)
             .unwrap_or(ConsentSource::Default)
+    }
+
+    pub fn authorize(&self, changes: &[Change]) -> ConsentDecision {
+        if let Some(gate) = self.consent_gate {
+            return gate.authorize(self.category, changes);
+        }
+        if self.policy.check(self.category, changes) == Verdict::Allowed {
+            return ConsentDecision::Allow(self.consent_for(changes));
+        }
+        ConsentDecision::Deny(
+            self.policy
+                .denial_reason(self.category, changes)
+                .unwrap_or_else(|| "Needs permission".to_string()),
+        )
     }
 }
 

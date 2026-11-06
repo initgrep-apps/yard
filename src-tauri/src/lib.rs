@@ -187,6 +187,7 @@ macro_rules! invoke_handlers {
             commands::save_settings,
             commands::reset_settings,
             commands::compress_all,
+            commands::answer_consent,
             commands::cancel_file,
             commands::cancel_all,
             commands::reveal_in_folder,

@@ -54,6 +54,8 @@ function session(sessionId: string, fileName: string, startedAt: number): Histor
         error: null,
         durationMs: 10,
         completedAt: startedAt,
+        changes: [],
+        consentSource: null,
       },
     ],
     outcome: {

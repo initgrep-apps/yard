@@ -47,6 +47,8 @@ function file(overrides: Partial<HistoryFile> = {}): HistoryFile {
     error: null,
     durationMs: 2_100,
     completedAt: new Date(2026, 9, 25, 20, 2).getTime(),
+    changes: [],
+    consentSource: null,
     ...overrides,
   }
 }

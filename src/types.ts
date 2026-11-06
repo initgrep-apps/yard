@@ -106,6 +106,8 @@ export interface HistoryFile {
   error: string | null
   durationMs: number
   completedAt: number
+  changes: Change[]
+  consentSource: ConsentSource | null
 }
 
 export interface SessionOutcome {

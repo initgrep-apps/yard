@@ -38,13 +38,14 @@ function file(overrides: Partial<HistoryFile> = {}): HistoryFile {
     error: null,
     durationMs: 2_100,
     completedAt: new Date(2026, 9, 25, 20, 2).getTime(),
+    changes: [],
+    consentSource: null,
     ...overrides,
   }
 }
 
 describe("HistoryFileDetail", () => {
-  it("renders the size scale with current/original/percent/saved values", () => {
-    render(<HistoryFileDetail file={file()} onReveal={vi.fn()} />)
+  it("renders the size scale with current/original/percent/saved values", () => {    render(<HistoryFileDetail file={file()} onReveal={vi.fn()} />)
 
     expect(screen.getByText("0")).toBeInTheDocument()
     expect(screen.getByText("259 KB")).toBeInTheDocument()
@@ -147,5 +148,29 @@ describe("HistoryFileDetail", () => {
     expect(screen.getByTestId("detail-current-bar")).toHaveStyle({ width: "100%" })
     expect(screen.queryByText("NaN")).not.toBeInTheDocument()
     expect(screen.getByRole("button", { name: "Show compressed" })).toBeEnabled()
+  })
+
+  it("shows the granted changes and the consent source", () => {
+    render(
+      <HistoryFileDetail
+        file={file({
+          changes: ["downscale", "drop_stream"],
+          consentSource: "batch",
+        })}
+        onReveal={vi.fn()}
+      />
+    )
+
+    const card = screen.getByTestId("history-detail-permission-card")
+    expect(card).toHaveTextContent("Permissions")
+    expect(card).toHaveTextContent("Changes")
+    expect(card).toHaveTextContent("Downscale, Drop stream")
+    expect(card).toHaveTextContent("Consent")
+    expect(card).toHaveTextContent("This batch")
+  })
+
+  it("omits the permission card when no changes or consent were recorded", () => {
+    render(<HistoryFileDetail file={file()} onReveal={vi.fn()} />)
+    expect(screen.queryByTestId("history-detail-permission-card")).not.toBeInTheDocument()
   })
 })

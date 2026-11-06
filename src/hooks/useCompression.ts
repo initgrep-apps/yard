@@ -18,7 +18,8 @@ import { useEffect, useCallback, useRef, useState, type Dispatch, type SetStateA
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { toast } from 'sonner'
-import type { FileEntry, FileStatus } from '@/types'
+import type { Change, ConsentSource, FileEntry, FileStatus } from '@/types'
+import { dropConsentForFile, clearConsentRequests, type ConsentGrant } from '@/hooks/useConsent'
 
 interface ProgressPayload {
   fileId: string
@@ -35,6 +36,8 @@ interface CompletePayload {
   strategyUsed?: string | null
   qualityUsed?: number | null
   reason?: string | null
+  changes?: Change[] | null
+  consentSource?: ConsentSource | null
 }
 
 interface ErrorPayload {
@@ -50,6 +53,7 @@ interface BatchCompletePayload {
   batchId: string
   totalSavedBytes: number
   cancelled?: boolean
+  needsPermission?: number
 }
 
 interface BatchErrorPayload {
@@ -70,7 +74,7 @@ export interface CompressionCallbacks {
 const toMessage = (err: unknown): string =>
   err instanceof Error ? err.message : String(err)
 
-const TERMINAL_WATCHDOG_MS = 10 * 60 * 1000
+const TERMINAL_WATCHDOG_MS = 35 * 60 * 1000
 
 export function useCompression(
   files: FileEntry[],
@@ -180,6 +184,7 @@ export function useCompression(
       if (filesRef.current.some((f) => f.id === fileId)) {
         processedCountRef.current += 1
       }
+      dropConsentForFile(fileId)
       dropProgress(fileId)
       const denied = status === 'needs_permission'
       setFiles((prev) =>
@@ -208,6 +213,7 @@ export function useCompression(
         processedCountRef.current += 1
         errorCountRef.current += 1
       }
+      dropConsentForFile(fileId)
       dropProgress(fileId)
       setFiles((prev) =>
         prev.map((f) =>
@@ -223,6 +229,7 @@ export function useCompression(
     listen<CancelledPayload>('file:cancelled', (e) => {
       kickWatchdog()
       const { fileId } = e.payload
+      dropConsentForFile(fileId)
       dropProgress(fileId)
       setFiles((prev) =>
         prev.map((f) =>
@@ -244,6 +251,7 @@ export function useCompression(
       lastTerminalRef.current = e.payload.batchId
       activeBatchRef.current = null
       clearWatchdog()
+      clearConsentRequests()
       setIsCompressing(false)
       isCompressingRef.current = false
       const processed = processedCountRef.current
@@ -251,6 +259,12 @@ export function useCompression(
       processedCountRef.current = 0
       errorCountRef.current = 0
       const cancelled = clearCancelled(e.payload.cancelled)
+      const needsPermission = e.payload.needsPermission ?? 0
+      if (needsPermission > 0) {
+        toast.info(
+          `${needsPermission} files need permission — review them before retrying`
+        )
+      }
       if (processed > 0 || cancelled) {
         callbacksRef.current?.onBatchComplete?.(
           e.payload.totalSavedBytes,
@@ -269,6 +283,7 @@ export function useCompression(
       lastTerminalRef.current = e.payload.batchId
       activeBatchRef.current = null
       clearWatchdog()
+      clearConsentRequests()
       setIsCompressing(false)
       isCompressingRef.current = false
       processedCountRef.current = 0
@@ -286,7 +301,7 @@ export function useCompression(
     }
   }, [setFiles, clearWatchdog, kickWatchdog])
 
-  const compressAll = useCallback(async () => {
+  const compressAll = useCallback(async (grants?: ConsentGrant[]) => {
     const pendingCount = filesRef.current.filter((f) => f.status === 'pending').length
     if (pendingCount === 0) return
     clearWatchdog()
@@ -294,7 +309,10 @@ export function useCompression(
     setIsCompressing(true)
     cancelledRef.current = false
     try {
-      const batchId = await invoke<string>('compress_all')
+      const batchId =
+        grants && grants.length > 0
+          ? await invoke<string>('compress_all', { grants })
+          : await invoke<string>('compress_all')
       activeBatchRef.current = typeof batchId === 'string' && batchId !== '' ? batchId : null
       lastTerminalRef.current = null
       if (typeof batchId === 'string' && batchId !== '') {

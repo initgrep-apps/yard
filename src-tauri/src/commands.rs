@@ -177,6 +177,7 @@ pub fn compress_all<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     state: State<'_, FileListState>,
     queue: State<'_, crate::queue::QueueState<R>>,
+    grants: Option<Vec<crate::queue::ConsentGrant>>,
 ) -> String {
     let list = state.0.lock().unwrap_or_else(|e| {
         eprintln!("warn: file list mutex was poisoned, recovering: {e}");
@@ -195,8 +196,22 @@ pub fn compress_all<R: tauri::Runtime>(
     }
 
     let batch_id = uuid::Uuid::new_v4().to_string();
+    if let Some(grants) = grants.as_deref() {
+        queue.register_batch_grants(&batch_id, grants);
+    }
     queue.start_batch(&app, batch_id.clone(), pending_ids);
     batch_id
+}
+
+#[tauri::command]
+pub fn answer_consent<R: tauri::Runtime>(
+    _app: tauri::AppHandle<R>,
+    queue: State<'_, crate::queue::QueueState<R>>,
+    request_id: String,
+    allow: bool,
+    scope: crate::queue::ConsentScope,
+) {
+    queue.answer_consent(&request_id, allow, scope);
 }
 
 #[tauri::command]
@@ -617,6 +632,8 @@ mod tests {
                 strategy_used: Some("quality=70".into()),
                 error: None,
                 duration_ms: 3,
+                changes: Vec::new(),
+                consent_source: None,
             })
             .unwrap();
         fs::OpenOptions::new()

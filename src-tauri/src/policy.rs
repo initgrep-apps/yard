@@ -241,8 +241,18 @@ impl Policy {
         }
     }
 
-    pub fn consent(&self, category: Category, changes: &[Change]) -> Option<ConsentSource> {
-        if self.check(category, changes) != Verdict::Allowed {
+    pub fn needs_consent(&self, category: Category, changes: &[Change]) -> Vec<Change> {
+        changes
+            .iter()
+            .copied()
+            .filter(|change| {
+                verdict(category, *change) == Verdict::NeedsConsent
+                    && self.grant_source(category, *change).is_none()
+            })
+            .collect()
+    }
+
+    pub fn consent(&self, category: Category, changes: &[Change]) -> Option<ConsentSource> {        if self.check(category, changes) != Verdict::Allowed {
             return None;
         }
         let mut source = ConsentSource::Default;

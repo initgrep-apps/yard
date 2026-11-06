@@ -62,6 +62,8 @@ function doneFile(overrides: Partial<HistoryFile> = {}): HistoryFile {
     error: null,
     durationMs: 2_100,
     completedAt: STARTED_AT,
+    changes: [],
+    consentSource: null,
     ...overrides,
   }
 }
@@ -81,6 +83,8 @@ function failedFile(overrides: Partial<HistoryFile> = {}): HistoryFile {
     error: "Cannot read file: locked",
     durationMs: 3,
     completedAt: STARTED_AT,
+    changes: [],
+    consentSource: null,
     ...overrides,
   }
 }

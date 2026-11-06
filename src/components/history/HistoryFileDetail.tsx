@@ -16,7 +16,7 @@
 
 import type { ReactElement } from "react"
 import { Folder, FolderOpen } from "lucide-react"
-import type { HistoryFile } from "@/types"
+import type { Change, ConsentSource, HistoryFile } from "@/types"
 import { savedLabel } from "@/lib/historyFormat"
 import {
   completedLabel,
@@ -34,6 +34,24 @@ const EYEBROW_CLASS =
   "text-[8px] uppercase tracking-[0.08em] text-muted-foreground"
 const LABEL_CLASS = "text-[8px] leading-none text-muted-foreground"
 const VALUE_CLASS = "text-[10px] leading-tight text-foreground"
+
+const CHANGE_LABELS: Record<Change, string> = {
+  lossy_encode: "Lossy encode",
+  downscale: "Downscale",
+  drop_stream: "Drop stream",
+  format_change: "Format change",
+  metadata_strip: "Metadata strip",
+  rasterize: "Rasterize",
+  page_drop: "Page drop",
+}
+
+const CONSENT_LABELS: Record<ConsentSource, string> = {
+  default: "Default",
+  global: "Global setting",
+  category: "Category setting",
+  batch: "This batch",
+  once: "Once",
+}
 
 function Fact({ label, value }: { label: string; value: string }) {
   return (
@@ -139,6 +157,24 @@ export function HistoryFileDetail({
         <Fact label="Duration" value={formatPreciseDuration(file.durationMs)} />
         <Fact label="Completed" value={completedLabel(file.completedAt)} />
       </div>
+
+      {(file.changes.length > 0 || file.consentSource !== null) && (
+        <div className={CARD_CLASS} data-testid="history-detail-permission-card">
+          <div className={EYEBROW_CLASS}>Permissions</div>
+          {file.changes.length > 0 && (
+            <Fact
+              label="Changes"
+              value={file.changes.map((change) => CHANGE_LABELS[change] ?? change).join(", ")}
+            />
+          )}
+          {file.consentSource !== null && (
+            <Fact
+              label="Consent"
+              value={CONSENT_LABELS[file.consentSource] ?? file.consentSource}
+            />
+          )}
+        </div>
+      )}
 
       <div className="col-span-full flex justify-end gap-1.5 border-t border-border/60 pt-[9px]">
         <Button

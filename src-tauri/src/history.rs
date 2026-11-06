@@ -22,6 +22,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{LockResult, Mutex, MutexGuard};
 use tauri::{AppHandle, Manager, Runtime};
 
+use crate::policy::{Change, ConsentSource};
+
 fn poison_recover<T>(lock: LockResult<MutexGuard<'_, T>>) -> MutexGuard<'_, T> {
     lock.unwrap_or_else(|e| {
         eprintln!("warn: history mutex was poisoned, recovering: {e}");
@@ -56,6 +58,10 @@ pub struct FileResultRecord {
     pub strategy_used: Option<String>,
     pub error: Option<String>,
     pub duration_ms: u64,
+    #[serde(default)]
+    pub changes: Vec<Change>,
+    #[serde(default)]
+    pub consent_source: Option<ConsentSource>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -105,6 +111,10 @@ pub struct HistoryFile {
     pub error: Option<String>,
     pub duration_ms: u64,
     pub completed_at: i64,
+    #[serde(default)]
+    pub changes: Vec<Change>,
+    #[serde(default)]
+    pub consent_source: Option<ConsentSource>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -209,6 +219,8 @@ fn history_file_from(record: &FileResultRecord) -> HistoryFile {
         error: record.error.clone(),
         duration_ms: record.duration_ms,
         completed_at: record.completed_at,
+        changes: record.changes.clone(),
+        consent_source: record.consent_source,
     }
 }
 
@@ -940,6 +952,8 @@ mod tests {
                 strategy_used: None,
                 error: None,
                 duration_ms: 0,
+                changes: Vec::new(),
+                consent_source: None,
             })
             .unwrap();
         let line = store.read_lines().unwrap().pop().unwrap();
@@ -1413,14 +1427,18 @@ mod tests {
             strategy_used: None,
             error: None,
             duration_ms: 0,
+            changes: Vec::new(),
+            consent_source: None,
         }))
         .unwrap();
         assert_eq!(
             sorted_keys(&file),
             vec![
                 "category",
+                "changes",
                 "completedAt",
                 "compressedSize",
+                "consentSource",
                 "durationMs",
                 "error",
                 "fileId",
@@ -1483,6 +1501,8 @@ mod tests {
             strategy_used: None,
             error: Some("échec: 漢字 😀".into()),
             duration_ms: 0,
+            changes: Vec::new(),
+            consent_source: None,
         };
         store.append_file(&file).unwrap();
         let line = store.read_lines().unwrap().pop().unwrap();
@@ -1881,8 +1901,10 @@ mod tests {
             sorted_keys(file),
             vec![
                 "category",
+                "changes",
                 "completedAt",
                 "compressedSize",
+                "consentSource",
                 "durationMs",
                 "error",
                 "name",
@@ -1963,6 +1985,8 @@ mod tests {
                 strategy_used: Some("quality=70".into()),
                 error: None,
                 duration_ms: 12,
+                changes: Vec::new(),
+                consent_source: None,
             })
             .unwrap();
         let out = store.load().unwrap();
@@ -3252,6 +3276,8 @@ mod tests {
                 strategy_used: Some("quality=70".into()),
                 error: None,
                 duration_ms: 12,
+                changes: Vec::new(),
+                consent_source: None,
             })
             .unwrap();
         store
@@ -3545,6 +3571,8 @@ mod tests {
                 strategy_used: Some("quality=70".into()),
                 error: None,
                 duration_ms: 12,
+                changes: Vec::new(),
+                consent_source: None,
             })
             .unwrap();
         store
@@ -3564,6 +3592,8 @@ mod tests {
                 strategy_used: None,
                 error: None,
                 duration_ms: 0,
+                changes: Vec::new(),
+                consent_source: None,
             })
             .unwrap();
 
@@ -3703,6 +3733,8 @@ mod tests {
                 strategy_used: Some("quality=70".into()),
                 error: None,
                 duration_ms: 12,
+                changes: Vec::new(),
+                consent_source: None,
             })
             .unwrap();
         store
@@ -3745,5 +3777,27 @@ mod tests {
         assert_eq!(out.sessions[0].session_id, "s1");
         assert_eq!(out.sessions[0].files.len(), 1, "original file record intact");
         assert_eq!(out.sessions[0].outcome.done, 1);
+    }
+
+    #[test]
+    fn old_history_lines_without_changes_still_load() {
+        let mut old_file = file("s1", "f1", 110, "best_effort", (500, Some(100)));
+        old_file.as_object_mut().unwrap().remove("changes");
+        old_file.as_object_mut().unwrap().remove("consentSource");
+        let lines = vec![
+            line(start("s1", 100)),
+            line(old_file.clone()),
+            line(end("s1", 120)),
+        ];
+
+        let out = fold_records(&lines);
+        assert_eq!(out.skipped_lines, 0, "old file lines must not be skipped");
+        assert!(!out.sessions[0].interrupted, "old history must stay complete");
+        assert!(out.sessions[0].files[0].changes.is_empty());
+        assert_eq!(out.sessions[0].files[0].consent_source, None);
+
+        let record: FileResultRecord = serde_json::from_value(old_file).unwrap();
+        assert!(record.changes.is_empty());
+        assert_eq!(record.consent_source, None);
     }
 }

@@ -23,6 +23,8 @@ import { FileList } from '@/components/FileList'
 import { formatSize } from '@/lib/sizeFormat'
 import { RunHeader } from '@/components/run/RunHeader'
 import { RunBoard } from '@/components/run/RunBoard'
+import { PreflightDialog } from '@/components/run/PreflightDialog'
+import { useConsent } from '@/hooks/useConsent'
 import { batchCounts, type StatusFilter } from '@/lib/grouping'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardFooter } from '@/components/ui/card'
@@ -80,10 +82,11 @@ function RunMonitor() {
     endRun,
   } = useCompressionContext()
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
+  const { waitingFileIds } = useConsent()
   useBatchLockedDrops()
 
   const rosterFiles = files.filter((f) => roster.includes(f.id))
-  const counts = batchCounts(rosterFiles)
+  const counts = batchCounts(rosterFiles, waitingFileIds)
   const total = rosterFiles.length
 
   return (
@@ -210,5 +213,10 @@ function StagingScreen() {
 
 export function CompressView() {
   const { runScreen } = useCompressionContext()
-  return runScreen === 'run' ? <RunMonitor /> : <StagingScreen />
+  return (
+    <>
+      {runScreen === 'run' ? <RunMonitor /> : <StagingScreen />}
+      <PreflightDialog />
+    </>
+  )
 }

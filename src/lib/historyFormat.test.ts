@@ -175,6 +175,8 @@ const fileWithStatus = (status: HistoryFile['status']): HistoryFile => ({
   error: null,
   durationMs: 10,
   completedAt: 0,
+  changes: [],
+  consentSource: null,
 })
 
 describe('history aggregates', () => {

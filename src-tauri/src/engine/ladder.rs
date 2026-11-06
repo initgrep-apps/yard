@@ -16,7 +16,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::engine::context::JobContext;
+use crate::engine::context::{ConsentDecision, JobContext};
 use crate::engine::processor::{BestAttempt, deliver_output};
 use crate::engine::progress::ProgressSender;
 use crate::engine::result::{CompressionError, CompressionResult, STRATEGY_ALREADY_UNDER_TARGET};
@@ -131,22 +131,32 @@ impl Ladder {
                 quality,
                 strategy,
                 changes,
-                consent,
+                consent: reported_consent,
             } => {
                 if let Err(error) = Self::check_declared(ctx.declared, &changes) {
                     self.remove_attempt(&path);
                     self.last_error = Some(CompressionError::Unknown(error));
                     return AttemptDecision::Continue;
                 }
-                if ctx.policy.check(ctx.category, &changes) != crate::policy::Verdict::Allowed {
-                    self.remove_attempt(&path);
-                    self.permission_denial = Some(
-                        ctx.policy
-                            .denial_reason(ctx.category, &changes)
-                            .unwrap_or_else(|| "Needs permission".to_string()),
-                    );
-                    return AttemptDecision::Continue;
-                }
+                let consent = match ctx.authorize(&changes) {
+                    ConsentDecision::Allow(source) => {
+                        if source == ConsentSource::Default {
+                            reported_consent
+                        } else {
+                            source
+                        }
+                    }
+                    ConsentDecision::Deny(reason) => {
+                        self.remove_attempt(&path);
+                        self.permission_denial = Some(reason);
+                        return AttemptDecision::Continue;
+                    }
+                    ConsentDecision::Cancelled => {
+                        self.remove_attempt(&path);
+                        self.cancel_cleanup();
+                        return AttemptDecision::Continue;
+                    }
+                };
                 let attempt = BestAttempt {
                     size,
                     path,
@@ -236,10 +246,23 @@ impl Ladder {
                 .take()
                 .unwrap_or_else(|| CompressionError::SidecarFailed("Could not compress file".into())));
         };
-        if let Some(reason) = ctx.policy.denial_reason(ctx.category, &best.changes) {
-            self.cleanup_attempts();
-            return Err(CompressionError::NeedsPermission(reason));
-        }
+        let consent = match ctx.authorize(&best.changes) {
+            ConsentDecision::Allow(source) => {
+                if source == ConsentSource::Default {
+                    best.consent
+                } else {
+                    source
+                }
+            }
+            ConsentDecision::Deny(reason) => {
+                self.cleanup_attempts();
+                return Err(CompressionError::NeedsPermission(reason));
+            }
+            ConsentDecision::Cancelled => {
+                self.cleanup_attempts();
+                return Err(CompressionError::Cancelled);
+            }
+        };
         let result = deliver_output(
             &best.path,
             ctx.output,
@@ -253,7 +276,7 @@ impl Ladder {
         self.cleanup_attempts();
         result.map(|mut result| {
             result.changes = best.changes;
-            result.consent = best.consent;
+            result.consent = consent;
             result
         })
     }

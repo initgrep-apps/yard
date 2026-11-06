@@ -65,6 +65,8 @@ function makeFile(
     error: null,
     durationMs: 100,
     completedAt: 0,
+    changes: [],
+    consentSource: null,
   }
 }
 
