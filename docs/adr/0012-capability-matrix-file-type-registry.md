@@ -25,7 +25,7 @@ Image `FormatChange` is additionally granted by default through `consent.heicToJ
 
 ## Consequences
 
-- Detection, the processor registry, output naming and the capability matrix all read the same rows.
+- Detection, the processor registry and output naming read the same rows. The capability matrix is a separate literal array indexed by `Category`; it does not read the registry.
 - A rung cannot change something it did not declare; the policy lookup is the only place that decides.
 - `MetadataStrip` is not a consent row: orientation and ICC are never stripped, and bulky non-visual data is stripped silently and reported.
 - A new file type still needs a processor, but no other file needs editing.

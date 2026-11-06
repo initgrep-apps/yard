@@ -30,7 +30,7 @@ or network access.
 |---|---|
 | **Category targets** | Images, video, PDF, and documents each get a target size. Defaults are editable in Settings. |
 | **Bundled engines** | libvips, FFmpeg, qpdf, and Ghostscript ship with the app. No runtime downloads. |
-| **Originals stay untouched** | Results go to a separate output folder. Destructive changes — downscaling, dropping a stream, changing format, rasterising — need your permission; a few, such as dropping a PDF page, are refused outright. HEIC/HEIF becomes JPEG by default and MOV becomes MP4. |
+| **Originals stay untouched** | Results go to a separate output folder. Destructive changes — downscaling, dropping a stream, changing format, rasterising — need your permission; a few, such as dropping a PDF page, are refused outright. When compression runs, HEIC/HEIF becomes JPEG and MOV becomes MP4; an already-under-target file is copied byte-for-byte. |
 | **Batch workflow** | Parallel compression, per-file progress, per-file cancel, and cancel-all. |
 | **History** | A local audit trail with per-file sizes, methods, timings, the changes each file needed, any consent grant, and a 90-day retention default. |
 | **Offline by design** | No telemetry, no cloud processing, no auto-update. Your files never leave the machine. |
@@ -75,16 +75,21 @@ The Windows builds are unsigned.
 2. Press **Compress**. Progress is shown per file; cancel any file or the batch.
 3. Open the output folder from the result row, or browse the batch in **History**.
 
-Targets, quality floors, memory ceiling, output folder, and history live in **Settings**. Destructive changes prompt before delivery; denying one leaves no output for that file.
+Targets, quality floors, memory ceiling, output folder, and history live in **Settings**. Destructive changes prompt before delivery: a denied rung is dropped, and the file is delivered only if an earlier authorised attempt remains (as best effort); otherwise it ends as `needs_permission`.
 
 ## Supported formats
 
 | Type | Input | Output |
 |---|---|---|
-| Images | JPEG, PNG, WebP, HEIC/HEIF | JPEG, PNG, WebP; HEIC/HEIF becomes JPEG |
-| Video | MP4, MOV | MP4 |
+| Images | JPEG, PNG, WebP, HEIC/HEIF | JPEG, PNG, WebP (HEIC/HEIF → JPEG when compression runs) |
+| Video | MP4, MOV | MP4 (MOV → MP4 when compression runs) |
 | PDF | PDF | PDF |
 | Documents | DOCX, XLSX, PPTX | Same format, embedded media recompressed |
+
+A file already under its target is copied byte-for-byte under the mapped extension. That
+means an under-target HEIC keeps HEIC bytes in a `.jpg` file, an under-target MOV keeps
+MOV bytes in a `.mp4` file, and an under-target image is not re-encoded to sRGB. Format
+conversion, image orientation and colour normalization only run when compression does.
 
 ## Screenshots
 

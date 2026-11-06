@@ -10,8 +10,9 @@
 - **Consent gate** — destructive changes (downscale, dropped stream, format change,
   rasterise) are checked before delivery and ask when the matrix allows consent.
   Inline prompts grant once or for the batch; the pre-flight dialog covers HEIC → JPEG
-  when its default permission is off. A denied or unanswered change ends the file as
-  `needs_permission` with no output.
+  when its default permission is off. A denied or unanswered rung is removed; the file
+  ends as `needs_permission` only when no authorised attempt remains. An earlier
+  authorised over-target attempt may still be delivered as best effort.
 - **History truth** — file records carry `changes` and `consentSource`; the batch
   outcome counts `needs_permission`.
 - **Image long-edge floor** — `qualityFloors.image.minLongEdge` (default 1280 px)
@@ -21,8 +22,11 @@
 
 - **Documents stream** — archive entries are copied one at a time instead of
   snapshotting the whole archive. Temp disk grows; RAM no longer does.
-- **Images** — every attempt uses `vips thumbnail` with EXIF autorotation, sRGB
-  output and `keep=icc`. Metadata is no longer blanket-stripped.
+- **Under-target copies** — an input already under target is copied byte-for-byte under
+  the mapped extension. HEIC/MOV bytes and the original image colour/orientation remain
+  until compression actually runs.
+- **Images** — every compression attempt uses `vips thumbnail` with EXIF autorotation,
+  sRGB output and `keep=icc`. Metadata is no longer blanket-stripped.
 - **Video** — one ABR rung then CRF at the lower allowed resolutions; all audio/subtitle
   tracks and chapters are mapped; output is `yuv420p` with `+faststart`; duration and
   stream counts are validated.

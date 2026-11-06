@@ -102,7 +102,7 @@ The ordered list of rungs a job may try, from least to most destructive.
 _Avoid_: pipeline, chain
 
 **Lossless pass**:
-A rung that changes encoding or container without discarding pages, tracks, pixels or profile data.
+A rung that changes encoding or container without discarding pages, tracks, pixels or profile data. Not every category has one: PDF can linearise, while image and video ladders start directly with lossy attempts.
 _Avoid_: safe mode, compression
 
 **Remux**:
@@ -114,11 +114,11 @@ Re-encoding that lowers fidelity while keeping the same contents: every page, tr
 _Avoid_: destructive change, compression
 
 **Fidelity ladder**:
-The shipped attempt order: copy when already under target, lossless pass, lossy encode inside the quality floors, destructive change only with consent, then best effort or `needs_permission`. Each rung declares the changes it can make; the ladder rejects an undeclared change.
+The shipped attempt order: copy when already under target; then the category's ladder, with any lossless pass first (PDF), followed by lossy encode inside the quality floors; destructive change only when the matrix says `NeedsConsent` and a grant exists; then best effort or `needs_permission`. Image and video start directly with lossy attempts. Each rung declares the changes it can make; the ladder rejects an undeclared change.
 _Avoid_: fallback chain, retry loop
 
 **Destructive change**:
-A change the user can notice in the result: fewer pixels, a missing track or page, a different format, rasterised pages. Requires consent unless a setting grants it.
+A change the user can notice in the result: fewer pixels, a missing track or page, a different format, rasterised pages. Requires consent when the capability matrix says `NeedsConsent`; a `Denied` change, such as dropping a PDF page, can never be granted.
 _Avoid_: lossy, degradation
 
 **Batch budget**:
@@ -130,7 +130,7 @@ The conservative peak RAM attributed to one job for admission: image 4 × input,
 _Avoid_: memory limit, job ceiling, engine memory
 
 **Registry**:
-`registry.rs` — the single file-type table mapping extension → category → output extension. Detection, each processor's accepted extensions, output naming and the capability matrix's category columns all read it.
+`registry.rs` — the single file-type table mapping extension → category → output extension. Detection, each processor's accepted extensions and output naming read it. The capability matrix is a separate literal array indexed by `Category`; it does not read the registry.
 _Avoid_: type map, extension list
 
 **Target**:
@@ -170,9 +170,9 @@ One prompt before a batch for destructive changes that can be predicted from the
 _Avoid_: batch warning, upfront dialog
 
 **Needs permission**:
-The `needs_permission` status of a file whose required destructive change was denied or left unanswered. Nothing is delivered, and any delivered file is removed.
+The `needs_permission` status of a file whose required destructive change was denied or left unanswered and no authorised attempt remains. The denied rung is removed; an earlier authorised over-target attempt may still be delivered as best effort.
 _Avoid_: failed, blocked, best effort
 
 **Best effort**:
-The outcome of a file where every required change was authorised but the target still could not be reached. The smallest attempt is delivered.
+The outcome of a file where every change the delivered attempt made was authorised but the target could not be reached. The smallest such attempt is delivered.
 _Avoid_: needs permission, failed

@@ -229,12 +229,12 @@ Details that change behavior:
 1. **Preflight.** The app creates the output folder and writes/deletes a probe file, then requires `1.1 × largest original` free where outputs land and `largest job estimate / 2` free on the temp volume. Failure emits `batch:error` before any history record is written.
 2. **Cancel tokens register before the status flips** from Pending to Compressing, so a cancel can never miss a job that just started.
 3. **Panics are caught** by `catch_unwind` in release builds (`panic = "unwind"`) and reported as an unknown error; one file's panic does not kill the batch (ADR 0014). Each job body runs in `spawn_blocking`, so the async worker is never parked on a 30 ms engine poll.
-4. **Output names** try `name.ext`, `stem-1.ext` … `stem-999.ext`, then `stem-overflow.ext`, then a uuid fallback. An in-memory reservation registry stops parallel jobs from claiming the same name. Extensions come from `registry.rs`: HEIC/HEIF → JPG, MOV → MP4.
+4. **Output names** try `name.ext`, `stem-1.ext` … `stem-999.ext`, then `stem-overflow.ext`, then a uuid fallback. An in-memory reservation registry stops parallel jobs from claiming the same name. Extensions come from `registry.rs`: HEIC/HEIF → JPG, MOV → MP4. The mapping also applies to an `already_under_target` copy, which keeps its original bytes under the mapped extension.
 5. **History is append-per-record.** A failed write emits one `history:error` per batch; compression results are unaffected.
 
-### Concurrency and memory (ADR 0010)
+### Concurrency and memory (ADR 0003, ADR 0010)
 
-- One lane per category; at most one job per lane. Each lane keeps file-list order.
+- One lane per category; at most one job per lane. Each lane keeps file-list order. The lane model is retained from ADR 0003; only the admission currency changed.
 - A job is admitted only when `used + estimate ≤ budget`. Estimates come from `memory.rs`: image 4 × input, PDF 3 × input, document 4 MiB, video input + 400 MiB (scaled by width when known), other 0. They are conservative figures, never measurements.
 - Budget: `adaptiveMemory` on → `clamp(total RAM / 8, 300 MiB, 2 GiB)`; off → `memoryCeilingMb` clamped to the same bounds.
 - An estimate larger than the whole budget runs alone rather than deadlocking; that case is logged once per batch.
@@ -258,7 +258,7 @@ Details that change behavior:
 
 ## 6. Processors
 
-All processors share one contract: an input already under target becomes a plain copy (`already_under_target`); each attempt writes its own temp file; a `BestAttempt` tracker keeps the smallest strictly-smaller result; every output is checked — exit code 0 is not success. Before delivery, the ladder checks that the rung declared every change it made and asks `policy.rs` for a verdict (ADR 0011, 0012).
+All processors share one contract: an input already under target becomes a plain byte copy (`already_under_target`); each attempt writes its own temp file; a `BestAttempt` tracker keeps the smallest strictly-smaller result; every output is checked — exit code 0 is not success. Because the under-target shortcut runs before any processor work, its output keeps the original bytes under the mapped extension: a HEIC stays HEIC inside a `.jpg`, a MOV stays MOV inside a `.mp4`, and image orientation/colour normalization does not run. Before delivery, the ladder checks that the rung declared every change it made and asks `policy.rs` for a verdict (ADR 0011, 0012).
 
 | Category | Ladder | Validation |
 |---|---|---|
@@ -271,7 +271,7 @@ Never use ffmpeg `-fs`: it truncates the file. Size is controlled by bitrate, th
 
 ### Consent
 
-The capability matrix is seven change kinds × five categories (`policy.rs`): lossy encode, downscale, drop stream, format change, metadata strip, rasterise, page drop. Each rung declares the changes it can make; the ladder rejects an undeclared change and removes that attempt. A `NeedsConsent` verdict emits `consent:required`, and `answer_consent` grants once or for the rest of the batch. A denial streak of two silences repeat prompts for that change in that batch; the answer timeout is 30 minutes. A denied or unanswered change delivers nothing: the file ends `needs_permission` and any delivered file is removed by the settle guard. Best effort is delivered only when every change it made was authorised.
+The capability matrix is seven change kinds × five categories (`policy.rs`): lossy encode, downscale, drop stream, format change, metadata strip, rasterise, page drop. Each rung declares the changes it can make; the ladder rejects an undeclared change and removes that attempt. A `NeedsConsent` verdict emits `consent:required`, and `answer_consent` grants once or for the rest of the batch. A denial streak of two silences repeat prompts for that change in that batch; the answer timeout is 30 minutes. A denied or unanswered rung is removed immediately. If an earlier authorised over-target attempt exists, it is still delivered as best effort, carrying only its own authorised changes; the image ladder records full-size over-target attempts before its consent-gated dimension rungs. `needs_permission` is returned only when no authorised attempt remains, and the settle guard removes any stale delivery. Best effort is delivered only when every change the delivered attempt made was authorised.
 
 Grants come from `ConsentSource`: `default` (allowed with no grant, or the built-in HEIC → JPEG permission), `global` (`consent.allowDestructive`), `category` (policy-level, no shipped UI control), `batch`, and `once`. History stores only non-default sources; old JSONL lines default to an empty change list and no source.
 

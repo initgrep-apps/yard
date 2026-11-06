@@ -33,7 +33,7 @@ No other open bugs; the known gaps and accepted limitations below still apply.
 
 ## Accepted limitations
 
-- Output copies are normalized: images are re-encoded to sRGB with ICC kept and EXIF orientation applied; HEIC/HEIF becomes JPEG by default, MOV becomes MP4. PDFs are rewritten by qpdf/gs. Video container metadata and all audio/subtitle streams are kept.
+- Output copies are normalized only when compression runs: images are re-encoded to sRGB with ICC kept and EXIF orientation applied, HEIC/HEIF becomes JPEG by default, and MOV becomes MP4. A file already under target is copied byte-for-byte under the mapped extension (`already_under_target`), so HEIC/MOV bytes and the original image colour/orientation can remain. PDFs are rewritten by qpdf/gs only when compressed. Video container metadata and all audio/subtitle streams are kept.
 - macOS builds are ad-hoc signed and not notarized (ADR 0002); Windows builds are unsigned.
 - Linux builds from source but is not packaged.
 - No per-file target override, presets, HEIC output, EMF/WMF conversion, magic-byte detection, telemetry, or auto-update.
