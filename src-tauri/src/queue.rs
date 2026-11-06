@@ -469,16 +469,16 @@ impl<R: Runtime> QueueState<R> {
         }
         let ids: Vec<String> = waiting
             .iter()
-            .filter(|(_, pending)| pending.batch_id == answered.batch_id)
+            .filter(|(_, pending)| {
+                pending.batch_id == answered.batch_id
+                    && pending.category == answered.category
+                    && pending
+                        .changes
+                        .iter()
+                        .all(|change| answered.changes.contains(change))
+            })
             .map(|(id, _)| id.clone())
             .collect();
-        for id in &ids {
-            if let Some(pending) = waiting.get(id) {
-                for change in &pending.changes {
-                    entry.insert((pending.category, *change));
-                }
-            }
-        }
         for id in ids {
             if let Some(pending) = waiting.remove(&id) {
                 let _ = pending
@@ -604,6 +604,9 @@ impl<R: Runtime> QueueState<R> {
         if promptable.is_empty() {
             return ConsentDecision::Deny(consent_reason(&silenced));
         }
+        if cancel.is_cancelled() {
+            return ConsentDecision::Cancelled;
+        }
 
         let request_id = uuid::Uuid::new_v4().to_string();
         let (sender, receiver) = mpsc::channel();
@@ -622,6 +625,7 @@ impl<R: Runtime> QueueState<R> {
             serde_json::json!({
                 "requestId": request_id,
                 "fileId": file_id,
+                "category": category,
                 "changes": promptable,
                 "detail": detail,
             }),
@@ -1201,6 +1205,7 @@ impl<R: Runtime> QueueState<R> {
                     poison_recover(policy.lock())
                         .denial_reason(entry.category, &compression_result.changes)
                 };
+                let consent_source = recorded_consent(compression_result.consent);
                 let out_path = delivered
                     .then(|| compression_result.output_path.to_string_lossy().to_string());
                 let compressed_size =
@@ -1236,7 +1241,7 @@ impl<R: Runtime> QueueState<R> {
                     reason.clone(),
                     elapsed_ms(),
                     compression_result.changes.clone(),
-                    Some(compression_result.consent),
+                    consent_source,
                 );
 
                 let _ = app.emit(
@@ -1252,7 +1257,7 @@ impl<R: Runtime> QueueState<R> {
                         strategy_used,
                         reason,
                         changes: compression_result.changes.clone(),
-                        consent_source: Some(compression_result.consent),
+                        consent_source,
                     },
                 );
             }
@@ -1401,6 +1406,10 @@ pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+}
+
+fn recorded_consent(source: ConsentSource) -> Option<ConsentSource> {
+    (source != ConsentSource::Default).then_some(source)
 }
 
 fn status_key(status: &FileStatus) -> &'static str {
@@ -4044,6 +4053,7 @@ mod tests {
 
         let payload = next_consent(&rx);
         assert_eq!(payload["fileId"], "f1");
+        assert_eq!(payload["category"], "video");
         assert_eq!(payload["changes"], serde_json::json!(["downscale"]));
         assert!(
             payload["detail"].as_str().unwrap().contains("downscale"),
@@ -4095,6 +4105,50 @@ mod tests {
         );
         let queue = app.state::<QueueState<tauri::test::MockRuntime>>();
         assert_eq!(queue.pending_consent_count(), 0);
+    }
+
+    #[test]
+    fn cancel_before_prompt_emits_nothing() {
+        let (_root, app) = consent_test_app();
+        let rx = events_of(&app.handle(), &["consent:required"]);
+        let token = CancellationToken::new();
+        token.cancel();
+        let policy = std::sync::Mutex::new(Policy::new(
+            crate::policy::ConsentSettings::default(),
+        ));
+        let queue = app.state::<QueueState<tauri::test::MockRuntime>>();
+
+        let decision = queue.authorize_with_consent(
+            &app.handle(),
+            "consent-cancelled-before-prompt",
+            "f1",
+            crate::models::Category::Video,
+            &[Change::Downscale],
+            &policy,
+            &ConsentWaiter::with_timeout(std::time::Duration::from_secs(1)),
+            &token,
+        );
+
+        assert_eq!(decision, crate::engine::ConsentDecision::Cancelled);
+        assert_eq!(queue.pending_consent_count(), 0);
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(100))
+                .is_err(),
+            "a cancelled job must not emit a prompt"
+        );
+    }
+
+    #[test]
+    fn default_consent_source_is_not_recorded() {
+        assert_eq!(recorded_consent(ConsentSource::Default), None);
+        assert_eq!(
+            recorded_consent(ConsentSource::Global),
+            Some(ConsentSource::Global)
+        );
+        assert_eq!(
+            recorded_consent(ConsentSource::Once),
+            Some(ConsentSource::Once)
+        );
     }
 
     #[test]
@@ -4155,6 +4209,74 @@ mod tests {
                 .consent(crate::models::Category::Video, &[Change::Downscale]),
             Some(ConsentSource::Batch)
         );
+    }
+
+    #[test]
+    fn batch_grant_wakes_only_covered_requests() {
+        let (_root, app) = consent_test_app();
+        let rx = events_of(&app.handle(), &["consent:required"]);
+        let batch = "consent-scope";
+        let queue = app.state::<QueueState<tauri::test::MockRuntime>>();
+
+        let spawn = |file_id: &str,
+                     category: crate::models::Category,
+                     changes: Vec<Change>|
+         -> std::thread::JoinHandle<crate::engine::ConsentDecision> {
+            let policy = std::sync::Arc::new(std::sync::Mutex::new(Policy::new(
+                crate::policy::ConsentSettings::default(),
+            )));
+            spawn_authorize(
+                app.handle().clone(),
+                batch,
+                file_id,
+                category,
+                changes,
+                policy,
+                CancellationToken::new(),
+                std::time::Duration::from_secs(2),
+            )
+        };
+
+        let answered = spawn("f1", crate::models::Category::Video, vec![Change::Downscale]);
+        let covered = spawn("f2", crate::models::Category::Video, vec![Change::Downscale]);
+        let other_change = spawn("f3", crate::models::Category::Video, vec![Change::FormatChange]);
+        let other_category = spawn("f4", crate::models::Category::Image, vec![Change::Downscale]);
+
+        let mut ids = HashMap::new();
+        for _ in 0..4 {
+            let payload = next_consent(&rx);
+            ids.insert(
+                payload["fileId"].as_str().unwrap().to_string(),
+                payload["requestId"].as_str().unwrap().to_string(),
+            );
+        }
+
+        queue.answer_consent(&ids["f1"], true, ConsentScope::Batch);
+        assert_eq!(
+            answered.join().unwrap(),
+            crate::engine::ConsentDecision::Allow(ConsentSource::Batch)
+        );
+        assert_eq!(
+            covered.join().unwrap(),
+            crate::engine::ConsentDecision::Allow(ConsentSource::Batch),
+            "a waiter covered by the answered changes must wake"
+        );
+        assert_eq!(
+            queue.pending_consent_count(),
+            2,
+            "an uncovered change and another category must stay pending"
+        );
+
+        queue.answer_consent(&ids["f3"], false, ConsentScope::Once);
+        queue.answer_consent(&ids["f4"], false, ConsentScope::Once);
+        assert!(matches!(
+            other_change.join().unwrap(),
+            crate::engine::ConsentDecision::Deny(_)
+        ));
+        assert!(matches!(
+            other_category.join().unwrap(),
+            crate::engine::ConsentDecision::Deny(_)
+        ));
     }
 
     #[test]

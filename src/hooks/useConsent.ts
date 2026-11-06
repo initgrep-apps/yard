@@ -24,6 +24,7 @@ export type ConsentScope = 'once' | 'batch'
 export interface ConsentRequest {
   requestId: string
   fileId: string
+  category: Category
   changes: Change[]
   detail: string
 }
@@ -71,6 +72,10 @@ function getSnapshot() {
 function startConsentListener() {
   if (listenerStarted) return
   listenerStarted = true
+  const failed = (err: unknown) => {
+    listenerStarted = false
+    console.error('consent listener registration failed', err)
+  }
   try {
     void listen<ConsentRequest>('consent:required', (event) => {
       const payload = event.payload
@@ -86,11 +91,9 @@ function startConsentListener() {
         if (listenerStarted) stopListener = stop
         else stop()
       })
-      .catch((err) => {
-        console.error('consent listener registration failed', err)
-      })
+      .catch(failed)
   } catch (err) {
-    console.error('consent listener registration failed', err)
+    failed(err)
   }
 }
 
@@ -169,6 +172,7 @@ export function useConsent() {
 
   const answerConsent = useCallback(
     async (requestId: string, allow: boolean, scope: ConsentScope) => {
+      const answered = store.requests.find((request) => request.requestId === requestId)
       try {
         await invoke('answer_consent', { requestId, allow, scope })
       } catch (err) {
@@ -177,10 +181,14 @@ export function useConsent() {
       }
       notify({
         ...store,
-        requests:
-          allow && scope === 'batch'
-            ? []
-            : store.requests.filter((request) => request.requestId !== requestId),
+        requests: store.requests.filter((request) => {
+          if (request.requestId === requestId) return false
+          if (!allow || scope !== 'batch' || !answered) return true
+          return !(
+            request.category === answered.category &&
+            request.changes.every((change) => answered.changes.includes(change))
+          )
+        }),
       })
     },
     []

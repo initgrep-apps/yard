@@ -235,12 +235,12 @@ impl Ladder {
             self.cleanup_attempts();
             return Err(CompressionError::Cancelled);
         }
-        if let Some(reason) = self.permission_denial.take() {
-            self.cleanup_attempts();
-            return Err(CompressionError::NeedsPermission(reason));
-        }
+        let denial = self.permission_denial.take();
         let Some(best) = self.best.take() else {
             self.cleanup_attempts();
+            if let Some(reason) = denial {
+                return Err(CompressionError::NeedsPermission(reason));
+            }
             return Err(self
                 .last_error
                 .take()
@@ -430,6 +430,55 @@ mod tests {
             0,
             "every attempt file must be removed after delivery"
         );
+    }
+
+    #[test]
+    fn denied_later_rung_still_delivers_an_allowed_best_effort() {
+        let fixture = Fixture::new();
+        let ctx = fixture
+            .ctx(CancellationToken::new(), ProgressSender::test_stub())
+            .with_category(crate::models::Category::Image);
+        let allowed = write_file(&ctx.temp_dir, "attempt-0.bin", &[b'a'; 120]);
+        let denied = write_file(&ctx.temp_dir, "attempt-1.bin", &[b'b'; 50]);
+        let mut ladder = Ladder::new();
+
+        assert!(matches!(
+            ladder.record(
+                &ctx,
+                AttemptOutcome::Produced {
+                    path: allowed,
+                    size: 120,
+                    quality: 80,
+                    strategy: "quality=80".to_string(),
+                    changes: vec![Change::LossyEncode],
+                    consent: ConsentSource::Default,
+                }
+            ),
+            AttemptDecision::Continue
+        ));
+        assert!(matches!(
+            ladder.record(
+                &ctx,
+                AttemptOutcome::Produced {
+                    path: denied.clone(),
+                    size: 50,
+                    quality: 40,
+                    strategy: "downscale".to_string(),
+                    changes: vec![Change::Downscale],
+                    consent: ConsentSource::Default,
+                }
+            ),
+            AttemptDecision::Continue
+        ));
+        assert!(!denied.exists(), "the denied attempt must be removed");
+
+        let result = ladder
+            .finish(&ctx)
+            .expect("the allowed best-effort attempt must still be delivered");
+        assert!(!result.met_target);
+        assert_eq!(result.strategy_used, "quality=80,best-effort");
+        assert_eq!(result.changes, vec![Change::LossyEncode]);
+        assert_eq!(std::fs::read(&fixture.output).unwrap(), vec![b'a'; 120]);
     }
 
     #[test]

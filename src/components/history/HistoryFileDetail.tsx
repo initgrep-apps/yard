@@ -139,6 +139,9 @@ export function HistoryFileDetail({
   file: HistoryFile
   onReveal: (path: string) => void
 }): ReactElement {
+  const consentSource = file.consentSource === "default" ? null : file.consentSource
+  const showPermissionCard = file.changes.length > 0 || consentSource !== null
+
   return (
     <div
       className="grid grid-cols-[1.4fr_1fr_1fr] gap-3 p-[13px_16px_13px_40px] @max-[860px]:gap-2.5 @max-[860px]:pl-[30px]"
@@ -158,7 +161,7 @@ export function HistoryFileDetail({
         <Fact label="Completed" value={completedLabel(file.completedAt)} />
       </div>
 
-      {(file.changes.length > 0 || file.consentSource !== null) && (
+      {showPermissionCard && (
         <div className={CARD_CLASS} data-testid="history-detail-permission-card">
           <div className={EYEBROW_CLASS}>Permissions</div>
           {file.changes.length > 0 && (
@@ -167,10 +170,10 @@ export function HistoryFileDetail({
               value={file.changes.map((change) => CHANGE_LABELS[change] ?? change).join(", ")}
             />
           )}
-          {file.consentSource !== null && (
+          {consentSource !== null && (
             <Fact
               label="Consent"
-              value={CONSENT_LABELS[file.consentSource] ?? file.consentSource}
+              value={CONSENT_LABELS[consentSource] ?? consentSource}
             />
           )}
         </div>

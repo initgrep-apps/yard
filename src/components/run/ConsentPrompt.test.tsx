@@ -21,6 +21,7 @@ import { ConsentPrompt } from '@/components/run/ConsentPrompt'
 const request = {
   requestId: 'r1',
   fileId: 'f1',
+  category: 'image' as const,
   changes: ['downscale'] as const,
   detail: 'This file needs permission to downscale',
 }
@@ -42,7 +43,7 @@ describe('ConsentPrompt', () => {
     expect(onAnswer).toHaveBeenCalledWith('r1', false, 'once')
   })
 
-  it('apply to the rest of this batch answers with batch scope', () => {
+  it('apply to the rest of this batch answers with batch scope for allow and skip', () => {
     const onAnswer = vi.fn()
     render(<ConsentPrompt request={{ ...request, changes: [...request.changes] }} onAnswer={onAnswer} />)
 
@@ -50,5 +51,8 @@ describe('ConsentPrompt', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Allow' }))
 
     expect(onAnswer).toHaveBeenCalledWith('r1', true, 'batch')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Skip' }))
+    expect(onAnswer).toHaveBeenLastCalledWith('r1', false, 'batch')
   })
 })

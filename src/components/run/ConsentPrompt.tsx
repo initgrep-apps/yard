@@ -72,7 +72,7 @@ export function ConsentPrompt({ request, onAnswer }: ConsentPromptProps) {
         <Button
           size="xs"
           variant="outline"
-          onClick={() => onAnswer(request.requestId, false, 'once')}
+          onClick={() => onAnswer(request.requestId, false, scope)}
         >
           Skip
         </Button>

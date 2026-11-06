@@ -425,6 +425,7 @@ describe('CompressView', () => {
     emit('consent:required', {
       requestId: 'r1',
       fileId: 'f1',
+      category: 'image',
       changes: ['downscale'],
       detail: 'Needs permission to downscale',
     })

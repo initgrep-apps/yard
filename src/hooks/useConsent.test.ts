@@ -37,6 +37,7 @@ vi.mock('@tauri-apps/api/event', () => ({
 
 import { __resetConsentStore, planPreflight, useConsent } from '@/hooks/useConsent'
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import type { ConsentSettings, FileEntry } from '@/types'
 
 function entry(name: string, index: number, overrides: Partial<FileEntry> = {}): FileEntry {
@@ -95,8 +96,8 @@ describe('useConsent requests', () => {
   it('tracks a live request and answers it once', async () => {
     const { result } = renderHook(() => useConsent())
 
-    emit({ requestId: 'r1', fileId: 'f1', changes: ['downscale'], detail: 'Needs permission' })
-    emit({ requestId: 'r2', fileId: 'f2', changes: ['downscale'], detail: 'Needs permission' })
+    emit({ requestId: 'r1', fileId: 'f1', category: 'image', changes: ['downscale'], detail: 'Needs permission' })
+    emit({ requestId: 'r2', fileId: 'f2', category: 'image', changes: ['downscale'], detail: 'Needs permission' })
 
     await waitFor(() => expect(result.current.waitingCount).toBe(2))
     expect(result.current.requestFor('f1')?.requestId).toBe('r1')
@@ -116,21 +117,38 @@ describe('useConsent requests', () => {
   it('apply to rest resolves requests already waiting', async () => {
     const { result } = renderHook(() => useConsent())
 
-    emit({ requestId: 'r1', fileId: 'f1', changes: ['downscale'], detail: 'Needs permission' })
-    emit({ requestId: 'r2', fileId: 'f2', changes: ['downscale'], detail: 'Needs permission' })
-    emit({ requestId: 'r3', fileId: 'f3', changes: ['format_change'], detail: 'Needs permission' })
+    emit({ requestId: 'r1', fileId: 'f1', category: 'image', changes: ['downscale'], detail: 'Needs permission' })
+    emit({ requestId: 'r2', fileId: 'f2', category: 'image', changes: ['downscale'], detail: 'Needs permission' })
+    emit({ requestId: 'r3', fileId: 'f3', category: 'image', changes: ['format_change'], detail: 'Needs permission' })
+    emit({ requestId: 'r4', fileId: 'f4', category: 'video', changes: ['downscale'], detail: 'Needs permission' })
 
-    await waitFor(() => expect(result.current.waitingCount).toBe(3))
+    await waitFor(() => expect(result.current.waitingCount).toBe(4))
 
     await act(async () => {
       await result.current.answerConsent('r1', true, 'batch')
     })
 
-    expect(result.current.requests).toEqual([])
+    expect(result.current.requests.map((request) => request.requestId)).toEqual(['r3', 'r4'])
     expect(invoke).toHaveBeenCalledWith('answer_consent', {
       requestId: 'r1',
       allow: true,
       scope: 'batch',
     })
+  })
+
+  it('retries listener registration after a failed mount', async () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.mocked(listen).mockRejectedValueOnce(new Error('no webview'))
+
+    const first = renderHook(() => useConsent())
+    await waitFor(() => expect(listen).toHaveBeenCalledTimes(1))
+    await act(async () => {})
+    first.unmount()
+
+    renderHook(() => useConsent())
+    await waitFor(() => expect(listen).toHaveBeenCalledTimes(2))
+
+    expect(consoleSpy).toHaveBeenCalled()
+    consoleSpy.mockRestore()
   })
 })

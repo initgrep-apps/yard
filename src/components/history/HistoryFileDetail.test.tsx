@@ -170,7 +170,13 @@ describe("HistoryFileDetail", () => {
   })
 
   it("omits the permission card when no changes or consent were recorded", () => {
-    render(<HistoryFileDetail file={file()} onReveal={vi.fn()} />)
+    const onReveal = vi.fn()
+    const { rerender } = render(<HistoryFileDetail file={file()} onReveal={onReveal} />)
+    expect(screen.queryByTestId("history-detail-permission-card")).not.toBeInTheDocument()
+
+    rerender(
+      <HistoryFileDetail file={file({ consentSource: "default" })} onReveal={onReveal} />
+    )
     expect(screen.queryByTestId("history-detail-permission-card")).not.toBeInTheDocument()
   })
 })
