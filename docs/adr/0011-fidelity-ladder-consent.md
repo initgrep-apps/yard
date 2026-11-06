@@ -19,6 +19,6 @@ Two corrections are part of the same decision, because they are bugs rather than
 - New file state `needs_permission`, used only when no authorised attempt remains. The status enum and the TypeScript union change together.
 - Video gains no lossless compression rung: remux changes the container, not the byte count. It is used for compatibility, not size.
 - Outputs produced by compression are sRGB. A print or wide-gamut workflow is out of scope; converting is what keeps compressed results consistent across viewers. Under-target copies keep their original profile.
-- HDR gain maps embedded in images are never stripped silently: removing one changes how an HDR photo displays, and an attempt that cannot carry it fails rather than guessing.
+- HDR gain maps are a known limitation. The image and document saves use `keep=icc`, so an embedded gain map is dropped when compression runs. libvips 8.18.7 accepts `gainmap` in the keep flags but failed to re-save an Apple gain-map JPEG whose alternate-image ICC was absent, so enabling retention would turn working inputs into failed attempts. Retaining gain maps requires a fixture-backed check against the frozen vips build; tracked in `docs/bugs.md`.
 - `qpdf --optimize-images --jpeg-quality=75` is reclassified as a lossy pass; it was previously presented as part of the safe part of the PDF ladder.
 - The report for each file names the changes made and, when non-default, the consent source that permitted them.

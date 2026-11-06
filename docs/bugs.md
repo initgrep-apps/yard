@@ -29,6 +29,7 @@ No other open bugs; the known gaps and accepted limitations below still apply.
 | `history.jsonl` is re-folded on every `get_history` call | Acceptable while history stays small; cache the fold in `HistoryStore` keyed by `(mtime, len)` if history grows past ~10k records |
 | Linux chrome unverified | Linux builds from source with native decorations while the shell renders non-macOS controls and drag surfaces; no packaging or acceptance run |
 | `motion` dependency has zero product importers | Board rewrite landed on dnd-kit; `motionStubs.ts` still serves `RunHeader`/`CompressView` tests. Remove dep + stubs in one cleanup slice after confirming no other usage |
+| HDR gain maps are stripped when an image or document media entry is recompressed | Saves use `keep=icc` only. libvips 8.18.7 accepts the `gainmap` keep flag but failed to re-save an Apple gain-map JPEG (missing alternate-image ICC), so enabling it would fail otherwise-valid inputs. Upgrade when a fixture-backed check proves the frozen vips build can round-trip gain maps |
 | Manual acceptance matrix not yet run on released builds | CI proves packages start and compress; the UI matrix in `docs/distribution-acceptance.md` is manual |
 
 ## Accepted limitations
