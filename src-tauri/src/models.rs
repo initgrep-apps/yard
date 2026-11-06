@@ -322,7 +322,8 @@ mod tests {
 
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/types.ts");
         let source = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+            .replace("\r\n", "\n");
         let start = source
             .find("export type FileStatus =")
             .expect("src/types.ts must declare `export type FileStatus =`");

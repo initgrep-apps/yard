@@ -35,6 +35,19 @@ fn write_sized(path: &str, size: u64) -> std::io::Result<()> {
     Ok(())
 }
 
+fn write_video(path: &str, size: u64) -> std::io::Result<()> {
+    let mut file = std::fs::File::create(path)?;
+    file.write_all(&[0, 0, 0, 0x18, b'f', b't', b'y', b'p'])?;
+    let zeroes = [0u8; 8192];
+    let mut left = size.saturating_sub(8);
+    while left > 0 {
+        let chunk = left.min(zeroes.len() as u64) as usize;
+        file.write_all(&zeroes[..chunk])?;
+        left -= chunk as u64;
+    }
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mode = std::env::var("FAKE_ENGINE_MODE").unwrap_or_default();
@@ -59,8 +72,9 @@ fn main() -> ExitCode {
     }
 
     if args.iter().any(|arg| arg == "-show_entries") {
-        let probe = std::env::var("FAKE_ENGINE_PROBE")
-            .unwrap_or_else(|_| "1.0\nvideo\naudio".to_string());
+        let probe = std::env::var("FAKE_ENGINE_PROBE").unwrap_or_else(|_| {
+            "duration=5.000000\ncodec_type=video\nwidth=640\ncodec_type=audio".to_string()
+        });
         print!("{probe}\n");
         return ExitCode::SUCCESS;
     }
@@ -79,7 +93,15 @@ fn main() -> ExitCode {
                     .ok()
                     .and_then(|value| value.parse::<u64>().ok())
                     .unwrap_or(100);
-                return match write_sized(output, size) {
+                let is_video = args
+                    .windows(2)
+                    .any(|pair| pair[0] == "-movflags" || pair[0] == "-pix_fmt");
+                let result = if is_video {
+                    write_video(output, size)
+                } else {
+                    write_sized(output, size)
+                };
+                return match result {
                     Ok(()) => ExitCode::SUCCESS,
                     Err(_) => ExitCode::FAILURE,
                 };

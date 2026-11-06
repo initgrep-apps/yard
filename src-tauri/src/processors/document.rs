@@ -107,7 +107,7 @@ fn media_disposition(entry_name: &str) -> MediaDisposition {
 
 fn media_save_options(ext: &str, quality: u32) -> String {
     match ext {
-        "png" => "[compression=9,palette,colours=256,keep=icc]".to_string(),
+        "png" => "[compression=9,palette,keep=icc]".to_string(),
         _ => format!("[Q={},keep=icc]", quality),
     }
 }
@@ -161,7 +161,9 @@ pub fn read_index(input: &Path) -> Result<Vec<EntryMeta>, CompressionError> {
             eprintln!("warn: entry {index} of {} has an unsafe path", input.display());
             CompressionError::SidecarFailed(CORRUPT.to_string())
         })?;
-        let name = name.to_string_lossy().into_owned();
+        // `enclosed_name` yields a PathBuf; on Windows that stringifies with
+        // backslashes, which would defeat the `word/media/` prefix match.
+        let name = name.to_string_lossy().replace('\\', "/");
         let is_dir = entry.is_dir();
         let compression = entry.compression();
         let size = entry.size();
@@ -954,6 +956,19 @@ awk -v n="$n" 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
             },
             ..QualityFloors::default()
         }
+    }
+
+    #[test]
+    fn media_entry_names_use_forward_slashes() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.docx");
+        build_docx(&input, &[("word/media/a.jpg", noise_bytes(10))]);
+        let metas = read_index(&input).unwrap();
+        assert!(
+            metas.iter().any(|m| m.name.starts_with("word/media/")),
+            "media dirs must match on every platform: {:?}",
+            metas.iter().map(|m| &m.name).collect::<Vec<_>>()
+        );
     }
 
     #[test]
