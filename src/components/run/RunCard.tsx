@@ -17,6 +17,8 @@
 import { FolderOpen, Square, X } from 'lucide-react'
 import { formatSize, reductionPercentOrNull } from '@/lib/sizeFormat'
 import { RESULT_STATUSES } from '@/components/FileList'
+import { ConsentPrompt } from '@/components/run/ConsentPrompt'
+import { useConsent } from '@/hooks/useConsent'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -52,7 +54,8 @@ function safePercent(percent: number | undefined): number {
     : 0
 }
 
-function chipFor(file: FileEntry): { label: string; tone: ChipTone } | null {
+function chipFor(file: FileEntry, waiting: boolean): { label: string; tone: ChipTone } | null {
+  if (waiting) return { label: 'Waiting', tone: 'amber' }
   switch (file.status) {
     case 'done':
     case 'best_effort': {
@@ -64,6 +67,8 @@ function chipFor(file: FileEntry): { label: string; tone: ChipTone } | null {
       return { label: '≤ target', tone: 'muted' }
     case 'failed':
       return { label: 'Failed', tone: 'fail' }
+    case 'needs_permission':
+      return { label: 'Permission', tone: 'amber' }
     case 'cancelled':
       return { label: 'Cancelled', tone: 'muted' }
     case 'pending':
@@ -82,6 +87,8 @@ function sizesFor(file: FileEntry): string {
     case 'already_under_target':
       return formatSize(file.originalSize)
     case 'failed':
+      return ''
+    case 'needs_permission':
       return ''
     default:
       return file.compressedSize === null
@@ -111,8 +118,10 @@ export function RunCard({
   isOverlay,
 }: RunCardProps) {
   const { status, outputPath, error } = file
+  const { requestFor, answerConsent } = useConsent()
+  const consentRequest = requestFor(file.id)
   const clampedPercent = safePercent(percent)
-  const tone = chipFor(file)
+  const tone = chipFor(file, consentRequest !== null)
   const sizes = sizesFor(file)
   const note = strategyLineFor(file)
   const hasResult = RESULT_STATUSES.includes(status)
@@ -122,6 +131,8 @@ export function RunCard({
       size="sm"
       className={cn(
         status === 'failed' && 'border-destructive/25 bg-destructive/5',
+        (status === 'needs_permission' || consentRequest) &&
+          'border-amber-500/25 bg-amber-500/5',
         status === 'pending' && 'border-dashed',
         status === 'cancelled' && 'opacity-60',
         isOverlay && 'ring-primary/20 rotate-1 ring-2'
@@ -171,25 +182,29 @@ export function RunCard({
             {note}
           </Badge>
         )}
-        {status === 'compressing' && (
-          <div className="space-y-1">
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <Spinner className="size-3" />
-                <span className="text-xs font-medium">Progress</span>
+        {consentRequest ? (
+          <ConsentPrompt request={consentRequest} onAnswer={answerConsent} />
+        ) : (
+          status === 'compressing' && (
+            <div className="space-y-1">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Spinner className="size-3" />
+                  <span className="text-xs font-medium">Progress</span>
+                </div>
+                <span
+                  className="text-xs font-medium tabular-nums"
+                  data-testid="run-card-percent"
+                >
+                  {Math.round(clampedPercent)}%
+                </span>
               </div>
-              <span
-                className="text-xs font-medium tabular-nums"
-                data-testid="run-card-percent"
-              >
-                {Math.round(clampedPercent)}%
-              </span>
+              <Progress value={clampedPercent} />
+              <div className="font-mono text-xs tabular-nums text-muted-foreground">
+                {sizes}
+              </div>
             </div>
-            <Progress value={clampedPercent} />
-            <div className="font-mono text-xs tabular-nums text-muted-foreground">
-              {sizes}
-            </div>
-          </div>
+          )
         )}
         <Separator />
         <div className="flex items-center justify-between gap-2">
@@ -205,11 +220,11 @@ export function RunCard({
           )}
           {status !== 'compressing' && (
             <span className="font-mono text-xs tabular-nums text-muted-foreground">
-              {status === 'failed' ? '—' : sizes}
+              {status === 'failed' || status === 'needs_permission' ? '—' : sizes}
             </span>
           )}
         </div>
-        {(status === 'failed' || status === 'best_effort') && error && (
+        {(status === 'failed' || status === 'best_effort' || status === 'needs_permission') && error && (
           <p className="line-clamp-2 text-xs text-destructive" title={error}>
             {error}
           </p>

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { fireEvent, render, screen, waitFor, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { invoke } from '@tauri-apps/api/core'
@@ -34,6 +34,7 @@ vi.mock('@tauri-apps/api/webview', () => ({
 }))
 
 import { CompressView } from '@/views/CompressView'
+import { __resetConsentStore } from '@/hooks/useConsent'
 import {
   CompressionProvider,
   CompressionContext,
@@ -67,9 +68,15 @@ const defaultWebviewImplementation = () => ({
 beforeEach(() => {
   vi.clearAllMocks()
   eventListeners.clear()
+  __resetConsentStore()
   dragHandler = undefined
   getCurrentWebviewMock.mockImplementation(defaultWebviewImplementation)
   setupMotionStubs()
+})
+
+afterEach(() => {
+  vi.mocked(invoke).mockReset()
+  vi.mocked(open).mockReset()
 })
 
 function entry(overrides: Partial<FileEntry> = {}): FileEntry {
@@ -120,6 +127,40 @@ describe('CompressView', () => {
   it('does not render banner on initial render', () => {
     renderView()
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('fifty heic files produce one preflight dialog and pass the grant to compress_all', async () => {
+    renderView()
+    const heic = Array.from({ length: 50 }, (_, index) => ({
+      id: `h${index}`,
+      name: `photo-${index}.heic`,
+      path: `/t/photo-${index}.heic`,
+      category: 'image' as const,
+      originalSize: 4_000_000,
+      targetBytes: 204_800,
+    }))
+    await addFilesInView(heic)
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'get_settings') {
+        return { consent: { allowDestructive: false, heicToJpg: false } }
+      }
+      if (command === 'compress_all') return 'heic-batch'
+      return undefined
+    })
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Compress' }))
+
+    const dialog = await screen.findByRole('dialog')
+    expect(dialog).toHaveTextContent('Permission needed')
+    expect(dialog).toHaveTextContent('50 files')
+    expect(screen.getAllByRole('dialog')).toHaveLength(1)
+
+    await user.click(screen.getByRole('button', { name: 'Allow for this batch' }))
+    await screen.findByTestId('run-header')
+    expect(invoke).toHaveBeenCalledWith('compress_all', {
+      grants: [{ category: 'image', changes: ['format_change'] }],
+    })
   })
 
   it('renders destructive alert banner when add fails', async () => {
@@ -230,6 +271,22 @@ describe('CompressView', () => {
     await user.click(btn)
     expect(invoke).toHaveBeenCalledWith('compress_all')
     expect(screen.queryByRole('table')).not.toBeInTheDocument()
+  })
+
+  it('double-clicking Compress starts a single batch', async () => {
+    renderView()
+    await addFileInView()
+    const button = screen.getByRole('button', { name: 'Compress' })
+
+    fireEvent.click(button)
+    fireEvent.click(button)
+
+    await waitFor(() => {
+      const calls = vi
+        .mocked(invoke)
+        .mock.calls.filter(([command]) => command === 'compress_all')
+      expect(calls).toHaveLength(1)
+    })
   })
 
   it('compress press switches to locked run screen with Batch #1, Compressing pill, and roster lanes', async () => {
@@ -375,6 +432,36 @@ describe('CompressView', () => {
     const user = userEvent.setup()
     await user.click(screen.getByTestId('cancel-all'))
     expect(invoke).toHaveBeenCalledWith('cancel_all')
+  })
+
+  it('a consent request flips the card to an inline prompt and answers without a modal', async () => {
+    renderView()
+    await addFileInView()
+    vi.mocked(invoke).mockResolvedValue('b1')
+    await pressCompress()
+
+    emit('consent:required', {
+      requestId: 'r1',
+      fileId: 'f1',
+      category: 'image',
+      changes: ['downscale'],
+      detail: 'Needs permission to downscale',
+    })
+
+    expect(screen.getByTestId('consent-prompt')).toBeInTheDocument()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(screen.getByTestId('consent-waiting')).toHaveTextContent('1 waiting for permission')
+    expect(screen.getByTestId('run-chip')).toHaveTextContent('Waiting')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Allow' }))
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith('answer_consent', {
+        requestId: 'r1',
+        allow: true,
+        scope: 'once',
+      })
+    )
+    expect(screen.queryByTestId('consent-prompt')).not.toBeInTheDocument()
   })
 
   it('file:cancelled marks the roster row and pending rows stay listed', async () => {

@@ -169,6 +169,14 @@ export function HistorySummaryCards({
           />
           <Pill status="best_effort" label="Best" count={pills.bestEffort} testId="summary-pill-best" />
           <Pill status="failed" label="Failed" count={pills.failed} testId="summary-pill-failed" />
+          {pills.needsPermission > 0 && (
+            <Pill
+              status="needs_permission"
+              label="Permission"
+              count={pills.needsPermission}
+              testId="summary-pill-permission"
+            />
+          )}
           {pills.other > 0 && (
             <Pill
               status="cancelled"

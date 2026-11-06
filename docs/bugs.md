@@ -7,16 +7,18 @@ Open items only. Resolved investigations belong in git history or as a durable r
 1. **Windows kanban input unverified** — slice #20's wheel-to-horizontal panning, thin scrollbar styling, and `select-none` need a real Windows build check (WebView2); cua-driver cannot synthesize wheel events on WebKit on macOS. Trackpad scroll feel on the new history table likewise needs a human pass.
 2. **kanban-03 run board human-check pending** — dev-build pass on the new stock-kanban board: drag overlay ghost (item + column variants), always-visible lane grip opacity, pinned-card focus affordance (stock inert sortable attributes), and live compressing re-pin jump. dnd-kit cannot be drag-tested in jsdom; unit-level drag semantics are test-pinned in `src/lib/boardState.test.ts`.
 
-Items 3–8 come from the 2026-11 architecture review. Slice numbers point into `docs/superpowers/plans/2026-11-05-backend-remediation.md`.
-
-3. **Images lose orientation and colour profile** — `image.rs:59-64` appends `strip` to every save and never applies EXIF orientation, so portrait photos are delivered sideways; ICC profiles are discarded on non-sRGB inputs, so colours shift. S3.
-4. **Output is committed by direct copy** — `engine/processor.rs:162` copies straight to the final path, so a cancel or error mid-copy leaves a partial file in the user's output folder. S0.
-5. **PDF page loss is undetected** — `pdf.rs:174-208` accepts any output starting with `%PDF-`; a gs pass that drops pages still counts as a success. S5.
-6. **Release builds cannot contain a panic** — `panic = "abort"` makes `catch_unwind` (`queue.rs:585`) and `JoinError` handling (`scheduler.rs:88`) unreachable. One processor panic kills the app. S0, S7.
-7. **Video silently drops extra streams** — no `-map` in `video.rs:242-298`, so ffmpeg's default selection keeps one video and one audio track and discards the rest. S4.
-8. **Stderr drain is unbounded and outlives its timeout** — `engine/processor.rs:238-246` reads to EOF into a `Vec`, and the 5 s join at `278-288` detaches the thread instead of stopping it. S0.
-
 No other open bugs; the known gaps and accepted limitations below still apply.
+
+## Closed in the 2026-11 backend remediation
+
+| Was | Shipped fix | Proof test |
+|---|---|---|
+| Images lost EXIF orientation and colour profiles | Every attempt uses `vips thumbnail` with autorotation, sRGB output and `keep=icc` | `jpeg_args_rotate_convert_to_srgb_and_keep_icc`; real-engine `orientation_table_1_to_8_is_applied` and `display_p3_is_transformed_and_tagged_srgb` (`#[ignore]`) |
+| Output was committed by direct copy, leaving partial files | Delivery writes `<full file name>.yard-tmp` (unique per extension), checks cancel between chunks, then hard-links (or checked-renames) into place | `cancelled_copy_leaves_no_final_file`, `failed_copy_removes_temp_file`, `existing_destination_is_not_clobbered` |
+| PDF page loss was undetected | Every attempt is probe-compared with qpdf `--show-npages`; a mismatch or probe failure rejects it | `gs_output_with_fewer_pages_is_rejected`, `page_count_probe_failure_rejects_the_attempt` |
+| Release builds could not contain a panic | Release profile is `panic = "unwind"`; job bodies are caught and the batch continues | `release_profile_keeps_unwind_panics`, `panicking_job_does_not_kill_batch_or_sum` |
+| Video silently dropped extra streams | All audio/subtitle tracks and chapters are mapped; duration and stream counts are validated; a dropped input stream needs consent | `stream_maps_preserve_all_audio_and_subtitles`, `audio_count_matches_input_unless_drop_is_granted`, `subtitle_count_must_match_input`, `duration_mismatch_rejects_attempt` |
+| Stderr drain was unbounded and outlived its timeout | Stderr retains a 2 KiB tail with a 500-character error rendering; stdout capture is capped at 64 KiB; drain threads are joined after exit | `stderr_tail_retains_at_most_2_kib_but_drains_everything`, `capture_stdout_is_capped_and_stderr_stays_bounded`, `video_and_generic_paths_share_one_stderr_tail` |
 
 ## Known gaps
 
@@ -27,24 +29,15 @@ No other open bugs; the known gaps and accepted limitations below still apply.
 | `history.jsonl` is re-folded on every `get_history` call | Acceptable while history stays small; cache the fold in `HistoryStore` keyed by `(mtime, len)` if history grows past ~10k records |
 | Linux chrome unverified | Linux builds from source with native decorations while the shell renders non-macOS controls and drag surfaces; no packaging or acceptance run |
 | `motion` dependency has zero product importers | Board rewrite landed on dnd-kit; `motionStubs.ts` still serves `RunHeader`/`CompressView` tests. Remove dep + stubs in one cleanup slice after confirming no other usage |
+| HDR gain maps are stripped when an image or document media entry is recompressed | Saves use `keep=icc` only. libvips 8.18.7 accepts the `gainmap` keep flag but failed to re-save an Apple gain-map JPEG (missing alternate-image ICC), so enabling it would fail otherwise-valid inputs. Upgrade when a fixture-backed check proves the frozen vips build can round-trip gain maps |
 | Manual acceptance matrix not yet run on released builds | CI proves packages start and compress; the UI matrix in `docs/distribution-acceptance.md` is manual |
 
 ## Accepted limitations
 
-- Output copies are normalized: image and PDF metadata is stripped, HEIC/HEIF becomes JPEG, MOV becomes MP4. Video container metadata is currently kept, despite `README.md` saying otherwise.
+- Output copies are normalized only when compression runs: images are re-encoded to sRGB with ICC kept and EXIF orientation applied, HEIC/HEIF becomes JPEG by default, and MOV becomes MP4. A file already under target is copied byte-for-byte under the mapped extension (`already_under_target`), so HEIC/MOV bytes and the original image colour/orientation can remain. PDFs are rewritten by qpdf/gs only when compressed. Video container metadata and all audio/subtitle streams are kept.
 - macOS builds are ad-hoc signed and not notarized (ADR 0002); Windows builds are unsigned.
 - Linux builds from source but is not packaged.
 - No per-file target override, presets, HEIC output, EMF/WMF conversion, magic-byte detection, telemetry, or auto-update.
-
-## Refinement Drift — 2026-11-05 backend remediation
-
-**Plan:** `docs/superpowers/plans/2026-11-05-backend-remediation.md`
-
-1. `AGENTS.md` says `zip` 8.x; `src-tauri/Cargo.lock:5072` is 9.2.1. The docs are wrong, the code is right. Plan uses the 9.x API (`SimpleFileOptions`).
-2. `ARCHITECTURE.md` said panics are contained; `src-tauri/Cargo.toml:55` sets `panic = "abort"`, making `catch_unwind` (`queue.rs:585`) unreachable in release. Doc corrected.
-3. `README.md` and `docs/bugs.md` said metadata is stripped; FFmpeg copies container metadata by default (`video.rs:242-298` has no `-map_metadata -1`). Doc corrected.
-4. `image.rs:61` passes `colours=256` to `pngsave`; libvips 8.18.7 has no such option and silently ignores it. Dead argument, removed by Task 4.
-5. `models::file_status_serde_matches_typescript_union` and `category_serde_matches_typescript_union` compare against hardcoded arrays and never read `src/types.ts`; they cannot detect a missing TS member. Task 9 replaces them with a file-reading test.
 
 ## CI follow-ups
 

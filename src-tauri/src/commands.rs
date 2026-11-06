@@ -177,6 +177,7 @@ pub fn compress_all<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     state: State<'_, FileListState>,
     queue: State<'_, crate::queue::QueueState<R>>,
+    grants: Option<Vec<crate::queue::ConsentGrant>>,
 ) -> String {
     let list = state.0.lock().unwrap_or_else(|e| {
         eprintln!("warn: file list mutex was poisoned, recovering: {e}");
@@ -195,8 +196,22 @@ pub fn compress_all<R: tauri::Runtime>(
     }
 
     let batch_id = uuid::Uuid::new_v4().to_string();
+    if let Some(grants) = grants.as_deref() {
+        queue.register_batch_grants(&batch_id, grants);
+    }
     queue.start_batch(&app, batch_id.clone(), pending_ids);
     batch_id
+}
+
+#[tauri::command]
+pub fn answer_consent<R: tauri::Runtime>(
+    _app: tauri::AppHandle<R>,
+    queue: State<'_, crate::queue::QueueState<R>>,
+    request_id: String,
+    allow: bool,
+    scope: crate::queue::ConsentScope,
+) {
+    queue.answer_consent(&request_id, allow, scope);
 }
 
 #[tauri::command]
@@ -266,11 +281,16 @@ pub async fn get_history<R: tauri::Runtime>(
     page_size: u32,
     app: tauri::AppHandle<R>,
 ) -> Result<HistoryResponse, String> {
-    let Some(store) = app.try_state::<HistoryStore>() else {
+    if app.try_state::<HistoryStore>().is_none() {
         warn_missing_store_get_history();
         return Ok(HistoryResponse::empty(page_size));
-    };
-    let fold = store.load()?;
+    }
+    let load_app = app.clone();
+    let fold = tauri::async_runtime::spawn_blocking(move || {
+        load_app.state::<HistoryStore>().load()
+    })
+    .await
+    .map_err(|e| format!("history load task failed: {e}"))??;
     Ok(crate::history::query_history(
         fold,
         &filters,
@@ -302,6 +322,12 @@ pub fn open_folder<R: tauri::Runtime>(
     app.opener()
         .open_path(&path, None::<&str>)
         .map_err(|e| format!("Could not open folder {}: {}", path, e))
+}
+
+#[tauri::command]
+pub fn memory_stats<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> crate::memory::MemoryStats {
+    let settings = load_settings(&app);
+    crate::memory::memory_stats(&settings.performance)
 }
 
 #[cfg(test)]
@@ -611,6 +637,8 @@ mod tests {
                 strategy_used: Some("quality=70".into()),
                 error: None,
                 duration_ms: 3,
+                changes: Vec::new(),
+                consent_source: None,
             })
             .unwrap();
         fs::OpenOptions::new()

@@ -72,6 +72,7 @@ describe('grouping', () => {
       belowTarget: 0,
       failed: 0,
       queued: 1,
+      waiting: 0,
       processed: 1,
     })
   })
@@ -96,6 +97,7 @@ describe('grouping', () => {
       belowTarget: 1,
       failed: 1,
       queued: 2,
+      waiting: 0,
       processed: 6,
     })
   })
@@ -166,6 +168,7 @@ describe('grouping', () => {
         belowTarget: 0,
         failed: 0,
         queued: 0,
+        waiting: 0,
         processed: 1,
       })
       expect(laneDonePill([file])).toEqual({ done: 1, total: 1 })
@@ -184,6 +187,7 @@ describe('grouping', () => {
       belowTarget: 0,
       failed: 0,
       queued: 0,
+      waiting: 0,
       processed: 0,
     })
     expect(laneDonePill([])).toEqual({ done: 0, total: 0 })

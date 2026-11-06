@@ -47,6 +47,8 @@ function file(overrides: Partial<HistoryFile> = {}): HistoryFile {
     error: null,
     durationMs: 2_100,
     completedAt: new Date(2026, 9, 25, 20, 2).getTime(),
+    changes: [],
+    consentSource: null,
     ...overrides,
   }
 }
@@ -67,6 +69,7 @@ function session(files: HistoryFile[]): HistorySession {
       cancelled: 0,
       unsupported: 0,
       alreadyUnderTarget: 0,
+      needsPermission: 0,
     },
     totalSavedBytes: 0,
     cancelled: false,

@@ -175,6 +175,8 @@ const fileWithStatus = (status: HistoryFile['status']): HistoryFile => ({
   error: null,
   durationMs: 10,
   completedAt: 0,
+  changes: [],
+  consentSource: null,
 })
 
 describe('history aggregates', () => {
@@ -213,6 +215,7 @@ describe('history aggregates', () => {
       cancelled: 0,
       unsupported: 1,
       alreadyUnderTarget: 1,
+      needsPermission: 0,
     }
     expect(
       countOutcome([
@@ -257,6 +260,7 @@ const sessionWith = (
     cancelled: 0,
     unsupported: 0,
     alreadyUnderTarget: 0,
+    needsPermission: 0,
   },
   totalSavedBytes: 0,
   cancelled: false,

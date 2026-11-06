@@ -89,6 +89,7 @@ const OUTCOME_COUNT_KEYS: Record<FileStatus, keyof SessionOutcome | null> = {
   cancelled: 'cancelled',
   unsupported: 'unsupported',
   already_under_target: 'alreadyUnderTarget',
+  needs_permission: 'needsPermission',
 }
 
 export function countOutcome(files: HistoryFile[]): SessionOutcome {
@@ -99,6 +100,7 @@ export function countOutcome(files: HistoryFile[]): SessionOutcome {
     cancelled: 0,
     unsupported: 0,
     alreadyUnderTarget: 0,
+    needsPermission: 0,
   }
   return files.reduce((acc, file) => {
     const key = Object.prototype.hasOwnProperty.call(OUTCOME_COUNT_KEYS, file.status)

@@ -31,6 +31,9 @@ import { toast } from "sonner"
 import type { Settings } from "@/types"
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }))
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(() => Promise.resolve(() => {})),
+}))
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }))
 vi.mock("sonner", () => ({
   toast: { error: vi.fn(), success: vi.fn(), dismiss: vi.fn() },
@@ -53,19 +56,21 @@ const baseSettings: Settings = {
     document: { size: 2, unit: "MB" },
   },
   qualityFloors: {
-    image: { minQuality: 30 },
+    image: { minQuality: 30, minLongEdge: 1280 },
     video: { minCrf: 28, minResolution: "720p" },
     pdf: { minDpi: 72, minJpegQuality: 15 },
     document: { minMediaQuality: 40 },
   },
-  performance: { maxConcurrent: "auto" },
+  performance: { adaptiveMemory: true, memoryCeilingMb: 2048 },
   history: { retentionDays: 90 },
+  consent: { allowDestructive: false, heicToJpg: true },
 }
 
 const resetDefaults: Settings = {
   ...baseSettings,
   outputFolder: "/defaults/Compressed",
   history: { retentionDays: 30 },
+  consent: { allowDestructive: false, heicToJpg: true },
 }
 
 const saveCalls = () =>
@@ -123,7 +128,7 @@ afterEach(() => {
 })
 
 describe("SettingsDialog", () => {
-  it("renders the five section tabs in a labelled tablist", async () => {
+  it("renders the six section tabs in a labelled tablist", async () => {
     render(<SettingsDialog open onOpenChange={vi.fn()} />)
 
     const tabs = await screen.findAllByRole("tab")
@@ -132,6 +137,7 @@ describe("SettingsDialog", () => {
       "General",
       "Targets",
       "Quality floors",
+      "Consent",
       "Performance",
       "History",
     ])
@@ -199,6 +205,54 @@ describe("SettingsDialog", () => {
     })
   })
 
+  it("round-trips both consent toggles through save_settings", async () => {
+    render(<SettingsDialog open onOpenChange={vi.fn()} />)
+    await screen.findByRole("tab", { name: "General" })
+    fireEvent.click(screen.getByRole("tab", { name: "Consent" }))
+
+    const destructive = screen.getByRole("button", {
+      name: "Allow destructive changes",
+    })
+    const heic = screen.getByRole("button", {
+      name: "Convert HEIC/HEIF to JPEG",
+    })
+    expect(destructive).toHaveAttribute("aria-pressed", "false")
+    expect(heic).toHaveAttribute("aria-pressed", "true")
+
+    vi.useFakeTimers()
+    fireEvent.click(destructive)
+    fireEvent.click(heic)
+
+    await act(async () => {
+      vi.advanceTimersByTime(400)
+    })
+
+    expect(savedSettings().consent).toEqual({
+      allowDestructive: true,
+      heicToJpg: false,
+    })
+  })
+
+  it("saves the image long-edge floor without dropping the quality floor", async () => {
+    render(<SettingsDialog open onOpenChange={vi.fn()} />)
+    await screen.findByRole("tab", { name: "General" })
+    fireEvent.click(screen.getByRole("tab", { name: "Quality floors" }))
+    const input = screen.getByLabelText("Images minimum long edge")
+    expect(input).toHaveDisplayValue("1,280")
+
+    vi.useFakeTimers()
+    fireEvent.change(input, { target: { value: "1600" } })
+
+    await act(async () => {
+      vi.advanceTimersByTime(400)
+    })
+
+    expect(savedSettings().qualityFloors.image).toEqual({
+      minQuality: 30,
+      minLongEdge: 1600,
+    })
+  })
+
   it("saves the full draft once the 400 ms debounce elapses", async () => {
     const input = await openHistoryTab()
     vi.useFakeTimers()
@@ -218,6 +272,7 @@ describe("SettingsDialog", () => {
     expect(savedSettings()).toEqual({
       ...baseSettings,
       history: { retentionDays: 30 },
+      consent: { allowDestructive: false, heicToJpg: true },
     })
 
     await act(async () => {
@@ -266,6 +321,7 @@ describe("SettingsDialog", () => {
     expect(savedSettings()).toEqual({
       ...baseSettings,
       history: { retentionDays: 30 },
+      consent: { allowDestructive: false, heicToJpg: true },
     })
     expect(onOpenChange).toHaveBeenCalledWith(false)
 
@@ -322,6 +378,7 @@ describe("SettingsDialog", () => {
     expect(savedSettings(1)).toEqual({
       ...baseSettings,
       history: { retentionDays: 30 },
+      consent: { allowDestructive: false, heicToJpg: true },
     })
     expect(toast.dismiss).toHaveBeenCalledWith("settings-save")
     expect(onOpenChange).toHaveBeenCalledWith(false)
@@ -942,5 +999,35 @@ describe("SettingsDialog", () => {
     await user.click(screen.getByRole("button", { name: "Clear history" }))
     await user.click(await screen.findByRole("button", { name: "Cancel" }))
     expect(clearHistory).not.toHaveBeenCalled()
+  })
+
+  it("shows memory stats and the configured ceiling in Performance", async () => {
+    vi.mocked(invoke).mockImplementation((command: string) => {
+      if (command === "get_settings") {
+        return Promise.resolve({
+          ...structuredClone(baseSettings),
+          performance: { adaptiveMemory: false, memoryCeilingMb: 512 },
+        })
+      }
+      if (command === "memory_stats") {
+        return Promise.resolve({
+          totalRamBytes: 16 * 1024 * 1024 * 1024,
+          budgetBytes: 512 * 1024 * 1024,
+          processRssBytes: 0,
+        })
+      }
+      return Promise.resolve(undefined)
+    })
+    render(<SettingsDialog open onOpenChange={vi.fn()} />)
+    await screen.findByRole("tab", { name: "General" })
+    fireEvent.click(screen.getByRole("tab", { name: "Performance" }))
+
+    expect(await screen.findByText("Total RAM")).toBeInTheDocument()
+    expect(
+      screen.getByLabelText("Memory ceiling in megabytes"),
+    ).toHaveDisplayValue("512")
+    expect(screen.getByText("16.00 GB")).toBeInTheDocument()
+    expect(screen.getByText("512.0 MB")).toBeInTheDocument()
+    expect(screen.getByText("—")).toBeInTheDocument()
   })
 })

@@ -17,14 +17,14 @@
 use crate::engine::progress::ProgressSender;
 use crate::engine::result::{CompressionError, CompressionResult};
 use crate::models::Category;
-use crate::settings::QualityFloors;
+use crate::policy::{Change, ConsentSource};
 use crate::sidecar::{
     GsResources, prepend_engine_dir_to_path, resolve_engine_candidate, resolve_gs_resources,
     resolve_sidecar_candidate, suppress_console_window,
 };
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+
 use tokio_util::sync::CancellationToken;
 
 const WAIT_POLL_MILLIS: u64 = 30;
@@ -43,8 +43,7 @@ pub const GS_RESOURCES_MISSING: &str = "the staged gs-resources/ tree is not ava
 pub fn gs_failure_with_resources_hint(error: CompressionError) -> CompressionError {
     CompressionError::SidecarFailed(format!("{} — {GS_RESOURCES_MISSING}", error))
 }
-const STDERR_TAIL_CHARS: usize = 500;
-const STDERR_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+
 
 /// Exhaustive registry of engines a processor may require. Taking this enum
 /// instead of a `&str` makes `require` total: there is no stringly-typed
@@ -124,14 +123,16 @@ impl SidecarPaths {
 
 /// The best attempt seen so far in a multi-pass search. `size` is the byte
 /// length of the output at `path`; `strategy`/`quality` describe the pass
-/// that produced it. `keep_smaller_in` is the single smallest-wins
-/// enforcement point shared by every processor's best-effort selection.
+/// that produced it. `Ladder::record` is the only caller of
+/// `keep_smaller_in`, so every processor shares one smallest-wins rule.
 #[derive(Debug, Clone)]
 pub struct BestAttempt {
     pub size: u64,
     pub path: PathBuf,
     pub strategy: String,
     pub quality: u32,
+    pub changes: Vec<Change>,
+    pub consent: ConsentSource,
 }
 
 impl BestAttempt {
@@ -146,8 +147,14 @@ impl BestAttempt {
     }
 }
 
+const STDERR_TAIL_CHARS: usize = 500;
+const STDERR_TAIL_KEEP_BYTES: usize = 2048;
+const STDERR_DRAIN_CHUNK: usize = 4096;
+const DELIVER_COPY_CHUNK: usize = 65536;
+const STDOUT_CAPTURE_LIMIT: usize = 64 * 1024;
+
 /// Copies `from` to the final output path and reports completion. One
-/// enforcement point for the fs::copy + send_progress(100) + result triple
+/// enforcement point for the copy + send_progress(100) + result triple
 /// shared by every processor's deliverable paths (early exit, fitting pass,
 /// best-effort).
 pub fn deliver_output(
@@ -158,9 +165,65 @@ pub fn deliver_output(
     quality_used: u32,
     met_target: bool,
     progress: &ProgressSender,
+    cancel_token: &CancellationToken,
 ) -> Result<CompressionResult, CompressionError> {
-    std::fs::copy(from, output)
+    if from == output {
+        progress.send_progress(100);
+        return Ok(CompressionResult {
+            output_path: output.to_path_buf(),
+            compressed_size: size,
+            quality_used,
+            met_target,
+            strategy_used,
+            changes: Vec::new(),
+            consent: ConsentSource::Default,
+        });
+    }
+
+    let temp_path = temp_path_for(output);
+    if let Err(e) = std::fs::remove_file(&temp_path) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            eprintln!("warn: could not remove stale temp {}: {e}", temp_path.display());
+        }
+    }
+
+    let mut src = std::fs::File::open(from)
         .map_err(|e| CompressionError::OutputFileError(e.to_string()))?;
+    let mut dst = std::fs::File::create(&temp_path)
+        .map_err(|e| CompressionError::OutputFileError(e.to_string()))?;
+
+    let mut buf = [0u8; DELIVER_COPY_CHUNK];
+    loop {
+        if cancel_token.is_cancelled() {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(CompressionError::Cancelled);
+        }
+        match src.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                if let Err(e) = dst.write_all(&buf[..n]) {
+                    let _ = std::fs::remove_file(&temp_path);
+                    return Err(CompressionError::OutputFileError(e.to_string()));
+                }
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&temp_path);
+                return Err(CompressionError::OutputFileError(e.to_string()));
+            }
+        }
+    }
+
+    if cancel_token.is_cancelled() {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(CompressionError::Cancelled);
+    }
+
+    drop(dst);
+    if let Err(e) = commit_output(&temp_path, output) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(CompressionError::OutputFileError(e.to_string()));
+    }
+
     progress.send_progress(100);
     Ok(CompressionResult {
         output_path: output.to_path_buf(),
@@ -168,13 +231,108 @@ pub fn deliver_output(
         quality_used,
         met_target,
         strategy_used,
+        changes: Vec::new(),
+        consent: ConsentSource::Default,
     })
 }
 
-/// Last ~`STDERR_TAIL_CHARS` characters of sidecar stderr — the failure
+/// Delivery temp beside the destination, built by appending to the full file
+/// name (`report.jpg.yard-tmp`) so same-stem outputs in different categories
+/// (`report.jpg` / `report.pdf`) never share a temp path.
+pub fn temp_path_for(dest: &Path) -> PathBuf {
+    let Some(name) = dest.file_name() else {
+        return dest.with_extension("yard-tmp");
+    };
+    let mut temp = name.to_os_string();
+    temp.push(".yard-tmp");
+    dest.with_file_name(temp)
+}
+
+/// Atomically commits a temp file to its final destination. `hard_link`
+/// fails if `dest` exists on both Unix and Windows, so the temp stays
+/// reachable and the caller can clean it up. On filesystems that do not
+/// support hard links (exFAT/FAT, cross-device), fall back to the previous
+/// checked-rename path.
+pub fn commit_output(temp: &Path, dest: &Path) -> std::io::Result<()> {
+    match std::fs::hard_link(temp, dest) {
+        Ok(()) => {
+            if let Err(e) = std::fs::remove_file(temp) {
+                // shortcut: temp cleanup best-effort only; a stuck temp file
+                // is harmless but should be logged. Upgrade if we ever need
+                // strict temp accounting.
+                eprintln!("warn: could not remove committed temp {}: {e}", temp.display());
+            }
+            Ok(())
+        }
+        Err(e) if link_unsupported(&e) => {
+            // shortcut: checked rename leaves a residual race on filesystems
+            // without hard-link support; production bundles target APFS/NTFS.
+            if dest.exists() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!("destination {} already exists", dest.display()),
+                ));
+            }
+            std::fs::rename(temp, dest)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn link_unsupported(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::Unsupported
+            | std::io::ErrorKind::CrossesDevices
+            | std::io::ErrorKind::PermissionDenied
+            | std::io::ErrorKind::InvalidInput
+    )
+}
+
+/// Bounded stderr tail: retains the last ~2 KiB of a sidecar stream while
+/// still accounting for every byte that passed through, so callers can report
+/// diagnostics without unbounded memory growth.
+pub struct StderrTail {
+    buffer: Vec<u8>,
+    bytes_seen: u64,
+}
+
+impl Default for StderrTail {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StderrTail {
+    pub fn new() -> Self {
+        Self {
+            buffer: Vec::with_capacity(STDERR_TAIL_KEEP_BYTES),
+            bytes_seen: 0,
+        }
+    }
+
+    pub fn push(&mut self, chunk: &[u8]) {
+        self.bytes_seen += chunk.len() as u64;
+        self.buffer.extend_from_slice(chunk);
+        if self.buffer.len() > STDERR_TAIL_KEEP_BYTES {
+            let drop = self.buffer.len() - STDERR_TAIL_KEEP_BYTES;
+            self.buffer.drain(..drop);
+        }
+    }
+
+    pub fn bytes_seen(&self) -> u64 {
+        self.bytes_seen
+    }
+
+    pub fn tail(&self) -> &[u8] {
+        &self.buffer
+    }
+}
+
+/// Last ~`STDERR_TAIL_CHARS` characters of captured stderr — the failure
 /// reason is almost always the last thing printed.
-pub fn stderr_tail(bytes: &[u8]) -> String {
-    let stderr = String::from_utf8_lossy(bytes).into_owned();
+pub fn stderr_tail(tail: &StderrTail) -> String {
+    let stderr = String::from_utf8_lossy(tail.tail()).into_owned();
     let tail: String = {
         let count = stderr.chars().count();
         if count > STDERR_TAIL_CHARS {
@@ -192,7 +350,7 @@ pub fn stderr_tail(bytes: &[u8]) -> String {
 }
 
 /// A sidecar exit code that, for this engine, still counts as pass success
-/// and leaves output validation to the caller (e.g. qpdf exit 2 = "warnings,
+/// and leaves output validation to the caller (e.g. qpdf exit 3 = "warnings,
 /// output still valid"). Exit-code policy is per-engine, so the engine layer
 /// takes it as a predicate instead of hardcoding tool quirks.
 pub type ToleratedExit = fn(&str, Option<i32>) -> bool;
@@ -206,15 +364,8 @@ pub fn strict_exit(_label: &str, _code: Option<i32>) -> bool {
 /// Runs a sidecar to completion, draining stderr on a reader thread so a
 /// chatty tool can never deadlock on a full pipe. Polls the cancel token:
 /// a cancel SIGKILLs the child process first, then surfaces as `Cancelled`
-/// — cancelled beats exit code.
-///
-/// SIGKILL trade-off: only the direct child is killed, so grandchild
-/// processes it spawned survive and hold the stderr pipe open. On cancel
-/// the drain thread is therefore abandoned, not joined (it self-terminates
-/// once the stragglers exit). On a normal exit the join is bounded: a
-/// lingering grandchild that outlives `STDERR_JOIN_TIMEOUT` forces a warned
-/// diagnostic loss instead of an indefinite block, since the child itself
-/// is already reaped and the pass result must not depend on stragglers.
+/// — cancelled beats exit code. The drain thread uses a shared `StderrTail`
+/// so the same bounded retention applies to every sidecar path.
 pub fn run_sidecar(
     sidecar_path: &str,
     label: &'static str,
@@ -222,36 +373,92 @@ pub fn run_sidecar(
     cancel_token: &CancellationToken,
     tolerated_exit: ToleratedExit,
 ) -> Result<(), CompressionError> {
+    run_sidecar_inner(
+        sidecar_path,
+        label,
+        args,
+        cancel_token,
+        tolerated_exit,
+        false,
+    )
+    .map(|_| ())
+}
+
+/// Runs a sidecar and captures its stdout (up to 64 KiB) plus the bounded
+/// stderr tail for callers that need the tool's answer, such as
+/// `qpdf --show-npages`. The stderr tail is kept because a tolerated warning
+/// exit can still leave stdout empty (for example an encrypted PDF).
+pub fn run_sidecar_capture_stdout(
+    sidecar_path: &str,
+    label: &'static str,
+    args: &[String],
+    cancel_token: &CancellationToken,
+    tolerated_exit: ToleratedExit,
+) -> Result<(std::process::ExitStatus, String, String), CompressionError> {
+    let (status, stdout, stderr) = run_sidecar_inner(
+        sidecar_path,
+        label,
+        args,
+        cancel_token,
+        tolerated_exit,
+        true,
+    )?;
+    Ok((status, String::from_utf8_lossy(&stdout).into_owned(), stderr))
+}
+
+fn run_sidecar_inner(
+    sidecar_path: &str,
+    label: &'static str,
+    args: &[String],
+    cancel_token: &CancellationToken,
+    tolerated_exit: ToleratedExit,
+    capture_stdout: bool,
+) -> Result<(std::process::ExitStatus, Vec<u8>, String), CompressionError> {
     let mut command = std::process::Command::new(sidecar_path);
-    command
-        .args(args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped());
+    command.args(args).stderr(std::process::Stdio::piped());
+    if capture_stdout {
+        command.stdout(std::process::Stdio::piped());
+    } else {
+        command.stdout(std::process::Stdio::null());
+    }
     suppress_console_window(&mut command);
     prepend_engine_dir_to_path(&mut command, sidecar_path);
-    let mut child = command.spawn()
-        .map_err(|e| {
+    let mut child = command.spawn().map_err(|e| {
             CompressionError::SidecarFailed(format!("Failed to start {}: {}", label, e))
         })?;
 
     let mut stderr_pipe = child.stderr.take();
     let stderr_reader = std::thread::spawn(move || {
-        let mut buffer = Vec::new();
+        let mut tail = StderrTail::new();
         if let Some(pipe) = stderr_pipe.as_mut() {
-            if let Err(e) = pipe.read_to_end(&mut buffer) {
-                eprintln!("warn: {label}: stderr drain failed, diagnostics partial: {e}");
+            let mut buf = [0u8; STDERR_DRAIN_CHUNK];
+            loop {
+                match pipe.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => tail.push(&buf[..n]),
+                    Err(e) => {
+                        if e.kind() == std::io::ErrorKind::Interrupted {
+                            continue;
+                        }
+                        eprintln!("warn: {label}: stderr drain failed, diagnostics partial: {e}");
+                        break;
+                    }
+                }
             }
         }
-        buffer
+        tail
     });
+
+    let stdout_reader = child
+        .stdout
+        .take()
+        .map(|pipe| std::thread::spawn(move || capture_bounded_stdout(pipe, label)));
 
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => {
                 if cancel_token.is_cancelled() {
-                    // Grandchildren survive SIGKILL and hold the stderr
-                    // pipe — the drain thread is abandoned, not joined.
                     let _ = child.kill();
                     let _ = child.wait();
                     return Err(CompressionError::Cancelled);
@@ -269,22 +476,25 @@ pub fn run_sidecar(
         }
     };
 
-    // A cancel racing the final poll must not be lost: the child exits 0,
-    // the caller would deliver Done, and no one re-checks the token. Verify
-    // once more after reaping — cancelled beats exit code.
     if cancel_token.is_cancelled() {
         return Err(CompressionError::Cancelled);
     }
-    let stderr_bytes = match recv_stderr_bounded(stderr_reader) {
-        Some(bytes) => bytes,
-        None => {
-            eprintln!(
-                "warn: {label} stderr drain did not finish within {:?} after exit \
-                 (lingering grandchild); diagnostics unavailable",
-                STDERR_JOIN_TIMEOUT
-            );
-            b"<stderr unreadable>".to_vec()
+    let tail = match stderr_reader.join() {
+        Ok(tail) => tail,
+        Err(_) => {
+            eprintln!("warn: {label} stderr drain thread panicked");
+            StderrTail::new()
         }
+    };
+    let stdout = match stdout_reader {
+        Some(reader) => match reader.join() {
+            Ok(stdout) => stdout,
+            Err(_) => {
+                eprintln!("warn: {label} stdout capture thread panicked");
+                Vec::new()
+            }
+        },
+        None => Vec::new(),
     };
 
     if !status.success() && !tolerated_exit(label, status.code()) {
@@ -295,51 +505,50 @@ pub fn run_sidecar(
             "{} exited with code {:?}: {}",
             label,
             status.code(),
-            stderr_tail(&stderr_bytes)
+            stderr_tail(&tail)
         )));
     }
-    Ok(())
+    Ok((status, stdout, stderr_tail(&tail)))
 }
 
-/// Bounded wait on the drain thread: poll `is_finished`, then join. A
-/// `None` return means "abandoned" — dropping the handle detaches the
-/// thread, which self-terminates once the pipe closes.
-pub fn recv_stderr_bounded<T: Send + 'static>(
-    handle: std::thread::JoinHandle<T>,
-) -> Option<T> {
-    let deadline = std::time::Instant::now() + STDERR_JOIN_TIMEOUT;
+fn capture_bounded_stdout(mut pipe: impl Read, label: &str) -> Vec<u8> {
+    let mut captured = Vec::new();
+    let mut buf = [0u8; STDERR_DRAIN_CHUNK];
     loop {
-        if handle.is_finished() {
-            return handle.join().ok();
+        match pipe.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                let remaining = STDOUT_CAPTURE_LIMIT.saturating_sub(captured.len());
+                captured.extend_from_slice(&buf[..n.min(remaining)]);
+            }
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                eprintln!("warn: {label}: stdout capture failed, answer partial: {e}");
+                break;
+            }
         }
-        if std::time::Instant::now() >= deadline {
-            return None;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(WAIT_POLL_MILLIS));
     }
+    captured
 }
 
 pub trait CompressionProcessor: Send + Sync {
     fn category(&self) -> Category;
     fn supported_extensions(&self) -> &[&str];
-
-    #[allow(clippy::too_many_arguments)]
-    fn compress_to_target(
+    fn declared_changes(&self) -> &'static [Change] {
+        &[]
+    }
+    fn compress(
         &self,
-        input: &Path,
-        output: &Path,
-        target_bytes: u64,
-        quality_floor: &QualityFloors,
-        cancel_token: CancellationToken,
-        progress: ProgressSender,
-        sidecar_paths: &SidecarPaths,
-        temp_dir: &Path,
+        ctx: &crate::engine::context::JobContext<'_>,
     ) -> Result<CompressionResult, CompressionError>;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[cfg(windows)]
     #[test]
@@ -569,6 +778,8 @@ mod tests {
                 path: PathBuf::from("a"),
                 strategy: "qpdf-lossless".to_string(),
                 quality: 100,
+                changes: Vec::new(),
+                consent: ConsentSource::Default,
             },
         ));
         let first = best.as_ref().unwrap();
@@ -582,6 +793,8 @@ mod tests {
                 path: PathBuf::from("tie"),
                 strategy: "tie".to_string(),
                 quality: 1,
+                changes: Vec::new(),
+                consent: ConsentSource::Default,
             },
         ));
         assert_eq!(best.as_ref().unwrap().path, PathBuf::from("a"));
@@ -593,11 +806,315 @@ mod tests {
                 path: PathBuf::from("b"),
                 strategy: "gs dpi=72,jpegq=40".to_string(),
                 quality: 40,
+                changes: Vec::new(),
+                consent: ConsentSource::Default,
             },
         ));
         let winner: &BestAttempt = best.as_ref().unwrap();
         assert_eq!(winner.size, 400);
         assert_eq!(winner.path, PathBuf::from("b"));
         assert_eq!(winner.quality, 40);
+    }
+
+    #[test]
+    fn cancelled_copy_leaves_no_final_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.bin");
+        let output = dir.path().join("out.bin");
+        let temp_path = temp_path_for(&output);
+        let size = 64 * 1024 * 1024;
+        fs::write(&input, vec![0u8; size]).unwrap();
+        fs::write(&temp_path, b"stale").unwrap();
+
+        let token = CancellationToken::new();
+        let worker_token = token.clone();
+        let worker_input = input.clone();
+        let worker_output = output.clone();
+        let handle = std::thread::spawn(move || {
+            deliver_output(
+                &worker_input,
+                &worker_output,
+                size as u64,
+                "test".to_string(),
+                75,
+                true,
+                &ProgressSender::test_stub(),
+                &worker_token,
+            )
+        });
+
+        let mut triggered = false;
+        for _ in 0..10000 {
+            if temp_path.exists()
+                && fs::metadata(&temp_path).map(|m| m.len()).unwrap_or(0) > 0
+            {
+                triggered = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(triggered, "temp file was never created");
+        token.cancel();
+        let result = handle.join().unwrap();
+        assert!(
+            matches!(result, Err(CompressionError::Cancelled)),
+            "got: {:?}",
+            result
+        );
+        assert!(!output.exists(), "final output must not exist");
+        assert!(!temp_path.exists(), "temp file must be cleaned");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn failed_copy_removes_temp_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.bin");
+        fs::write(&input, b"x").unwrap();
+        let output_dir = dir.path().join("readonly");
+        fs::create_dir(&output_dir).unwrap();
+        fs::set_permissions(&output_dir, fs::Permissions::from_mode(0o500)).unwrap();
+        let output = output_dir.join("out.bin");
+
+        let result = deliver_output(
+            &input,
+            &output,
+            1,
+            "test".to_string(),
+            75,
+            true,
+            &ProgressSender::test_stub(),
+            &CancellationToken::new(),
+        );
+
+        assert!(
+            matches!(result, Err(CompressionError::OutputFileError(_))),
+            "got: {:?}",
+            result
+        );
+        assert!(
+            !temp_path_for(&output).exists(),
+            "temp file must not be left in the read-only directory"
+        );
+
+        fs::set_permissions(&output_dir,
+            fs::Permissions::from_mode(0o755)
+        ).unwrap();
+    }
+
+    #[test]
+    fn existing_destination_is_not_clobbered() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.bin");
+        fs::write(&input, b"new content").unwrap();
+        let output = dir.path().join("out.bin");
+        fs::write(&output, b"precious existing data").unwrap();
+
+        let result = deliver_output(
+            &input,
+            &output,
+            11,
+            "test".to_string(),
+            75,
+            true,
+            &ProgressSender::test_stub(),
+            &CancellationToken::new(),
+        );
+
+        assert!(
+            matches!(result, Err(CompressionError::OutputFileError(_))),
+            "got: {:?}",
+            result
+        );
+        assert!(!temp_path_for(&output).exists(), "temp must be removed");
+        assert_eq!(
+            fs::read(&output).unwrap(),
+            b"precious existing data",
+            "existing destination must not be clobbered"
+        );
+        assert!(!dir.path().join("out.bin.yard-tmp").exists());
+    }
+
+    #[test]
+    fn successful_commit_leaves_no_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.bin");
+        fs::write(&input, b"delivered").unwrap();
+        let output = dir.path().join("out.bin");
+
+        let result = deliver_output(
+            &input,
+            &output,
+            9,
+            "test".to_string(),
+            75,
+            true,
+            &ProgressSender::test_stub(),
+            &CancellationToken::new(),
+        );
+
+        assert!(result.is_ok(), "got: {:?}", result);
+        assert!(output.exists(), "destination must exist");
+        assert_eq!(fs::read(&output).unwrap(), b"delivered");
+        assert!(
+            !temp_path_for(&output).exists(),
+            "temp must be removed after successful commit"
+        );
+    }
+
+    #[test]
+    fn temp_paths_are_unique_per_extension() {
+        let jpg = temp_path_for(Path::new("/out/report.jpg"));
+        let pdf = temp_path_for(Path::new("/out/report.pdf"));
+        assert_ne!(
+            jpg, pdf,
+            "same-stem outputs in different category lanes must not share a temp path"
+        );
+        assert_eq!(jpg, PathBuf::from("/out/report.jpg.yard-tmp"));
+        assert_eq!(pdf, PathBuf::from("/out/report.pdf.yard-tmp"));
+    }
+
+    #[test]
+    fn concurrent_delivery_keeps_same_stem_outputs_separate() {
+        use std::sync::{Arc, Barrier};
+
+        let dir = tempfile::tempdir().unwrap();
+        let size = 32 * 1024 * 1024;
+        let jpg_src = dir.path().join("jpg-src.bin");
+        let pdf_src = dir.path().join("pdf-src.bin");
+        fs::write(&jpg_src, vec![b'j'; size]).unwrap();
+        fs::write(&pdf_src, vec![b'p'; size]).unwrap();
+        let jpg_out = dir.path().join("report.jpg");
+        let pdf_out = dir.path().join("report.pdf");
+
+        let barrier = Arc::new(Barrier::new(2));
+        let deliver = |from: PathBuf, to: PathBuf, barrier: Arc<Barrier>| {
+            std::thread::spawn(move || {
+                barrier.wait();
+                deliver_output(
+                    &from,
+                    &to,
+                    size as u64,
+                    "test".to_string(),
+                    75,
+                    true,
+                    &ProgressSender::test_stub(),
+                    &CancellationToken::new(),
+                )
+            })
+        };
+        let a = deliver(jpg_src, jpg_out.clone(), barrier.clone());
+        let b = deliver(pdf_src, pdf_out.clone(), barrier);
+
+        a.join().unwrap().unwrap();
+        b.join().unwrap().unwrap();
+
+        let jpg = fs::read(&jpg_out).unwrap();
+        let pdf = fs::read(&pdf_out).unwrap();
+        assert_eq!(jpg.len(), size);
+        assert_eq!(pdf.len(), size);
+        assert!(jpg.iter().all(|b| *b == b'j'), "jpg lane must keep jpg bytes");
+        assert!(pdf.iter().all(|b| *b == b'p'), "pdf lane must keep pdf bytes");
+        assert!(!temp_path_for(&jpg_out).exists(), "jpg temp must be gone");
+        assert!(!temp_path_for(&pdf_out).exists(), "pdf temp must be gone");
+    }
+
+    #[test]
+    fn stderr_tail_retains_at_most_2_kib_but_drains_everything() {
+        let mut tail = StderrTail::new();
+        let total = 10 * 1024 * 1024;
+        let chunk_size = 4096;
+        let chunk = vec![b'x'; chunk_size];
+        for _ in 0..(total / chunk_size) {
+            tail.push(&chunk);
+        }
+        assert_eq!(tail.bytes_seen(), total as u64, "every byte must be accounted for");
+        assert!(
+            tail.tail().len() <= STDERR_TAIL_KEEP_BYTES,
+            "retained tail {} exceeds {STDERR_TAIL_KEEP_BYTES} bytes",
+            tail.tail().len()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_stdout_is_capped_and_stderr_stays_bounded() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let chatty = dir.path().join("chatty");
+        fs::write(
+            &chatty,
+            r#"#!/bin/bash
+head -c 100000 /dev/zero | tr '\0' 'x'
+printf 'CAPTURE_TAIL\n' >&2
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&chatty, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let (status, stdout, _stderr) = run_sidecar_capture_stdout(
+            chatty.to_str().unwrap(),
+            "qpdf",
+            &[],
+            &CancellationToken::new(),
+            strict_exit,
+        )
+        .unwrap();
+
+        assert!(status.success());
+        assert_eq!(
+            stdout.len(),
+            STDOUT_CAPTURE_LIMIT,
+            "stdout must be capped at 64 KiB but fully drained"
+        );
+        assert!(stdout.bytes().all(|b| b == b'x'));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_stdout_failure_still_reports_the_stderr_tail() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let failing = dir.path().join("failing");
+        fs::write(
+            &failing,
+            r#"#!/bin/bash
+printf 'STDOUT_ANSWER\n'
+printf 'STDERR_CAUSE\n' >&2
+exit 3
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&failing, fs::Permissions::from_mode(0o755)).unwrap();
+
+        match run_sidecar_capture_stdout(
+            failing.to_str().unwrap(),
+            "qpdf",
+            &[],
+            &CancellationToken::new(),
+            strict_exit,
+        ) {
+            Err(CompressionError::SidecarFailed(msg)) => {
+                assert!(msg.contains("exited with code Some(3)"), "msg: {msg}");
+                assert!(msg.contains("STDERR_CAUSE"), "msg: {msg}");
+            }
+            other => panic!("expected SidecarFailed, got {:?}", other.map(|_| ())),
+        }
+    }
+
+    #[test]
+    fn release_profile_keeps_unwind_panics() {
+        let manifest = fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")
+        ).unwrap();
+        let release = manifest
+            .split("[profile.release]")
+            .nth(1)
+            .expect("release profile must exist");
+        assert!(
+            release.contains("panic = \"unwind\""),
+            "release profile must keep panic = unwind"
+        );
     }
 }

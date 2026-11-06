@@ -15,33 +15,32 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::engine::result::STRATEGY_ALREADY_UNDER_TARGET;
+use crate::engine::processor::run_sidecar_capture_stdout;
 use crate::engine::{
-    BestAttempt, CompressionError, CompressionProcessor, CompressionResult, ProgressSender,
-    SidecarName, SidecarPaths, ToleratedExit, deliver_output, gs_failure_with_resources_hint,
-    run_sidecar, strict_exit,
+    AttemptDecision, AttemptOutcome, CompressionError, CompressionProcessor, CompressionResult,
+    JobContext, Ladder, SidecarName, ToleratedExit, gs_failure_with_resources_hint, run_sidecar,
+    strict_exit,
 };
 use crate::models::Category;
+use crate::policy::Change;
 use crate::settings::QualityFloors;
 
 pub struct PdfProcessor;
 
 const PDF_MAGIC: &[u8] = b"%PDF-";
 const QPDF_JPEG_QUALITY: u32 = 75;
-const GS_SCREEN_QUALITY: u32 = 72;
-const GS_SCREEN_JPEGQ_FLOOR: u32 = 15;
 const PDF_DPI_RUNGS: [u32; 4] = [100, 72, 50, 36];
 const PDF_JPEGQ_RUNGS: [u32; 4] = [60, 40, 25, 15];
 
-/// qpdf exit 2 = "warnings, output still valid"; its output is validated by
-/// `measure_output` instead of failing the pass here. Other engines (and
-/// other exit codes) fail the pass.
+/// qpdf exit 3 = "warnings, output still valid"; exit 2 = "errors" and must
+/// fail the pass. A tolerated warning exit still goes through `measure_output`
+/// and `validate_pdf`, so an unusable output cannot be delivered.
 fn qpdf_tolerated_exit(label: &str, code: Option<i32>) -> bool {
-    label == "qpdf" && code == Some(2)
+    label == "qpdf" && code == Some(3)
 }
 
 impl Default for PdfProcessor {
@@ -53,7 +52,6 @@ impl Default for PdfProcessor {
 enum PdfPass {
     QpdfLossless,
     QpdfImageOpt,
-    GsScreen,
     GsLadder { dpi: u32, jpegq: u32 },
 }
 
@@ -67,6 +65,13 @@ struct PassSpec {
 impl PdfProcessor {
     pub fn new() -> Self {
         PdfProcessor
+    }
+
+    fn pass_changes(pass: &PdfPass) -> Vec<Change> {
+        match pass {
+            PdfPass::QpdfLossless => Vec::new(),
+            PdfPass::QpdfImageOpt | PdfPass::GsLadder { .. } => vec![Change::LossyEncode],
+        }
     }
 
     fn qpdf_lossless_args(input: &Path, output: &Path) -> Vec<String> {
@@ -101,6 +106,12 @@ impl PdfProcessor {
     /// `Resource/Init/gs_lev2.ps` reads it). `-sICCProfilesDir` is not accepted by
     /// pdfwrite: gs 10.08 aborts device init with "Unable to open the initial
     /// device" whenever it is passed.
+    ///
+    /// `-dPDFSETTINGS=/screen` pins every image resolution to 72 dpi, so `-r`
+    /// alone cannot carry the DPI ladder: it changes the rasterisation
+    /// resolution of vector content, not the downsampling of embedded images.
+    /// The explicit `ColorImageResolution`/`GrayImageResolution`/
+    /// `MonoImageResolution` flags make each rung actually re-sample.
     fn gs_args(
     dpi: Option<u32>,
     jpegq: Option<u32>,
@@ -122,7 +133,12 @@ impl PdfProcessor {
             "-dPDFSETTINGS=/screen".to_string(),
         ]);
         if let Some(dpi) = dpi {
-            args.push(format!("-r{}", dpi));
+            args.extend([
+                format!("-r{}", dpi),
+                format!("-dColorImageResolution={}", dpi),
+                format!("-dGrayImageResolution={}", dpi),
+                format!("-dMonoImageResolution={}", dpi),
+            ]);
         }
         if let Some(jpegq) = jpegq {
             args.push(format!("-dJPEGQ={}", jpegq));
@@ -153,14 +169,8 @@ impl PdfProcessor {
             PdfPass::QpdfImageOpt => PassSpec {
                 label: "qpdf",
                 args: Self::qpdf_image_opt_args(input, output),
-                strategy: format!("qpdf-image-opt,jpeg-quality={}", QPDF_JPEG_QUALITY),
+                strategy: format!("qpdf-image-opt,lossy,jpeg-quality={}", QPDF_JPEG_QUALITY),
                 quality: QPDF_JPEG_QUALITY,
-            },
-            PdfPass::GsScreen => PassSpec {
-                label: "gs",
-                args: Self::gs_args(None, None, input, output, resources),
-                strategy: "gs-screen".to_string(),
-                quality: GS_SCREEN_QUALITY,
             },
             PdfPass::GsLadder { dpi, jpegq } => PassSpec {
                 label: "gs",
@@ -207,23 +217,10 @@ impl PdfProcessor {
         Ok(size)
     }
 
-    fn remove_all(paths: &[PathBuf]) {
-        for path in paths {
-            if let Err(e) = std::fs::remove_file(path) {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    eprintln!("warn: temp cleanup failed for {}: {e}", path.display());
-                }
-            }
-        }
-    }
-
     fn ladder_passes(quality_floor: &QualityFloors) -> Vec<PdfPass> {
         let mut passes = vec![PdfPass::QpdfLossless, PdfPass::QpdfImageOpt];
         let min_dpi = quality_floor.pdf.min_dpi;
         let min_jpegq = quality_floor.pdf.min_jpeg_quality;
-        if GS_SCREEN_QUALITY >= min_dpi && GS_SCREEN_JPEGQ_FLOOR >= min_jpegq {
-            passes.push(PdfPass::GsScreen);
-        }
         for dpi in PDF_DPI_RUNGS {
             for jpegq in PDF_JPEGQ_RUNGS {
                 if dpi >= min_dpi && jpegq >= min_jpegq {
@@ -235,147 +232,150 @@ impl PdfProcessor {
     }
 }
 
+fn page_count(path: &Path, qpdf: &str) -> Result<u32, CompressionError> {
+    let args = vec!["--show-npages".to_string(), path.display().to_string()];
+    let (_, stdout, stderr) = run_sidecar_capture_stdout(
+        qpdf,
+        "qpdf",
+        &args,
+        &CancellationToken::new(),
+        qpdf_tolerated_exit,
+    )?;
+    stdout.trim().parse::<u32>().map_err(|_| {
+        CompressionError::SidecarFailed(format!(
+            "unparsable page count for {}: {:?} (qpdf: {})",
+            path.display(),
+            stdout.trim(),
+            stderr.trim()
+        ))
+    })
+}
+
+fn validate_pdf(input: &Path, output: &Path, qpdf: &str) -> Result<(), CompressionError> {
+    let expected = page_count(input, qpdf)?;
+    let actual = page_count(output, qpdf)?;
+    if expected != actual {
+        return Err(CompressionError::SidecarFailed(format!(
+            "page count mismatch: input has {expected} pages, output has {actual}"
+        )));
+    }
+    Ok(())
+}
+
 impl CompressionProcessor for PdfProcessor {
     fn category(&self) -> Category {
         Category::Pdf
     }
 
     fn supported_extensions(&self) -> &[&str] {
-        &["pdf"]
+        crate::registry::extensions_for(Category::Pdf)
     }
 
-    fn compress_to_target(
-        &self,
-        input: &Path,
-        output: &Path,
-        target_bytes: u64,
-        quality_floor: &QualityFloors,
-        cancel_token: CancellationToken,
-        progress: ProgressSender,
-        sidecar_paths: &SidecarPaths,
-        temp_dir: &Path,
-    ) -> Result<CompressionResult, CompressionError> {
-        let input_size = std::fs::metadata(input)
+    fn declared_changes(&self) -> &'static [Change] {
+        &[Change::LossyEncode, Change::Rasterize]
+    }
+
+    fn compress(&self, ctx: &JobContext<'_>) -> Result<CompressionResult, CompressionError> {
+        let input_size = std::fs::metadata(ctx.input)
             .map(|m| m.len())
             .map_err(|e| CompressionError::InputFileError(e.to_string()))?;
 
-        // Already under target — copy as-is (spec §6)
-        if input_size <= target_bytes {
-            return deliver_output(
-                input,
-                output,
-                input_size,
-                STRATEGY_ALREADY_UNDER_TARGET.to_string(),
-                100,
-                true,
-                &progress,
-            );
+        let mut ladder = Ladder::new();
+        if let Some(result) = ladder.shortcut(ctx, input_size)? {
+            return Ok(result);
         }
 
-        let qpdf_path = sidecar_paths.require(SidecarName::Qpdf)?;
-        let gs_path = sidecar_paths.require(SidecarName::Gs)?;
+        let qpdf_path = ctx.sidecars.require(SidecarName::Qpdf)?;
+        let gs_path = ctx.sidecars.require(SidecarName::Gs)?;
 
-        let passes = Self::ladder_passes(quality_floor);
+        let passes = Self::ladder_passes(ctx.floors);
         let total = passes.len();
-        let mut smallest: Option<BestAttempt> = None;
-        let mut attempt_paths: Vec<PathBuf> = Vec::new();
-        let mut last_error: Option<CompressionError> = None;
+        let progress = ladder.progress(ctx);
 
         for (index, pass) in passes.iter().enumerate() {
-            if cancel_token.is_cancelled() {
-                Self::remove_all(&attempt_paths);
-                return Err(CompressionError::Cancelled);
+            if ctx.cancel.is_cancelled() {
+                return ladder.finish(ctx);
             }
 
-            let temp_file = temp_dir.join(format!("attempt-{}.pdf", index));
-            attempt_paths.push(temp_file.clone());
-            let gs_resources = sidecar_paths.gs_resources.as_ref();
-            let spec = Self::pass_spec(pass, input, &temp_file, gs_resources);
+            let temp_file = ctx.temp_dir.join(format!("attempt-{}.pdf", index));
+            ladder.track(&temp_file);
+            let gs_resources = ctx.sidecars.gs_resources.as_ref();
+            let spec = Self::pass_spec(pass, ctx.input, &temp_file, gs_resources);
             let sidecar_path = match pass {
                 PdfPass::QpdfLossless | PdfPass::QpdfImageOpt => qpdf_path,
-                PdfPass::GsScreen | PdfPass::GsLadder { .. } => gs_path,
+                PdfPass::GsLadder { .. } => gs_path,
             };
 
-            progress.send_progress(((index * 95) / total) as u32);
+            progress.send_progress(((index * 100) / total.max(1)) as u32);
 
             let attempt = run_sidecar(
                 sidecar_path,
                 spec.label,
                 &spec.args,
-                &cancel_token,
+                &ctx.cancel,
                 match pass {
                     PdfPass::QpdfLossless | PdfPass::QpdfImageOpt => {
                         qpdf_tolerated_exit as ToleratedExit
                     }
-                    PdfPass::GsScreen | PdfPass::GsLadder { .. } => strict_exit as ToleratedExit,
+                    PdfPass::GsLadder { .. } => strict_exit as ToleratedExit,
                 },
             )
-            .and_then(|_| Self::measure_output(&temp_file));
+            .and_then(|()| Self::measure_output(&temp_file))
+            .and_then(|size| validate_pdf(ctx.input, &temp_file, qpdf_path).map(|()| size));
 
             match attempt {
                 Ok(size) => {
-                    if size <= target_bytes {
-                        return deliver_output(
-                            &temp_file,
-                            output,
+                    let changes = Self::pass_changes(pass);
+                    let consent = ctx.consent_for(&changes);
+                    let decision = ladder.record(
+                        ctx,
+                        AttemptOutcome::Produced {
+                            path: temp_file,
                             size,
-                            spec.strategy,
-                            spec.quality,
-                            true,
-                            &progress,
-                        );
-                    }
-                    BestAttempt::keep_smaller_in(
-                        &mut smallest,
-                        BestAttempt {
-                            size,
-                            path: temp_file.clone(),
-                            strategy: spec.strategy.clone(),
                             quality: spec.quality,
+                            strategy: spec.strategy,
+                            changes,
+                            consent,
                         },
                     );
-                }
-                Err(CompressionError::Cancelled) => {
-                    Self::remove_all(&attempt_paths);
-                    return Err(CompressionError::Cancelled);
+                    if let AttemptDecision::Stop(result) = decision {
+                        return Ok(result);
+                    }
+                    if ctx.cancel.is_cancelled() {
+                        return ladder.finish(ctx);
+                    }
                 }
                 // Spec §5: one failing pass must not abort the remaining
                 // passes — a corrupt-input failure in qpdf still leaves the
                 // gs ladder a chance to succeed. Record the attempt as
                 // failed and move on (issue 13).
-                Err(e) => {
-                    eprintln!("warn: {} pass failed, trying next: {e}", spec.label);
-                    last_error = Some(if spec.label == "gs" && gs_resources.is_none() {
-                        gs_failure_with_resources_hint(e)
+                Err(error) => {
+                    if ctx.cancel.is_cancelled() {
+                        return ladder.finish(ctx);
+                    }
+                    eprintln!("warn: {} pass failed, trying next: {error}", spec.label);
+                    let error = if spec.label == "gs" && gs_resources.is_none() {
+                        gs_failure_with_resources_hint(error)
                     } else {
-                        e
-                    });
-                    Self::remove_all(std::slice::from_ref(&temp_file));
+                        error
+                    };
+                    ladder.record(ctx, AttemptOutcome::Failed(error));
+                    if ctx.cancel.is_cancelled() {
+                        return ladder.finish(ctx);
+                    }
                 }
             }
         }
 
-        if let Some(best) = smallest {
-            return deliver_output(
-                &best.path,
-                output,
-                best.size,
-                format!("{},best-effort", best.strategy),
-                best.quality,
-                false,
-                &progress,
-            );
-        }
-
-        Err(last_error.unwrap_or_else(|| {
-            CompressionError::SidecarFailed("Could not compress pdf".to_string())
-        }))
+        ladder.finish(ctx)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::{ProgressSender, SidecarPaths};
+    use std::path::PathBuf;
     use crate::sidecar::GsResources;
     use std::fs;
     use std::time::{Duration, Instant};
@@ -496,6 +496,9 @@ mod tests {
                 "-sDEVICE=pdfwrite".to_string(),
                 "-dPDFSETTINGS=/screen".to_string(),
                 "-r100".to_string(),
+                "-dColorImageResolution=100".to_string(),
+                "-dGrayImageResolution=100".to_string(),
+                "-dMonoImageResolution=100".to_string(),
                 "-dJPEGQ=40".to_string(),
                 "-dNOPAUSE".to_string(),
                 "-dQUIET".to_string(),
@@ -504,6 +507,36 @@ mod tests {
                 "/tmp/in.pdf".to_string(),
             ],
             "with no staged resources the argument vector is byte-identical to the pre-resources one"
+        );
+    }
+
+    #[test]
+    fn gs_args_pin_each_image_resolution_to_the_dpi_rung() {
+        let args = PdfProcessor::gs_args(
+            Some(50),
+            Some(25),
+            Path::new("/tmp/in.pdf"),
+            Path::new("/tmp/out.pdf"),
+            None,
+        );
+
+        for flag in [
+            "-r50",
+            "-dColorImageResolution=50",
+            "-dGrayImageResolution=50",
+            "-dMonoImageResolution=50",
+        ] {
+            assert!(
+                args.contains(&flag.to_string()),
+                "missing {flag} in {args:?}"
+            );
+        }
+        let rung = args.iter().position(|a| a == "-r50").unwrap();
+        assert!(
+            args[rung + 1..rung + 4]
+                .iter()
+                .all(|a| a.contains("ImageResolution=50")),
+            "image resolutions must follow -r and share its rung: {args:?}"
         );
     }
 
@@ -529,13 +562,38 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn fake_qpdf(dir: &Path, pass1_bytes: usize, pass2_bytes: usize) -> String {
+    fn qpdf_compression_lines(dir: &Path) -> Vec<String> {
+        fs::read_to_string(dir.join("qpdf.log"))
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| !line.contains("--show-npages"))
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[cfg(unix)]
+    fn fake_qpdf_with_pages(
+        dir: &Path,
+        name: &str,
+        pass1_bytes: usize,
+        pass2_bytes: usize,
+        input_pages: &str,
+        output_pages: &str,
+    ) -> String {
         make_executable_script(
             dir,
-            "fake-qpdf",
+            name,
             &format!(
                 r#"#!/bin/bash
 echo "qpdf $*" >> "$(dirname "$0")/qpdf.log"
+if [ "$1" = "--show-npages" ]; then
+  if [ "$2" = "$(dirname "$0")/in.pdf" ]; then
+    printf '{input_pages}\n'
+  else
+    printf '{output_pages}\n'
+  fi
+  exit 0
+fi
 out="${{@: -1}}"
 printf '%%PDF-' > "$out"
 case "$*" in
@@ -545,24 +603,51 @@ esac
 "#,
                 pass1 = pass1_bytes,
                 pass2 = pass2_bytes,
+                input_pages = input_pages,
+                output_pages = output_pages,
             ),
         )
     }
 
     #[cfg(unix)]
-    fn fake_qpdf_failing(dir: &Path, message: &str) -> String {
+    fn fake_qpdf(dir: &Path, pass1_bytes: usize, pass2_bytes: usize) -> String {
+        fake_qpdf_with_pages(dir, "fake-qpdf", pass1_bytes, pass2_bytes, "10", "10")
+    }
+
+    #[cfg(unix)]
+    fn fake_qpdf_failing_with_pages(
+        dir: &Path,
+        message: &str,
+        input_pages: &str,
+        output_pages: &str,
+    ) -> String {
         make_executable_script(
             dir,
             "fake-qpdf-fail",
             &format!(
                 r#"#!/bin/bash
 echo "qpdf $*" >> "$(dirname "$0")/qpdf.log"
+if [ "$1" = "--show-npages" ]; then
+  if [ "$2" = "$(dirname "$0")/in.pdf" ]; then
+    printf '{input_pages}\n'
+  else
+    printf '{output_pages}\n'
+  fi
+  exit 0
+fi
 echo "{message}" >&2
 exit 1
 "#,
                 message = message,
+                input_pages = input_pages,
+                output_pages = output_pages,
             ),
         )
+    }
+
+    #[cfg(unix)]
+    fn fake_qpdf_failing(dir: &Path, message: &str) -> String {
+        fake_qpdf_failing_with_pages(dir, message, "10", "10")
     }
 
     #[cfg(unix)]
@@ -594,6 +679,10 @@ exit 0
             &format!(
                 r#"#!/bin/bash
 echo "qpdf $*" >> "$(dirname "$0")/qpdf.log"
+if [ "$1" = "--show-npages" ]; then
+  printf '10\n'
+  exit 0
+fi
 out="${{@: -1}}"
 printf '%%PDF-' > "$out"
 case "$*" in
@@ -601,7 +690,7 @@ case "$*" in
   *) head -c $(( {pass1} - 5 )) /dev/zero >> "$out" ;;
 esac
 echo "WARNING: something recoverable happened" >&2
-exit 2
+exit 3
 "#,
                 pass1 = pass1_bytes,
                 pass2 = pass2_bytes,
@@ -700,7 +789,7 @@ exit 0
             "fake-gs-chatter",
             r#"#!/bin/bash
 echo "gs $*" >> "$(dirname "$0")/gs.log"
-printf 'HEAD_START%0585d' 0 >&2
+printf 'HEAD_START%3000d' 0 >&2
 printf 'TAIL_END\n' >&2
 exit 1
 "#,
@@ -752,7 +841,7 @@ esac
         let tmp = temp_dir_under(&dir.path());
 
         let result = PdfProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.pdf"),
                 2000,
@@ -761,15 +850,14 @@ esac
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
                 &tmp,
-            )
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         assert!(result.met_target, "strategy: {}", result.strategy_used);
         assert_eq!(result.strategy_used, "qpdf-lossless");
         assert_eq!(result.compressed_size, 1000);
 
-        let qpdf_log = fs::read_to_string(dir.path().join("qpdf.log")).unwrap();
-        let lines: Vec<&str> = qpdf_log.lines().collect();
+        let lines = qpdf_compression_lines(dir.path());
         assert_eq!(
             lines.len(),
             1,
@@ -795,7 +883,7 @@ esac
         let tmp = temp_dir_under(&dir.path());
 
         let result = PdfProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.pdf"),
                 2000,
@@ -804,7 +892,7 @@ esac
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
                 &tmp,
-            )
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         assert!(result.met_target, "strategy: {}", result.strategy_used);
@@ -812,8 +900,7 @@ esac
         assert!(result.strategy_used.contains("jpeg-quality=75"));
         assert_eq!(result.compressed_size, 1000);
 
-        let qpdf_log = fs::read_to_string(dir.path().join("qpdf.log")).unwrap();
-        let lines: Vec<&str> = qpdf_log.lines().collect();
+        let lines = qpdf_compression_lines(dir.path());
         assert_eq!(lines.len(), 2, "got: {:?}", lines);
         assert!(
             lines[1].contains("--optimize-images") && lines[1].contains("--jpeg-quality=75"),
@@ -826,48 +913,63 @@ esac
         );
     }
 
+    const EXPECTED_GRID: [(u32, u32); 16] = [
+        (100, 60),
+        (100, 40),
+        (100, 25),
+        (100, 15),
+        (72, 60),
+        (72, 40),
+        (72, 25),
+        (72, 15),
+        (50, 60),
+        (50, 40),
+        (50, 25),
+        (50, 15),
+        (36, 60),
+        (36, 40),
+        (36, 25),
+        (36, 15),
+    ];
+
+    fn gs_cells(passes: &[PdfPass]) -> Vec<(u32, u32)> {
+        passes
+            .iter()
+            .filter_map(|pass| match pass {
+                PdfPass::GsLadder { dpi, jpegq } => Some((*dpi, *jpegq)),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
-    #[cfg(unix)]
-    fn pdf_pass3_gs_screen_stops_early() {
-        let dir = tempfile::tempdir().unwrap();
-        let fake_qpdf = fake_qpdf(&dir.path(), 5000, 5000);
-        let fake_gs = fake_gs(&dir.path(), 1000, 1);
-        let input = oversized_input(&dir.path());
-        let tmp = temp_dir_under(&dir.path());
+    fn rungs_are_ordered_by_aggressiveness() {
+        let floors = QualityFloors {
+            pdf: crate::settings::PdfQualityFloor {
+                min_dpi: 36,
+                min_jpeg_quality: 15,
+            },
+            ..QualityFloors::default()
+        };
+        let passes = PdfProcessor::ladder_passes(&floors);
 
-        let result = PdfProcessor
-            .compress_to_target(
-                &input,
-                &dir.path().join("out.pdf"),
-                2000,
-                &QualityFloors::default(),
-                CancellationToken::new(),
-                ProgressSender::test_stub(),
-                &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
-                &tmp,
-            )
-            .unwrap();
-
-        assert!(result.met_target, "strategy: {}", result.strategy_used);
-        assert_eq!(result.strategy_used, "gs-screen");
-        assert_eq!(result.compressed_size, 1000);
-
-        let qpdf_log = fs::read_to_string(dir.path().join("qpdf.log")).unwrap();
-        assert_eq!(qpdf_log.lines().count(), 2);
-
-        let gs_log = fs::read_to_string(dir.path().join("gs.log")).unwrap();
-        let gs_lines: Vec<&str> = gs_log.lines().collect();
-        assert_eq!(gs_lines.len(), 1, "screen fitting must stop the ladder: {:?}", gs_lines);
-        assert!(
-            gs_lines[0].contains("-dPDFSETTINGS=/screen"),
-            "got: {}",
-            gs_lines[0]
+        assert!(matches!(passes[0], PdfPass::QpdfLossless));
+        assert!(matches!(passes[1], PdfPass::QpdfImageOpt));
+        assert_eq!(
+            passes.len(),
+            2 + EXPECTED_GRID.len(),
+            "lossless + image-opt + 16 grid cells, no separate 72 dpi screen rung"
         );
-        assert!(
-            gs_lines[0].contains("-sDEVICE=pdfwrite") && gs_lines[0].contains("-dNOPAUSE"),
-            "got: {}",
-            gs_lines[0]
-        );
+
+        let cells = gs_cells(&passes);
+        assert_eq!(cells, EXPECTED_GRID.to_vec());
+        for pair in cells.windows(2) {
+            let ((dpi_a, q_a), (dpi_b, q_b)) = (pair[0], pair[1]);
+            assert!(
+                dpi_a > dpi_b || (dpi_a == dpi_b && q_a > q_b),
+                "rungs must walk strictly decreasing dpi then decreasing JPEG quality: {pair:?}"
+            );
+        }
     }
 
     #[test]
@@ -885,7 +987,7 @@ esac
         });
 
         let result = PdfProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.pdf"),
                 2000,
@@ -894,12 +996,12 @@ esac
                 ProgressSender::test_stub(),
                 &paths,
                 &tmp,
-            )
+            ).with_declared(&Change::ALL))
             .unwrap();
 
-        assert_eq!(result.strategy_used, "gs-screen");
+        assert_eq!(result.strategy_used, "gs dpi=100,jpegq=15");
         let gs_log = fs::read_to_string(dir.path().join("gs.log")).unwrap();
-        let line = gs_log.lines().next().expect("the screen pass ran");
+        let line = gs_log.lines().next().expect("the first gs cell ran");
         let flags: Vec<&str> = line.split_whitespace().skip(1).collect();
         assert_eq!(
             &flags[..4],
@@ -931,7 +1033,7 @@ esac
         };
 
         let result = PdfProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.pdf"),
                 2000,
@@ -940,7 +1042,7 @@ esac
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
                 &tmp,
-            )
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         assert!(
@@ -964,8 +1066,13 @@ esac
 
         let gs_log = fs::read_to_string(dir.path().join("gs.log")).unwrap();
         let gs_lines: Vec<&str> = gs_log.lines().collect();
-        assert_eq!(gs_lines.len(), 17, "1 screen pass + 16 ladder cells: {:?}", gs_lines);
-        assert_eq!(fs::read_to_string(dir.path().join("qpdf.log")).unwrap().lines().count(), 2);
+        assert_eq!(
+            gs_lines.len(),
+            16,
+            "16 grid cells with no separate screen rung: {:?}",
+            gs_lines
+        );
+        assert_eq!(qpdf_compression_lines(dir.path()).len(), 2);
 
         let ladder: Vec<(u32, u32)> = gs_lines
             .iter()
@@ -1001,6 +1108,11 @@ esac
                 "gs args must carry -dPDFSETTINGS: {}",
                 line
             );
+            assert!(
+                line.contains("-sDEVICE=pdfwrite") && line.contains("-dNOPAUSE"),
+                "got: {}",
+                line
+            );
         }
     }
 
@@ -1014,7 +1126,7 @@ esac
         let tmp = temp_dir_under(&dir.path());
 
         let result = PdfProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.pdf"),
                 2000,
@@ -1023,7 +1135,7 @@ esac
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
                 &tmp,
-            )
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         assert!(!result.met_target);
@@ -1057,7 +1169,7 @@ esac
         let tmp = temp_dir_under(&dir.path());
 
         let result = PdfProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.pdf"),
                 2000,
@@ -1066,7 +1178,7 @@ esac
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
                 &tmp,
-            )
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         assert!(result.met_target);
@@ -1087,7 +1199,7 @@ esac
         let input = oversized_input(&dir.path());
         let tmp = temp_dir_under(&dir.path());
 
-        let result = PdfProcessor.compress_to_target(
+        let result = PdfProcessor.compress(&JobContext::new(
             &input,
             &dir.path().join("out.pdf"),
             2000,
@@ -1096,7 +1208,7 @@ esac
             ProgressSender::test_stub(),
             &test_sidecar_paths(Some(fake_qpdf), None),
             &tmp,
-        );
+        ).with_declared(&Change::ALL));
         match result {
             Err(e) => {
                 assert!(
@@ -1123,7 +1235,7 @@ esac
         let input = oversized_input(&dir.path());
         let tmp = temp_dir_under(&dir.path());
 
-        let result = PdfProcessor.compress_to_target(
+        let result = PdfProcessor.compress(&JobContext::new(
             &input,
             &dir.path().join("out.pdf"),
             2000,
@@ -1132,7 +1244,7 @@ esac
             ProgressSender::test_stub(),
             &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
             &tmp,
-        );
+        ).with_declared(&Change::ALL));
         match result {
             Err(CompressionError::SidecarFailed(msg)) => {
                 assert!(
@@ -1160,7 +1272,7 @@ esac
         let tmp = temp_dir_under(&dir.path());
 
         let result = PdfProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.pdf"),
                 2000,
@@ -1169,7 +1281,7 @@ esac
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
                 &tmp,
-            )
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         assert!(
@@ -1189,7 +1301,7 @@ esac
 
     #[test]
     #[cfg(unix)]
-    fn pdf_qpdf_exit_two_warnings_output_still_measures() {
+    fn pdf_qpdf_exit_three_warnings_output_still_measures() {
         let dir = tempfile::tempdir().unwrap();
         let fake_qpdf = fake_qpdf_warn_ok(&dir.path(), 1000, 1000);
         let fake_gs = fake_gs(&dir.path(), 100, 1);
@@ -1197,7 +1309,7 @@ esac
         let tmp = temp_dir_under(&dir.path());
 
         let result = PdfProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.pdf"),
                 2000,
@@ -1206,12 +1318,12 @@ esac
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
                 &tmp,
-            )
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         assert!(
             result.met_target,
-            "qpdf exit 2 (warnings) keeps its output: strategy {}",
+            "qpdf exit 3 (warnings) keeps its output: strategy {}",
             result.strategy_used
         );
         assert_eq!(result.strategy_used, "qpdf-lossless");
@@ -1231,26 +1343,26 @@ esac
             "sidecar-warn",
             r#"#!/bin/bash
 echo "hello" >&2
-exit 2
+exit 3
 "#,
         );
-        let fail3 = make_executable_script(
+        let fail2 = make_executable_script(
             &dir.path(),
-            "sidecar-fail3",
+            "sidecar-fail2",
             r#"#!/bin/bash
 echo "hard error" >&2
-exit 3
+exit 2
 "#,
         );
 
         let cancelled = CancellationToken::new();
         assert!(
             run_sidecar(&warn, "qpdf", &[], &cancelled, qpdf_tolerated_exit).is_ok(),
-            "qpdf exit 2 = warnings; output validity is decided by measure_output"
+            "qpdf exit 3 = warnings; output validity is decided by measure_output"
         );
-        match run_sidecar(&fail3, "qpdf", &[], &cancelled, qpdf_tolerated_exit) {
+        match run_sidecar(&fail2, "qpdf", &[], &cancelled, qpdf_tolerated_exit) {
             Err(CompressionError::SidecarFailed(msg)) => {
-                assert!(msg.contains("exited with code Some(3)"), "msg: {}", msg);
+                assert!(msg.contains("exited with code Some(2)"), "msg: {}", msg);
                 assert!(
                     !msg.contains("File may be corrupt"),
                     "exit code alone must not claim corruption: {}",
@@ -1261,26 +1373,52 @@ exit 3
         }
         match run_sidecar(&warn, "gs", &[], &cancelled, strict_exit) {
             Err(CompressionError::SidecarFailed(msg)) => {
-                assert!(msg.contains("exited with code Some(2)"), "msg: {}", msg);
+                assert!(msg.contains("exited with code Some(3)"), "msg: {}", msg);
                 assert!(
                     !msg.contains("File may be corrupt"),
                     "got: {}",
                     msg
                 );
             }
-            other => panic!("gs exit 2 is not a warning code, got {:?}", other.as_ref().map(|_| ())),
+            other => panic!("gs exit 3 is not a warning code, got {:?}", other.as_ref().map(|_| ())),
         }
     }
 
     #[test]
-    #[cfg(unix)]
-    fn pdf_floor_above_screen_rung_skips_gs_screen_pass() {
-        let dir = tempfile::tempdir().unwrap();
-        let fake_qpdf = fake_qpdf(&dir.path(), 600_000, 600_000);
-        let fake_gs = fake_gs(&dir.path(), 600_000, 1000);
-        let input = oversized_input(&dir.path());
-        let tmp = temp_dir_under(&dir.path());
+    fn qpdf_exit_three_is_a_warning_not_a_failure() {
+        assert!(qpdf_tolerated_exit("qpdf", Some(3)));
+        assert!(!qpdf_tolerated_exit("qpdf", Some(2)));
+        assert!(!qpdf_tolerated_exit("qpdf", Some(0)));
+        assert!(!qpdf_tolerated_exit("gs", Some(3)));
+    }
 
+    #[test]
+    #[cfg(unix)]
+    fn page_count_carries_the_qpdf_stderr_tail_into_the_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = make_executable_script(
+            &dir.path(),
+            "fake-qpdf-encrypted",
+            r#"#!/bin/bash
+if [ "$1" = "--show-npages" ]; then
+  echo "qpdf: invalid password" >&2
+  exit 3
+fi
+exit 0
+"#,
+        );
+        let input = dir.path().join("locked.pdf");
+        fs::write(&input, b"%PDF-1.4").unwrap();
+
+        let message = page_count(&input, &fake).unwrap_err().to_string();
+        assert!(
+            message.contains("invalid password"),
+            "an encrypted PDF must surface qpdf's reason, not just a parse failure: {message}"
+        );
+    }
+
+    #[test]
+    fn floor_above_the_72_dpi_rung_keeps_only_100_dpi_cells() {
         let floors = QualityFloors {
             pdf: crate::settings::PdfQualityFloor {
                 min_dpi: 81,
@@ -1289,45 +1427,11 @@ exit 3
             ..QualityFloors::default()
         };
 
-        let result = PdfProcessor
-            .compress_to_target(
-                &input,
-                &dir.path().join("out.pdf"),
-                2000,
-                &floors,
-                CancellationToken::new(),
-                ProgressSender::test_stub(),
-                &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
-                &tmp,
-            )
-            .unwrap();
-
-        assert!(!result.met_target, "nothing fits — best effort expected");
-        let gs_log = fs::read_to_string(dir.path().join("gs.log")).unwrap();
-        let screen_count = gs_log
-            .lines()
-            .filter(|l| l.contains("gs ") && !l.contains("-r"))
-            .count();
+        let cells = gs_cells(&PdfProcessor::ladder_passes(&floors));
         assert_eq!(
-            screen_count, 0,
-            "screen pass (72 DPI < minDpi 81) must be skipped: {:?}",
-            gs_log.lines().collect::<Vec<_>>()
-        );
-        let ladder: Vec<u32> = gs_log
-            .lines()
-            .filter(|l| l.contains("-r"))
-            .map(|l| {
-                l.split_whitespace()
-                    .find(|a| a.starts_with("-r"))
-                    .unwrap()[2..]
-                    .parse()
-                    .unwrap()
-            })
-            .collect();
-        assert_eq!(
-            ladder,
-            vec![100, 100, 100],
-            "floor min_dpi=81 truncates ladder to dpi>=81; screen pass absent"
+            cells,
+            vec![(100, 60), (100, 40), (100, 25)],
+            "min_dpi=81 drops the 72 dpi cells and no dpi-less screen rung exists"
         );
     }
 
@@ -1350,7 +1454,7 @@ exit 3
         let worker_token = token.clone();
         let started = Instant::now();
         let handle = std::thread::spawn(move || {
-            PdfProcessor.compress_to_target(
+            PdfProcessor.compress(&JobContext::new(
                 &worker_input,
                 &worker_output,
                 2000,
@@ -1359,7 +1463,7 @@ exit 3
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(worker_qpdf), Some(worker_gs)),
                 &worker_tmp,
-            )
+            ).with_declared(&Change::ALL))
         });
         std::thread::sleep(Duration::from_millis(300));
         token.cancel();
@@ -1392,7 +1496,7 @@ exit 3
         let input = oversized_input(&dir.path());
         let tmp = temp_dir_under(&dir.path());
 
-        let result = PdfProcessor.compress_to_target(
+        let result = PdfProcessor.compress(&JobContext::new(
             &input,
             &dir.path().join("out.pdf"),
             2000,
@@ -1401,14 +1505,10 @@ exit 3
             ProgressSender::test_stub(),
             &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
             &tmp,
-        );
+        ).with_declared(&Change::ALL));
         match result {
             Err(CompressionError::SidecarFailed(msg)) => {
-                assert!(
-                    msg.contains("exited with code Some(1)"),
-                    "msg: {}",
-                    msg
-                );
+                assert!(msg.contains("exited with code Some(1)"), "msg: {}", msg);
                 assert!(
                     msg.contains("TAIL_END"),
                     "last ~500 chars must be retained: {}",
@@ -1431,7 +1531,7 @@ exit 3
         let input = oversized_input(&dir.path());
         let tmp = temp_dir_under(&dir.path());
 
-        let without = PdfProcessor.compress_to_target(
+        let without = PdfProcessor.compress(&JobContext::new(
             &input,
             &dir.path().join("out.pdf"),
             2000,
@@ -1443,7 +1543,7 @@ exit 3
                 Some(fake_gs_stderr_chatter_failer(&dir.path())),
             ),
             &tmp,
-        );
+        ).with_declared(&Change::ALL));
         match without {
             Err(CompressionError::SidecarFailed(msg)) => {
                 assert!(
@@ -1458,10 +1558,7 @@ exit 3
                     msg
                 );
             }
-            other => panic!(
-                "expected SidecarFailed, got {:?}",
-                other.map(|r| r.strategy_used)
-            ),
+            other => panic!("expected SidecarFailed, got {:?}", other.map(|r| r.strategy_used)),
         }
 
         let staged_gs = fake_gs_stderr_chatter_failer(&dir.path());
@@ -1470,7 +1567,7 @@ exit 3
             Some(staged_gs.clone()),
         );
         paths.gs_resources = Some(gs_resources_fixture());
-        let with = PdfProcessor.compress_to_target(
+        let with = PdfProcessor.compress(&JobContext::new(
             &input,
             &dir.path().join("out2.pdf"),
             2000,
@@ -1479,24 +1576,17 @@ exit 3
             ProgressSender::test_stub(),
             &paths,
             &tmp,
-        );
+        ).with_declared(&Change::ALL));
         match with {
             Err(CompressionError::SidecarFailed(msg)) => {
-                assert!(
-                    msg.contains("exited with code Some(1)"),
-                    "msg: {}",
-                    msg
-                );
+                assert!(msg.contains("exited with code Some(1)"), "msg: {}", msg);
                 assert!(
                     !msg.contains("gs-resources/ tree is not available"),
                     "with the tree staged the hint is noise and must not be emitted: {}",
                     msg
                 );
             }
-            other => panic!(
-                "expected SidecarFailed, got {:?}",
-                other.map(|r| r.strategy_used)
-            ),
+            other => panic!("expected SidecarFailed, got {:?}", other.map(|r| r.strategy_used)),
         }
     }
 
@@ -1509,7 +1599,7 @@ exit 3
         let input = oversized_input(&dir.path());
         let tmp = temp_dir_under(&dir.path());
 
-        let result = PdfProcessor.compress_to_target(
+        let result = PdfProcessor.compress(&JobContext::new(
             &input,
             &dir.path().join("out.pdf"),
             2000,
@@ -1518,7 +1608,7 @@ exit 3
             ProgressSender::test_stub(),
             &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
             &tmp,
-        );
+        ).with_declared(&Change::ALL));
         match result {
             Err(e) => {
                 assert!(
@@ -1545,7 +1635,7 @@ exit 3
         let tmp = temp_dir_under(&dir.path());
 
         let result = PdfProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.pdf"),
                 2000,
@@ -1554,7 +1644,7 @@ exit 3
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
                 &tmp,
-            )
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         assert!(!result.met_target);
@@ -1574,6 +1664,176 @@ exit 3
             ladder,
             vec![100, 100, 100, 100, 72, 72, 72, 72],
             "default floors (minDpi=72, minJpegQuality=15) truncate the ladder, not hardcoded"
+        );
+    }
+
+    #[test]
+    fn image_optimisation_is_marked_lossy() {
+        let image_opt = PdfProcessor::pass_spec(
+            &PdfPass::QpdfImageOpt,
+            Path::new("/tmp/in.pdf"),
+            Path::new("/tmp/out.pdf"),
+            None,
+        );
+        let lossless = PdfProcessor::pass_spec(
+            &PdfPass::QpdfLossless,
+            Path::new("/tmp/in.pdf"),
+            Path::new("/tmp/out.pdf"),
+            None,
+        );
+
+        assert!(
+            image_opt.strategy.contains("lossy"),
+            "qpdf --optimize-images recompresses images and must be reported as lossy: {}",
+            image_opt.strategy
+        );
+        assert!(
+            !lossless.strategy.contains("lossy"),
+            "the linearise pass is lossless: {}",
+            lossless.strategy
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn gs_output_with_fewer_pages_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake_qpdf = fake_qpdf_failing_with_pages(&dir.path(), "qpdf: cannot process", "2", "1");
+        let fake_gs = fake_gs(&dir.path(), 1000, 1);
+        let input = oversized_input(&dir.path());
+        let tmp = temp_dir_under(&dir.path());
+
+        let result = PdfProcessor.compress(&JobContext::new(
+            &input,
+            &dir.path().join("out.pdf"),
+            2000,
+            &QualityFloors::default(),
+            CancellationToken::new(),
+            ProgressSender::test_stub(),
+            &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
+            &tmp,
+        ).with_declared(&Change::ALL));
+
+        match result {
+            Err(CompressionError::SidecarFailed(msg)) => {
+                assert!(
+                    msg.contains("page count mismatch"),
+                    "page loss must reject the attempt, got: {msg}"
+                );
+                assert!(
+                    msg.contains('2') && msg.contains('1'),
+                    "the mismatch must name both counts, got: {msg}"
+                );
+            }
+            other => panic!(
+                "an output with fewer pages must never be delivered, got {:?}",
+                other.map(|r| r.strategy_used)
+            ),
+        }
+        assert!(
+            !dir.path().join("out.pdf").exists(),
+            "no page-losing output may reach the destination"
+        );
+
+        let gs_runs = fs::read_to_string(dir.path().join("gs.log"))
+            .unwrap()
+            .lines()
+            .count();
+        assert!(
+            gs_runs > 1,
+            "a rejected rung must not stop the ladder, ran {gs_runs}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn page_count_probe_failure_rejects_the_attempt() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake_qpdf = fake_qpdf_failing_with_pages(
+            &dir.path(),
+            "qpdf: cannot process",
+            "2",
+            "not-a-page-count",
+        );
+        let fake_gs = fake_gs(&dir.path(), 1000, 1);
+        let input = oversized_input(&dir.path());
+        let tmp = temp_dir_under(&dir.path());
+
+        let result = PdfProcessor.compress(&JobContext::new(
+            &input,
+            &dir.path().join("out.pdf"),
+            2000,
+            &QualityFloors::default(),
+            CancellationToken::new(),
+            ProgressSender::test_stub(),
+            &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
+            &tmp,
+        ).with_declared(&Change::ALL));
+
+        match result {
+            Err(CompressionError::SidecarFailed(msg)) => {
+                assert!(
+                    msg.contains("unparsable page count"),
+                    "unparsable stdout is a failed rung, never a pass: {msg}"
+                );
+            }
+            other => panic!(
+                "an unverifiable output must not be delivered, got {:?}",
+                other.map(|r| r.strategy_used)
+            ),
+        }
+        assert!(!dir.path().join("out.pdf").exists());
+
+        let gs_runs = fs::read_to_string(dir.path().join("gs.log"))
+            .unwrap()
+            .lines()
+            .count();
+        assert!(
+            gs_runs > 1,
+            "a failed probe must not stop the ladder, ran {gs_runs}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn missing_qpdf_and_missing_gs_fail_fast() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake_qpdf = fake_qpdf(&dir.path(), 1000, 1000);
+        let fake_gs = fake_gs(&dir.path(), 100, 1);
+        let input = oversized_input(&dir.path());
+        let tmp = temp_dir_under(&dir.path());
+
+        let cases = [
+            (None, Some(fake_gs.clone()), "qpdf"),
+            (Some(fake_qpdf.clone()), None, "gs"),
+            (None, None, "qpdf"),
+        ];
+        for (qpdf, gs, expected) in cases {
+            let result = PdfProcessor.compress(&JobContext::new(
+                &input,
+                &dir.path().join("out.pdf"),
+                2000,
+                &QualityFloors::default(),
+                CancellationToken::new(),
+                ProgressSender::test_stub(),
+                &test_sidecar_paths(qpdf, gs),
+                &tmp,
+            ).with_declared(&Change::ALL));
+            match result {
+                Err(CompressionError::SidecarNotFound(name)) => assert_eq!(
+                    name, expected,
+                    "the first missing engine must surface before any spawn"
+                ),
+                other => panic!(
+                    "missing {expected} must fail fast, got {:?}",
+                    other.map(|r| r.strategy_used)
+                ),
+            }
+        }
+
+        assert!(
+            !dir.path().join("qpdf.log").exists() && !dir.path().join("gs.log").exists(),
+            "fail-fast: no engine may run when a required one is missing"
         );
     }
 
@@ -1624,7 +1884,7 @@ exit 3
 
         let tmp = temp_dir_under(&dir.path());
         let result = PdfProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.pdf"),
                 10 * 1024,
@@ -1633,13 +1893,152 @@ exit 3
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(qpdf), Some(gs)),
                 &tmp,
-            )
+            ).with_declared(&Change::ALL))
             .unwrap();
 
         assert!(
             result.compressed_size > 0 && fs::metadata(&dir.path().join("out.pdf")).unwrap().len() > 0,
             "output must be a real file, strategy: {}",
             result.strategy_used
+        );
+    }
+
+    /// A 4-inch page embedding the JPEG at 300 ppi at its native pixel size.
+    #[cfg(unix)]
+    fn write_full_page_jpeg_pdf(jpeg: &[u8], path: &Path) {
+        let content = b"q 288 0 0 288 0 0 cm /Im0 Do Q\n";
+        let objects = vec![
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 288 288] /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>".to_vec(),
+            format!(
+                "<< /Type /XObject /Subtype /Image /Width 1200 /Height 1200 \
+                 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /DCTDecode /Length {} >>\nstream\n",
+                jpeg.len()
+            )
+            .into_bytes()
+            .into_iter()
+            .chain(jpeg.iter().copied())
+            .chain(b"\nendstream".iter().copied())
+            .collect(),
+            format!("<< /Length {} >>\nstream\n", content.len())
+                .into_bytes()
+                .into_iter()
+                .chain(content.iter().copied())
+                .chain(b"endstream".iter().copied())
+                .collect(),
+        ];
+
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+            pdf.extend_from_slice(object);
+            pdf.extend_from_slice(b"\nendobj\n");
+        }
+        let xref = pdf.len();
+        pdf.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        for offset in offsets {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n",
+                objects.len() + 1,
+                xref
+            )
+            .as_bytes(),
+        );
+        fs::write(path, pdf).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[ignore = "requires real gs + qpdf sidecars on this machine"]
+    fn real_gs_72_dpi_rung_downamples_an_embedded_300_ppi_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let binaries = format!("{}/binaries", env!("CARGO_MANIFEST_DIR"));
+        let gs = format!(
+            "{}/{}",
+            binaries,
+            crate::sidecar::sidecar_filename("gs").unwrap()
+        );
+        let qpdf = format!(
+            "{}/{}",
+            binaries,
+            crate::sidecar::sidecar_filename("qpdf").unwrap()
+        );
+        assert!(Path::new(&gs).exists(), "gs sidecar missing: {}", gs);
+        assert!(Path::new(&qpdf).exists(), "qpdf sidecar missing: {}", qpdf);
+
+        let jpeg = dir.path().join("noise.jpg");
+        let generated = std::process::Command::new(&gs)
+            .args([
+                "-sDEVICE=jpeggray",
+                "-r300",
+                "-g1200x1200",
+                "-dNOPAUSE",
+                "-dBATCH",
+            ])
+            .arg(format!("-sOutputFile={}", jpeg.display()))
+            .args(["-c", "0.5 setgray 0 0 1200 1200 rectfill showpage"])
+            .output()
+            .expect("gs generates the 300 ppi jpeg");
+        assert!(
+            generated.status.success(),
+            "jpeg generation failed: {}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+
+        let input = dir.path().join("in.pdf");
+        write_full_page_jpeg_pdf(&fs::read(&jpeg).unwrap(), &input);
+        let output = dir.path().join("out.pdf");
+        let run = std::process::Command::new(&gs)
+            .args(PdfProcessor::gs_args(
+                Some(72),
+                Some(40),
+                &input,
+                &output,
+                None,
+            ))
+            .output()
+            .expect("gs downsamples the pdf");
+        assert!(
+            run.status.success(),
+            "gs failed: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+
+        let qdf = dir.path().join("out-qdf.pdf");
+        let converted = std::process::Command::new(&qpdf)
+            .args(["--qdf", "--object-streams=disable"])
+            .arg(&output)
+            .arg(&qdf)
+            .output()
+            .expect("qpdf expands the output");
+        assert!(
+            converted.status.success(),
+            "qpdf failed: {}",
+            String::from_utf8_lossy(&converted.stderr)
+        );
+
+        let expanded = String::from_utf8_lossy(&fs::read(&qdf).unwrap()).into_owned();
+        let image = expanded
+            .split("/Subtype /Image")
+            .nth(1)
+            .expect("output must contain an image");
+        let width: f64 = image
+            .split("/Width ")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|value| value.parse().ok())
+            .expect("image width must be readable");
+        let ppi = width / 4.0;
+        assert!(
+            (ppi - 72.0).abs() <= 3.0,
+            "a 1200 px image on a 4-inch page must be downsampled near 72 ppi, got {ppi} ppi ({width} px)"
         );
     }
 }

@@ -91,13 +91,14 @@ const settings: Settings = {
     document: { size: 2, unit: "MB" },
   },
   qualityFloors: {
-    image: { minQuality: 30 },
+    image: { minQuality: 30, minLongEdge: 1280 },
     video: { minCrf: 28, minResolution: "720p" },
     pdf: { minDpi: 72, minJpegQuality: 15 },
     document: { minMediaQuality: 40 },
   },
-  performance: { maxConcurrent: "auto" },
+  performance: { adaptiveMemory: true, memoryCeilingMb: 2048 },
   history: { retentionDays: 90 },
+  consent: { allowDestructive: false, heicToJpg: true },
 }
 
 const emptyHistory: HistoryResponse = {
@@ -143,6 +144,7 @@ function makeSession(startedAt: number, sessionId = "s1"): HistorySession {
       cancelled: 0,
       unsupported: 0,
       alreadyUnderTarget: 0,
+      needsPermission: 0,
     },
     totalSavedBytes: 1_024,
     cancelled: false,

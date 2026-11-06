@@ -29,6 +29,18 @@ export type FileStatus =
   | 'cancelled'
   | 'unsupported'
   | 'already_under_target'
+  | 'needs_permission'
+
+export type Change =
+  | 'lossy_encode'
+  | 'downscale'
+  | 'drop_stream'
+  | 'format_change'
+  | 'metadata_strip'
+  | 'rasterize'
+  | 'page_drop'
+
+export type ConsentSource = 'default' | 'global' | 'category' | 'batch' | 'once'
 
 export interface FileEntry {
   id: string
@@ -51,20 +63,24 @@ export interface CategoryTarget {
 }
 
 export interface QualityFloors {
-  image: { minQuality: number }
+  image: { minQuality: number; minLongEdge: number }
   video: { minCrf: number; minResolution: string }
   pdf: { minDpi: number; minJpegQuality: number }
   document: { minMediaQuality: number }
 }
 
-export type MaxConcurrent = 'auto' | '1' | '2' | '3'
-
 export interface PerformanceSettings {
-  maxConcurrent: MaxConcurrent
+  adaptiveMemory: boolean
+  memoryCeilingMb: number
 }
 
 export interface HistorySettings {
   retentionDays: number
+}
+
+export interface ConsentSettings {
+  allowDestructive: boolean
+  heicToJpg: boolean
 }
 
 export interface Settings {
@@ -73,6 +89,7 @@ export interface Settings {
   qualityFloors: QualityFloors
   performance: PerformanceSettings
   history: HistorySettings
+  consent: ConsentSettings
 }
 
 export interface HistoryFile {
@@ -89,6 +106,8 @@ export interface HistoryFile {
   error: string | null
   durationMs: number
   completedAt: number
+  changes: Change[]
+  consentSource: ConsentSource | null
 }
 
 export interface SessionOutcome {
@@ -98,6 +117,7 @@ export interface SessionOutcome {
   cancelled: number
   unsupported: number
   alreadyUnderTarget: number
+  needsPermission: number
 }
 
 export interface HistorySession {

@@ -65,6 +65,8 @@ function makeFile(
     error: null,
     durationMs: 100,
     completedAt: 0,
+    changes: [],
+    consentSource: null,
   }
 }
 
@@ -99,6 +101,7 @@ function makeSession({
       cancelled: 0,
       unsupported: 0,
       alreadyUnderTarget: 0,
+      needsPermission: 0,
     },
     totalSavedBytes,
     cancelled,

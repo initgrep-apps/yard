@@ -145,6 +145,18 @@ export function RunHeader({
             Batch #{batchNumber}
           </span>
           {statusPill(running, batchError, cancelled)}
+          {counts.waiting > 0 && (
+            <span
+              data-testid="consent-waiting"
+              className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-[11px] py-1 text-[11px] font-semibold text-amber-600"
+            >
+              <span
+                aria-hidden
+                className="size-1.5 rounded-full bg-amber-500"
+              />
+              {counts.waiting} waiting for permission
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2">
           {running ? (

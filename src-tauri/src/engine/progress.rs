@@ -64,6 +64,23 @@ impl ProgressSender {
     pub fn send_progress(&self, percent: u32) {
         (self.emit)(percent.clamp(0, 100));
     }
+
+    /// Maps attempt-local 0..=100 onto a single pre-delivery ceiling and
+    /// suppresses any value below the high-water mark, so multiple attempts
+    /// can share one progress bar without double scaling or regressions.
+    pub(crate) fn scaled(&self, ceiling: u32) -> Self {
+        let inner = self.clone();
+        let high_water = Arc::new(std::sync::Mutex::new(0u32));
+        Self::new_with_emitter(Arc::new(move |percent| {
+            let mapped = (percent.min(100) * ceiling) / 100;
+            let mut sent = high_water.lock().unwrap();
+            if mapped > *sent {
+                *sent = mapped;
+                drop(sent);
+                inner.send_progress(mapped);
+            }
+        }))
+    }
 }
 
 #[cfg(test)]

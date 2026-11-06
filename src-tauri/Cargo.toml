@@ -4,6 +4,7 @@ version = "1.0.0"
 description = "Yard — offline batch file processing"
 authors = ["you"]
 edition = "2021"
+default-run = "yard"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -27,7 +28,8 @@ tauri-plugin-window-state = "2"
 tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["sync", "rt", "macros"] }
+tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros", "time"] }
+sysinfo = "0.39"
 tokio-util = "0.7"
 uuid = { version = "1", features = ["v4"] }
 dirs = "7"
@@ -46,11 +48,15 @@ libc = "0.2"
 name = "macos_menu"
 harness = false
 
+[[bin]]
+name = "fake_engine"
+path = "src/bin/fake_engine.rs"
+
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]
 codegen-units = 1
 lto = true
 opt-level = 3
-panic = "abort"
+panic = "unwind"
 strip = true

@@ -32,7 +32,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { toast } from 'sonner'
 import type { FileEntry } from '@/types'
 
-const WATCHDOG_MS = 10 * 60 * 1000
+const WATCHDOG_MS = 35 * 60 * 1000
 
 const emit = (event: string, payload: unknown) =>
   act(() => {
@@ -143,6 +143,28 @@ describe('useCompression event handling', () => {
       status: 'done',
       compressedSize: 500,
       outputPath: '/o/a.jpg',
+    })
+  })
+
+  it('needs_permission keeps no output and surfaces the reason', async () => {
+    const { result } = setup([entry()])
+    await flush()
+    emit('file:progress', { fileId: 'f1', percent: 40 })
+    emit('file:complete', {
+      fileId: 'f1',
+      outputPath: '',
+      originalSize: 1024,
+      compressedSize: 0,
+      status: 'needs_permission',
+      metTarget: false,
+      reason: 'Needs permission: downscale',
+    })
+    expect(result.current.comp.progressByFile['f1']).toBeUndefined()
+    expect(result.current.files[0]).toMatchObject({
+      status: 'needs_permission',
+      compressedSize: null,
+      outputPath: null,
+      error: 'Needs permission: downscale',
     })
   })
 

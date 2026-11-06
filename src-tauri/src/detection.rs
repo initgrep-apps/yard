@@ -17,18 +17,7 @@
 use crate::models::Category;
 
 pub fn detect_category(filename: &str) -> Category {
-    let ext = std::path::Path::new(filename)
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_lowercase())
-        .unwrap_or_default();
-    match ext.as_str() {
-        "jpg" | "jpeg" | "png" | "webp" | "heic" | "heif" => Category::Image,
-        "mp4" | "mov" => Category::Video,
-        "pdf" => Category::Pdf,
-        "docx" | "xlsx" | "pptx" => Category::Document,
-        _ => Category::Other,
-    }
+    crate::registry::by_name(filename).map_or(Category::Other, |file_type| file_type.category)
 }
 
 #[cfg(test)]
@@ -49,32 +38,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_detect_image_formats() {
-        assert_eq!(detect_category("photo.jpg"), Category::Image);
-        assert_eq!(detect_category("photo.JPEG"), Category::Image);
-        assert_eq!(detect_category("photo.png"), Category::Image);
-        assert_eq!(detect_category("photo.webp"), Category::Image);
-        assert_eq!(detect_category("photo.heic"), Category::Image);
-        assert_eq!(detect_category("photo.heif"), Category::Image);
-    }
-
-    #[test]
-    fn test_detect_video_formats() {
-        assert_eq!(detect_category("video.mp4"), Category::Video);
-        assert_eq!(detect_category("video.MOV"), Category::Video);
-    }
-
-    #[test]
-    fn test_detect_pdf() {
-        assert_eq!(detect_category("doc.pdf"), Category::Pdf);
-        assert_eq!(detect_category("doc.PDF"), Category::Pdf);
-    }
-
-    #[test]
-    fn test_detect_document_formats() {
-        assert_eq!(detect_category("report.docx"), Category::Document);
-        assert_eq!(detect_category("sheet.xlsx"), Category::Document);
-        assert_eq!(detect_category("slides.pptx"), Category::Document);
+    fn detect_category_agrees_with_every_registry_row() {
+        for row in crate::registry::FILE_TYPES {
+            let name = format!("file.{}", row.ext);
+            assert_eq!(detect_category(&name), row.category, "ext: {}", row.ext);
+            assert_eq!(
+                detect_category(&name.to_uppercase()),
+                row.category,
+                "uppercase ext: {}",
+                row.ext
+            );
+        }
     }
 
     #[test]
@@ -91,18 +65,6 @@ mod tests {
         assert_eq!(default_target_bytes(Category::Pdf), 2 * 1024 * 1024);
         assert_eq!(default_target_bytes(Category::Document), 1 * 1024 * 1024);
         assert_eq!(default_target_bytes(Category::Other), 0);
-    }
-
-    #[test]
-    fn test_detect_case_insensitivity_all() {
-        assert_eq!(detect_category("photo.PNG"), Category::Image);
-        assert_eq!(detect_category("photo.WEBP"), Category::Image);
-        assert_eq!(detect_category("photo.HEIC"), Category::Image);
-        assert_eq!(detect_category("photo.HEIF"), Category::Image);
-        assert_eq!(detect_category("video.MP4"), Category::Video);
-        assert_eq!(detect_category("report.DOCX"), Category::Document);
-        assert_eq!(detect_category("sheet.XLSX"), Category::Document);
-        assert_eq!(detect_category("slides.PPTX"), Category::Document);
     }
 
     #[test]

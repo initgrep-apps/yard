@@ -24,6 +24,7 @@ const CATEGORY_KEYS: Record<Category, true> = {
 const STATUS_KEYS: Record<FileStatus, true> = {
   pending: true, compressing: true, done: true, best_effort: true,
   failed: true, cancelled: true, unsupported: true, already_under_target: true,
+  needs_permission: true,
 }
 const ALL_CATEGORIES = Object.keys(CATEGORY_KEYS) as Category[]
 const ALL_STATUSES = Object.keys(STATUS_KEYS) as FileStatus[]

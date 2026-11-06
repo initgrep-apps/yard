@@ -71,6 +71,7 @@ const STATUS_LABELS: Record<FilterableStatus, string> = {
   failed: "Failed",
   cancelled: "Cancelled",
   already_under_target: "Under target",
+  needs_permission: "Needs permission",
   unsupported: "Unsupported",
 }
 

@@ -15,6 +15,9 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
+
+use crate::policy::ConsentSettings;
 
 const KB: u64 = 1024;
 const MB: u64 = 1024 * 1024;
@@ -30,11 +33,20 @@ pub struct CategoryTarget {
 #[serde(rename_all = "camelCase")]
 pub struct ImageQualityFloor {
     pub min_quality: u32,
+    #[serde(default = "default_min_long_edge")]
+    pub min_long_edge: u32,
+}
+
+fn default_min_long_edge() -> u32 {
+    1280
 }
 
 impl ImageQualityFloor {
     fn spec_default() -> Self {
-        ImageQualityFloor { min_quality: 30 }
+        ImageQualityFloor {
+            min_quality: 30,
+            min_long_edge: default_min_long_edge(),
+        }
     }
 }
 
@@ -85,15 +97,17 @@ impl DocumentQualityFloor {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct Performance {
-    pub max_concurrent: String,
+    pub adaptive_memory: bool,
+    pub memory_ceiling_mb: u32,
 }
 
 impl Default for Performance {
     fn default() -> Self {
         Performance {
-            max_concurrent: "auto".to_string(),
+            adaptive_memory: true,
+            memory_ceiling_mb: 2048,
         }
     }
 }
@@ -169,6 +183,8 @@ pub struct Settings {
     pub performance: Performance,
     #[serde(default)]
     pub history: HistorySettings,
+    #[serde(default)]
+    pub consent: ConsentSettings,
 }
 
 fn default_category_targets() -> std::collections::HashMap<String, CategoryTarget> {
@@ -212,6 +228,7 @@ impl Default for Settings {
             quality_floors: QualityFloors::default(),
             performance: Performance::default(),
             history: HistorySettings::default(),
+            consent: ConsentSettings::default(),
         }
     }
 }
@@ -236,34 +253,24 @@ impl Settings {
             None => 0,
         }
     }
+}
 
-    pub fn resolve_max_concurrent(&self) -> u32 {
-        let cores = match std::thread::available_parallelism() {
-            Ok(n) => n.get() as u32,
-            Err(e) => {
-                eprintln!("warn: available_parallelism() failed, assuming 1 core: {e}");
-                1
-            }
-        };
-        self.resolve_max_concurrent_from(cores)
-    }
-
-    pub fn resolve_max_concurrent_from(&self, cores: u32) -> u32 {
-        let auto = (cores.max(1) / 2).clamp(1, 4);
-        match self.performance.max_concurrent.as_str() {
-            "1" => 1,
-            "2" => 2,
-            "3" => 3,
-            "auto" => auto,
-            raw => {
-                eprintln!("warn: invalid performance.maxConcurrent {raw:?}, using 1");
-                1
-            }
-        }
-    }
+fn warn_legacy_max_concurrent() {
+    static WARNED: OnceLock<()> = OnceLock::new();
+    WARNED.get_or_init(|| {
+        eprintln!("warn: legacy performance.maxConcurrent ignored; use adaptiveMemory and memoryCeilingMb");
+    });
 }
 
 pub fn parse_settings_value(value: Option<serde_json::Value>) -> Settings {
+    if let Some(ref v) = value {
+        if v.get("performance")
+            .and_then(|p| p.get("maxConcurrent"))
+            .is_some()
+        {
+            warn_legacy_max_concurrent();
+        }
+    }
     match value {
         Some(v) => serde_json::from_value(v).unwrap_or_else(|e| {
             eprintln!("warn: settings parse failed, using defaults: {e}");
@@ -287,6 +294,7 @@ mod tests {
         assert_eq!(s.category_targets.get("pdf").unwrap().size, 2);
         assert_eq!(s.category_targets.get("document").unwrap().size, 1);
         assert_eq!(s.quality_floors.image.min_quality, 30);
+        assert_eq!(s.quality_floors.image.min_long_edge, 1280);
         assert_eq!(s.quality_floors.video.min_crf, 28);
         assert_eq!(s.quality_floors.video.min_resolution, "480p");
         assert_eq!(s.quality_floors.pdf.min_dpi, 72);
@@ -295,8 +303,19 @@ mod tests {
     }
 
     #[test]
-    fn test_target_bytes_conversion() {
+    fn consent_defaults_deny_destructive_and_allow_heic_to_jpg() {
         let s = Settings::default();
+        assert!(!s.consent.allow_destructive);
+        assert!(s.consent.heic_to_jpg);
+        let value = serde_json::to_value(&s).unwrap();
+        assert_eq!(value["consent"]["allowDestructive"], false);
+        assert_eq!(value["consent"]["heicToJpg"], true);
+        let roundtripped: Settings = serde_json::from_value(value).unwrap();
+        assert_eq!(roundtripped.consent, s.consent);
+    }
+
+    #[test]
+    fn test_target_bytes_conversion() {        let s = Settings::default();
         assert_eq!(s.target_bytes_for("image"), 200 * 1024);
         assert_eq!(s.target_bytes_for("video"), 10 * 1024 * 1024);
         assert_eq!(s.target_bytes_for("pdf"), 2 * 1024 * 1024);
@@ -310,6 +329,7 @@ mod tests {
         assert!(value.get("categoryTargets").is_some());
         let floors = value.get("qualityFloors").unwrap();
         assert!(floors.get("image").unwrap().get("minQuality").is_some());
+        assert!(floors.get("image").unwrap().get("minLongEdge").is_some());
         assert!(floors.get("video").unwrap().get("minCrf").is_some());
         assert!(floors.get("pdf").unwrap().get("minJpegQuality").is_some());
         assert!(floors
@@ -382,41 +402,29 @@ mod tests {
     }
 
     #[test]
-    fn performance_defaults_to_auto() {
-        let s = Settings::default();
-        assert_eq!(s.performance.max_concurrent, "auto");
+    fn parse_settings_value_partial_consent_keeps_heic_default() {
+        let partial = serde_json::json!({ "consent": { "allowDestructive": true } });
+        let parsed = parse_settings_value(Some(partial));
+        assert!(parsed.consent.allow_destructive);
+        assert!(
+            parsed.consent.heic_to_jpg,
+            "an omitted consent field must keep HEIC conversion on, not reset the object"
+        );
     }
 
     #[test]
-    fn resolve_max_concurrent_auto_clamps_cores() {
+    fn performance_defaults_to_adaptive_2048() {
         let s = Settings::default();
-        assert_eq!(s.resolve_max_concurrent_from(1), 1);
-        assert_eq!(s.resolve_max_concurrent_from(2), 1);
-        assert_eq!(s.resolve_max_concurrent_from(3), 1);
-        assert_eq!(s.resolve_max_concurrent_from(4), 2);
-        assert_eq!(s.resolve_max_concurrent_from(8), 4);
-        assert_eq!(s.resolve_max_concurrent_from(16), 4);
-        assert_eq!(s.resolve_max_concurrent_from(0), 1);
-    }
-
-    #[test]
-    fn resolve_max_concurrent_manual_verbatim() {
-        let mut s = Settings::default();
-        for (raw, want) in [("1", 1), ("2", 2), ("3", 3), ("5", 1), ("", 1)] {
-            s.performance.max_concurrent = raw.to_string();
-            assert_eq!(s.resolve_max_concurrent_from(16), want, "raw={raw}");
-        }
-        for (raw, want) in [("1", 1), ("2", 2), ("3", 3)] {
-            s.performance.max_concurrent = raw.to_string();
-            assert_eq!(s.resolve_max_concurrent_from(1), want, "raw={raw}");
-        }
+        assert!(s.performance.adaptive_memory);
+        assert_eq!(s.performance.memory_ceiling_mb, 2048);
     }
 
     #[test]
     fn performance_serde_roundtrip_camel_case() {
         let value = serde_json::to_value(Settings::default()).unwrap();
         let perf = value.get("performance").unwrap();
-        assert!(perf.get("maxConcurrent").is_some());
+        assert!(perf.get("adaptiveMemory").is_some());
+        assert!(perf.get("memoryCeilingMb").is_some());
         let roundtripped: Settings = serde_json::from_value(value).unwrap();
         assert_eq!(Settings::default(), roundtripped);
     }
@@ -425,7 +433,8 @@ mod tests {
     fn parse_settings_value_missing_performance_fills_default() {
         let partial = serde_json::json!({ "outputFolder": "/tmp/out" });
         let parsed = parse_settings_value(Some(partial));
-        assert_eq!(parsed.performance.max_concurrent, "auto");
+        assert!(parsed.performance.adaptive_memory);
+        assert_eq!(parsed.performance.memory_ceiling_mb, 2048);
     }
 
     #[test]
@@ -434,7 +443,27 @@ mod tests {
             "outputFolder": "/x",
             "performance": {}
         });
-        assert_eq!(parse_settings_value(Some(corrupt)), Settings::default());
+        let parsed = parse_settings_value(Some(corrupt));
+        assert_eq!(parsed.output_folder, "/x");
+        assert_eq!(parsed.performance, Performance::default());
+    }
+
+    #[test]
+    fn old_settings_with_max_concurrent_still_load() {
+        let legacy = serde_json::json!({
+            "outputFolder": "/custom/out",
+            "categoryTargets": { "image": { "size": 300, "unit": "KB" } },
+            "performance": { "maxConcurrent": "3" }
+        });
+        let parsed = parse_settings_value(Some(legacy));
+        assert_eq!(parsed.output_folder, "/custom/out");
+        assert_eq!(
+            parsed.category_targets.get("image").unwrap().size,
+            300,
+            "unrelated fields preserved"
+        );
+        assert!(parsed.performance.adaptive_memory);
+        assert_eq!(parsed.performance.memory_ceiling_mb, 2048);
     }
 
     #[test]
@@ -542,10 +571,33 @@ mod tests {
         assert_eq!(parsed.output_folder, "/tmp/out");
         assert_eq!(parsed.category_targets.get("image").unwrap().size, 200);
         assert_eq!(parsed.quality_floors.image.min_quality, 30);
+        assert_eq!(parsed.quality_floors.image.min_long_edge, 1280);
         assert_eq!(parsed.quality_floors.video.min_crf, 28);
         assert_eq!(parsed.quality_floors.video.min_resolution, "480p");
         assert_eq!(parsed.quality_floors.pdf.min_dpi, 72);
         assert_eq!(parsed.quality_floors.pdf.min_jpeg_quality, 15);
         assert_eq!(parsed.quality_floors.document.min_media_quality, 40);
+    }
+
+    #[test]
+    fn long_edge_floor_is_a_setting() {
+        let defaults = Settings::default();
+        assert_eq!(defaults.quality_floors.image.min_long_edge, 1280);
+
+        let mut custom = defaults.clone();
+        custom.quality_floors.image.min_long_edge = 1600;
+        let value = serde_json::to_value(&custom).unwrap();
+        assert_eq!(value["qualityFloors"]["image"]["minLongEdge"], 1600);
+        let roundtripped: Settings = serde_json::from_value(value).unwrap();
+        assert_eq!(roundtripped, custom);
+    }
+
+    #[test]
+    fn stored_image_floor_without_long_edge_keeps_its_quality() {
+        let parsed = parse_settings_value(Some(serde_json::json!({
+            "qualityFloors": { "image": { "minQuality": 60 } }
+        })));
+        assert_eq!(parsed.quality_floors.image.min_quality, 60);
+        assert_eq!(parsed.quality_floors.image.min_long_edge, 1280);
     }
 }

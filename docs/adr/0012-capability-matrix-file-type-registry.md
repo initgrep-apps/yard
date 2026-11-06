@@ -2,6 +2,20 @@
 
 Extension knowledge currently lives in three places — `detection.rs`, each processor's `supported_extensions`, and the output-name rewrite in `queue.rs` — so adding a file type means three edits and a silent failure if one is missed. Replace them with one registry table: extension → category → output extension → processor → declared capabilities. Consent rules become a second table, `(category, capability) → allowed | needs consent | denied`, where capability is one of a closed set of seven change kinds: lossy encode, downscale, drop stream, format change, metadata strip, rasterise, page drop. Each ladder rung declares the capabilities it needs; one policy lookup returns the verdict. There is no rule engine, no config file and no scripting surface — the tables are Rust constants.
 
+The shipped 7 × 5 matrix, which `src-tauri/src/policy.rs` implements and its `matrix_matches_the_agreed_table` test pins:
+
+| Change | Image | Video | Pdf | Document | Other |
+|---|---|---|---|---|---|
+| LossyEncode | Allowed | Allowed | Allowed | Allowed | Denied |
+| Downscale | NeedsConsent | NeedsConsent | Denied | Denied | Denied |
+| DropStream | Denied | NeedsConsent | Denied | Denied | Denied |
+| FormatChange | NeedsConsent | NeedsConsent | Denied | Denied | Denied |
+| MetadataStrip | Allowed | Allowed | Allowed | Allowed | Denied |
+| Rasterize | Denied | Denied | NeedsConsent | Denied | Denied |
+| PageDrop | Denied | Denied | Denied | Denied | Denied |
+
+Image `FormatChange` is additionally granted by default through `consent.heicToJpg = true`, so HEIC/HEIF → JPEG runs without a prompt and is recorded as consent source `default`. Turning that setting off makes the pre-flight prompt ask for it. No default grant covers MOV → MP4.
+
 ## Considered Options
 
 - **Two constant tables (chosen).** Adding a file type is one row; adding a capability is one enum variant and one column; policy is testable as data.
@@ -11,7 +25,7 @@ Extension knowledge currently lives in three places — `detection.rs`, each pro
 
 ## Consequences
 
-- Detection, the processor registry, output naming and the capability matrix all read the same rows.
+- Detection, the processor registry and output naming read the same rows. The capability matrix is a separate literal array indexed by `Category`; it does not read the registry.
 - A rung cannot change something it did not declare; the policy lookup is the only place that decides.
 - `MetadataStrip` is not a consent row: orientation and ICC are never stripped, and bulky non-visual data is stripped silently and reported.
 - A new file type still needs a processor, but no other file needs editing.

@@ -16,6 +16,8 @@
 
 use std::path::PathBuf;
 
+use crate::policy::{Change, ConsentSource};
+
 pub const STRATEGY_ALREADY_UNDER_TARGET: &str = "already-under-target";
 
 #[derive(Debug)]
@@ -25,6 +27,8 @@ pub struct CompressionResult {
     pub quality_used: u32,
     pub met_target: bool,
     pub strategy_used: String,
+    pub changes: Vec<Change>,
+    pub consent: ConsentSource,
 }
 
 impl CompressionResult {
@@ -36,6 +40,7 @@ impl CompressionResult {
 #[derive(Debug, Clone)]
 pub enum CompressionError {
     Cancelled,
+    NeedsPermission(String),
     SidecarNotFound(String),
     SidecarFailed(String),
     InputFileError(String),
@@ -48,6 +53,7 @@ impl std::fmt::Display for CompressionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CompressionError::Cancelled => write!(f, "Cancelled"),
+            CompressionError::NeedsPermission(reason) => write!(f, "{}", reason),
             CompressionError::SidecarNotFound(name) => {
                 write!(f, "Engine error: {} not available", name)
             }
@@ -69,10 +75,14 @@ mod tests {
     #[test]
     fn compression_error_display_strings_match_spec_wording() {
         // (variant, expected) copy table — spec §6 wording is user-facing.
-        // The exhaustive match below has NO wildcard arm, so adding an 8th
-        // variant fails this build until the table is extended.
+        // The exhaustive match below has NO wildcard arm, so adding a variant
+        // fails this build until the table is extended.
         let cases: Vec<(CompressionError, &str)> = vec![
             (CompressionError::Cancelled, "Cancelled"),
+            (
+                CompressionError::NeedsPermission("Needs permission: downscale".into()),
+                "Needs permission: downscale",
+            ),
             (
                 CompressionError::SidecarNotFound("vips".into()),
                 "Engine error: vips not available",
@@ -94,12 +104,13 @@ mod tests {
         ];
         assert_eq!(
             cases.len(),
-            7,
+            8,
             "copy table must cover every CompressionError variant"
         );
         for (i, (err, expected)) in cases.into_iter().enumerate() {
             match &err {
                 CompressionError::Cancelled => {}
+                CompressionError::NeedsPermission(_) => {}
                 CompressionError::SidecarNotFound(_) => {}
                 CompressionError::SidecarFailed(_) => {}
                 CompressionError::InputFileError(_) => {}

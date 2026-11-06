@@ -15,7 +15,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
-import { Clock, FolderOpen, Settings as SettingsIcon, ShieldCheck, SlidersHorizontal, Zap } from "lucide-react"
+import { Clock, FolderOpen, Settings as SettingsIcon, ShieldAlert, ShieldCheck, SlidersHorizontal, Zap } from "lucide-react"
 import { toast } from "sonner"
 import {
   AlertDialog,
@@ -54,12 +54,17 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Toggle } from "@/components/ui/toggle"
 import { NumberStepper } from "@/components/NumberStepper"
+import { useMemory } from "@/hooks/useMemory"
 import { useSettings } from "@/hooks/useSettings"
+import { formatSize } from "@/lib/sizeFormat"
 import { useHistoryContext } from "@/providers/HistoryProvider"
 import type {
   Category,
   CategoryTarget,
+  ConsentSettings,
+  PerformanceSettings,
   QualityFloors,
   Settings,
 } from "@/types"
@@ -78,6 +83,7 @@ const SECTIONS = [
   { value: "general", label: "General", icon: SettingsIcon },
   { value: "targets", label: "Targets", icon: SlidersHorizontal },
   { value: "floors", label: "Quality floors", icon: ShieldCheck },
+  { value: "consent", label: "Consent", icon: ShieldAlert },
   { value: "performance", label: "Performance", icon: Zap },
   { value: "history", label: "History", icon: Clock },
 ] as const
@@ -223,7 +229,10 @@ function FloorsSection({ draft, onChange }: SectionProps) {
               id="image-min-quality"
               value={floors.image.minQuality}
               onValueChange={(minQuality) =>
-                setFloors({ ...floors, image: { minQuality } })
+                setFloors({
+                  ...floors,
+                  image: { ...floors.image, minQuality },
+                })
               }
               min={0}
               max={100}
@@ -231,6 +240,28 @@ function FloorsSection({ draft, onChange }: SectionProps) {
               className="w-32"
             />
             <span className="w-4 text-xs text-muted-foreground">%</span>
+          </div>
+        </Field>
+        <Field orientation="horizontal">
+          <FieldLabel htmlFor="image-min-long-edge">
+            Images minimum long edge
+          </FieldLabel>
+          <div className="flex shrink-0 items-center gap-1.5">
+            <NumberStepper
+              id="image-min-long-edge"
+              value={floors.image.minLongEdge}
+              onValueChange={(minLongEdge) =>
+                setFloors({
+                  ...floors,
+                  image: { ...floors.image, minLongEdge },
+                })
+              }
+              min={1}
+              max={10000}
+              ariaLabel="Images minimum long edge"
+              className="w-32"
+            />
+            <span className="w-6 text-xs text-muted-foreground">px</span>
           </div>
         </Field>
         <Field orientation="horizontal">
@@ -339,40 +370,134 @@ function FloorsSection({ draft, onChange }: SectionProps) {
   )
 }
 
+function ConsentSection({ draft, onChange }: SectionProps) {
+  const setConsent = (patch: Partial<ConsentSettings>) =>
+    onChange({ ...draft, consent: { ...draft.consent, ...patch } })
+
+  return (
+    <FieldSet>
+      <FieldLegend>Consent</FieldLegend>
+      <FieldDescription>
+        These grants apply to every batch. Anything not granted here is asked
+        for in the batch pre-flight.
+      </FieldDescription>
+      <FieldGroup>
+        <Field orientation="horizontal">
+          <FieldContent>
+            <FieldLabel>Allow destructive changes</FieldLabel>
+            <FieldDescription>
+              Fewer pixels, dropped streams or pages, format changes, and
+              rasterisation.
+            </FieldDescription>
+          </FieldContent>
+          <Toggle
+            variant="outline"
+            pressed={draft.consent.allowDestructive}
+            onPressedChange={(allowDestructive) =>
+              setConsent({ allowDestructive })
+            }
+            aria-label="Allow destructive changes"
+          >
+            {draft.consent.allowDestructive ? "On" : "Off"}
+          </Toggle>
+        </Field>
+        <Field orientation="horizontal">
+          <FieldContent>
+            <FieldLabel>Convert HEIC/HEIF to JPEG</FieldLabel>
+            <FieldDescription>
+              On by default. Turn it off and the batch pre-flight asks before
+              converting.
+            </FieldDescription>
+          </FieldContent>
+          <Toggle
+            variant="outline"
+            pressed={draft.consent.heicToJpg}
+            onPressedChange={(heicToJpg) => setConsent({ heicToJpg })}
+            aria-label="Convert HEIC/HEIF to JPEG"
+          >
+            {draft.consent.heicToJpg ? "On" : "Off"}
+          </Toggle>
+        </Field>
+      </FieldGroup>
+    </FieldSet>
+  )
+}
+
 function PerformanceSection({ draft, onChange }: SectionProps) {
+  const { stats, batchUsage } = useMemory()
+  const setPerformance = (patch: Partial<PerformanceSettings>) =>
+    onChange({
+      ...draft,
+      performance: { ...draft.performance, ...patch },
+    })
+
   return (
     <FieldSet>
       <FieldLegend>Performance</FieldLegend>
       <FieldDescription>
-        How many files compress at once. Auto adapts to your machine (CPU
-        cores).
+        Memory budget controls how many files compress at once.
       </FieldDescription>
       <FieldGroup>
         <Field orientation="horizontal">
-          <FieldLabel>Simultaneous files</FieldLabel>
+          <FieldLabel>Memory mode</FieldLabel>
           <Select
-            value={draft.performance.maxConcurrent}
-            onValueChange={(maxConcurrent) => {
-              if (maxConcurrent !== null) {
-                onChange({
-                  ...draft,
-                  performance: { maxConcurrent },
-                })
+            value={draft.performance.adaptiveMemory ? 'adaptive' : 'manual'}
+            onValueChange={(mode) => {
+              if (mode !== null) {
+                setPerformance({ adaptiveMemory: mode === 'adaptive' })
               }
             }}
           >
-            <SelectTrigger aria-label="Simultaneous files" className="w-24">
+            <SelectTrigger aria-label="Memory mode" className="w-32">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="auto">Auto</SelectItem>
-              <SelectItem value="1">1</SelectItem>
-              <SelectItem value="2">2</SelectItem>
-              <SelectItem value="3">3</SelectItem>
+              <SelectItem value="adaptive">Adaptive</SelectItem>
+              <SelectItem value="manual">Manual</SelectItem>
             </SelectContent>
           </Select>
         </Field>
+        <Field orientation="horizontal">
+          <FieldLabel htmlFor="memory-ceiling">Memory ceiling</FieldLabel>
+          <NumberStepper
+            id="memory-ceiling"
+            value={draft.performance.memoryCeilingMb}
+            onValueChange={(memoryCeilingMb) =>
+              setPerformance({ memoryCeilingMb })
+            }
+            min={300}
+            max={2048}
+            ariaLabel="Memory ceiling in megabytes"
+            className="w-32"
+          />
+        </Field>
       </FieldGroup>
+      {stats && (
+        <div className={`mt-4 grid gap-2 text-sm ${batchUsage ? 'grid-cols-4' : 'grid-cols-3'}`}>
+          <div>
+            <div className="text-muted-foreground">Total RAM</div>
+            <div className="font-medium">{formatSize(stats.totalRamBytes)}</div>
+          </div>
+          <div>
+            <div className="text-muted-foreground">Budget</div>
+            <div className="font-medium">
+              {formatSize(batchUsage?.budgetBytes ?? stats.budgetBytes)}
+            </div>
+          </div>
+          <div>
+            <div className="text-muted-foreground">App RSS</div>
+            <div className="font-medium">
+              {formatSize(batchUsage?.processRssBytes ?? stats.processRssBytes)}
+            </div>
+          </div>
+          {batchUsage && (
+            <div>
+              <div className="text-muted-foreground">Batch used</div>
+              <div className="font-medium">{formatSize(batchUsage.usedBytes)}</div>
+            </div>
+          )}
+        </div>
+      )}
     </FieldSet>
   )
 }
@@ -614,6 +739,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
     general: <GeneralSection draft={current} onChoose={handleChoose} />,
     targets: <TargetsSection draft={current} onChange={commit} />,
     floors: <FloorsSection draft={current} onChange={commit} />,
+    consent: <ConsentSection draft={current} onChange={commit} />,
     performance: <PerformanceSection draft={current} onChange={commit} />,
     history: <HistorySection draft={current} onChange={commit} clearHistory={clearHistory} />,
   })
