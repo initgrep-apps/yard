@@ -165,7 +165,7 @@ impl ConsentSource {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct ConsentSettings {
     pub allow_destructive: bool,
     pub heic_to_jpg: bool,

@@ -402,6 +402,17 @@ mod tests {
     }
 
     #[test]
+    fn parse_settings_value_partial_consent_keeps_heic_default() {
+        let partial = serde_json::json!({ "consent": { "allowDestructive": true } });
+        let parsed = parse_settings_value(Some(partial));
+        assert!(parsed.consent.allow_destructive);
+        assert!(
+            parsed.consent.heic_to_jpg,
+            "an omitted consent field must keep HEIC conversion on, not reset the object"
+        );
+    }
+
+    #[test]
     fn performance_defaults_to_adaptive_2048() {
         let s = Settings::default();
         assert!(s.performance.adaptive_memory);
