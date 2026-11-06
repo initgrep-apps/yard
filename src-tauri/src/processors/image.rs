@@ -541,6 +541,16 @@ mod tests {
     use crate::engine::{ProgressSender, SidecarPaths};
     use std::fs;
 
+    fn permissive_policy() -> &'static crate::policy::Policy {
+        static POLICY: std::sync::OnceLock<crate::policy::Policy> = std::sync::OnceLock::new();
+        POLICY.get_or_init(|| {
+            crate::policy::Policy::new(crate::policy::ConsentSettings {
+                allow_destructive: true,
+                heic_to_jpg: true,
+            })
+        })
+    }
+
     /// Writes an executable bash fake (chmod 755) — unix only.
     #[cfg(unix)]
     fn make_executable_script(dir: &Path, name: &str, script: &str) -> String {
@@ -683,7 +693,7 @@ mod tests {
                 ProgressSender::test_stub(),
                 &sidecar_paths("/bin/false"), // must never be invoked
                 &dir.path().join("tmp"),
-            ))
+            ).with_policy(permissive_policy()))
             .unwrap();
 
         assert!(result.met_target);
@@ -716,7 +726,7 @@ mod tests {
                 gs_resources: None,
             },
             &dir.path().join("tmp"),
-        ));
+        ).with_policy(permissive_policy()));
 
         assert!(
             matches!(result, Err(CompressionError::OutputFileError(_))),
@@ -750,7 +760,7 @@ mod tests {
                 gs_resources: None,
             },
             &tmp,
-        ));
+        ).with_policy(permissive_policy()));
         match result {
             Err(e) => {
                 assert!(
@@ -786,7 +796,7 @@ mod tests {
             ProgressSender::test_stub(),
             &sidecar_paths("/bin/false"),
             &dir.path().join("tmp"),
-        ));
+        ).with_policy(permissive_policy()));
         match result {
             Err(CompressionError::SidecarFailed(msg)) => {
                 assert!(msg.contains("exited with code"))
@@ -1042,7 +1052,7 @@ exit 1
             ProgressSender::test_stub(),
             &sidecar_paths(&fake),
             &tmp,
-        ));
+        ).with_policy(permissive_policy()));
 
         match result {
             Err(CompressionError::SidecarFailed(msg)) => {
@@ -1085,7 +1095,7 @@ exit 1
                 ProgressSender::test_stub(),
                 &sidecar_paths(&fake),
                 &tmp,
-            ))
+            ).with_policy(permissive_policy()))
             .unwrap();
 
         assert!(result.met_target);
@@ -1117,7 +1127,7 @@ exit 1
                 ProgressSender::test_stub(),
                 &sidecar_paths(engine.to_str().unwrap()),
                 &tmp,
-            ))
+            ).with_policy(permissive_policy()))
             .unwrap();
 
         assert!(result.met_target);
@@ -1155,7 +1165,7 @@ exit 1
                 ProgressSender::test_stub(),
                 &sidecar_paths(&fake),
                 &tmp,
-            ))
+            ).with_policy(permissive_policy()))
             .unwrap();
 
         assert!(result.met_target);
@@ -1213,7 +1223,7 @@ exit 1
                 ProgressSender::test_stub(),
                 &sidecar_paths(&fake),
                 &tmp,
-            ))
+            ).with_policy(permissive_policy()))
             .unwrap();
 
         assert!(!result.met_target);
@@ -1250,7 +1260,7 @@ exit 1
                 ProgressSender::test_stub(),
                 &sidecar_paths(&fake),
                 &tmp,
-            ))
+            ).with_policy(permissive_policy()))
             .unwrap();
 
         assert!(!result.met_target);
@@ -1294,7 +1304,7 @@ base="${out%%\[*}"
             ProgressSender::test_stub(),
             &sidecar_paths(&fake),
             &tmp,
-        ));
+        ).with_policy(permissive_policy()));
         match result {
             Err(CompressionError::SidecarFailed(msg)) => {
                 assert!(
@@ -1357,7 +1367,7 @@ esac
                 ProgressSender::test_stub(),
                 &sidecar_paths(&worker_fake),
                 &worker_tmp,
-            ))
+            ).with_policy(permissive_policy()))
         });
         std::thread::sleep(std::time::Duration::from_millis(500));
         token.cancel();
@@ -1412,7 +1422,7 @@ esac
                 ProgressSender::test_stub(),
                 &sidecar_paths(&sidecar),
                 &tmp,
-            ))
+            ).with_policy(permissive_policy()))
             .unwrap();
 
         assert!(result.met_target, "strategy: {}", result.strategy_used);
@@ -1583,7 +1593,7 @@ esac
                     ProgressSender::test_stub(),
                     &sidecar_paths(&sidecar),
                     &tmp,
-                ))
+                ).with_policy(permissive_policy()))
                 .unwrap();
 
             let expected = if orientation >= 5 {
@@ -1654,7 +1664,7 @@ esac
                 ProgressSender::test_stub(),
                 &sidecar_paths(&sidecar),
                 &tmp,
-            ))
+            ).with_policy(permissive_policy()))
             .unwrap();
 
         let bytes = fs::read(&output).unwrap();

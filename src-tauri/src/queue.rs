@@ -20,7 +20,7 @@ use crate::history::{
     Counts, FileResultRecord, HistoryRecordRef, HistoryStore, SessionEndRecord, SessionStartRecord,
 };
 use crate::models::{FileEntry, FileStatus};
-use crate::policy::{Change, ConsentSource, Policy, Verdict};
+use crate::policy::{Policy, Verdict};
 use crate::processors::ProcessorRegistry;
 use crate::scheduler;
 use crate::sidecar;
@@ -55,11 +55,13 @@ fn run_processor_catch_panic(
         .unwrap_or_else(|payload| Err(CompressionError::OutputFileError(panic_payload_message(&payload))))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_job(
     registry: std::sync::Arc<ProcessorRegistry>,
     entry: FileEntry,
     output_path: std::path::PathBuf,
     settings: crate::settings::Settings,
+    policy: std::sync::Arc<Policy>,
     cancel_token: CancellationToken,
     progress: ProgressSender,
     temp_dir: std::path::PathBuf,
@@ -71,7 +73,6 @@ fn run_job(
         Ok(paths) => paths,
         Err(error) => return Err(CompressionError::Unknown(error)),
     };
-    let policy = Policy::new(settings.consent);
     let ctx = crate::engine::JobContext::new(
         std::path::Path::new(&entry.path),
         &output_path,
@@ -82,17 +83,19 @@ fn run_job(
         &sidecar_paths,
         &temp_dir,
     )
-    .with_policy(&policy)
+    .with_policy(policy.as_ref())
     .with_category(entry.category)
     .with_declared(processor.declared_changes());
     run_processor_catch_panic(|| processor.compress(&ctx))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_job_blocking(
     registry: std::sync::Arc<ProcessorRegistry>,
     entry: FileEntry,
     output_path: std::path::PathBuf,
     settings: crate::settings::Settings,
+    policy: std::sync::Arc<Policy>,
     cancel_token: CancellationToken,
     progress: ProgressSender,
     temp_dir: std::path::PathBuf,
@@ -103,6 +106,7 @@ async fn run_job_blocking(
             entry,
             output_path,
             settings,
+            policy,
             cancel_token,
             progress,
             temp_dir.clone(),
@@ -625,7 +629,7 @@ impl<R: Runtime> QueueState<R> {
     ) -> u64 {
         let queue = app.state::<QueueState<R>>();
         let state = app.state::<FileListState>();
-        let policy = Policy::new(settings.consent.clone());
+        let policy = std::sync::Arc::new(Policy::new(settings.consent.clone()));
         let mut total_saved: u64 = 0;
         let started = std::time::Instant::now();
         let elapsed_ms = || (started.elapsed().as_millis() as u64).max(1);
@@ -769,6 +773,7 @@ impl<R: Runtime> QueueState<R> {
                     entry.clone(),
                     output_path,
                     settings,
+                    policy.clone(),
                     cancel_token,
                     progress,
                     temp_dir,
@@ -780,7 +785,7 @@ impl<R: Runtime> QueueState<R> {
         match result {
             Ok(compression_result) => {
                 let status =
-                    settle_result_status(&compression_result, entry.category, &policy);
+                    settle_result_status(&compression_result, entry.category, policy.as_ref());
                 let delivered = status != FileStatus::NeedsPermission;
                 let reason = if delivered {
                     None
@@ -847,6 +852,43 @@ impl<R: Runtime> QueueState<R> {
                 }
                 queue.record_cancelled(&app, &batch_id, &entry, elapsed_ms());
                 emit_file_cancelled(&app, &file_id);
+            }
+            Err(CompressionError::NeedsPermission(reason)) => {
+                {
+                    let mut list = poison_recover(state.0.lock());
+                    if let Some(e) = list.iter_mut().find(|e| e.id == file_id) {
+                        e.status = FileStatus::NeedsPermission;
+                        e.compressed_size = None;
+                        e.output_path = None;
+                        e.error = Some(reason.clone());
+                    }
+                }
+                queue.record_file(
+                    &app,
+                    &batch_id,
+                    &entry,
+                    FileStatus::NeedsPermission,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(reason.clone()),
+                    elapsed_ms(),
+                );
+                let _ = app.emit(
+                    "file:complete",
+                    FileCompletePayload {
+                        file_id: &file_id,
+                        output_path: String::new(),
+                        original_size: entry.original_size,
+                        compressed_size: 0,
+                        status: FileStatus::NeedsPermission,
+                        met_target: false,
+                        quality_used: None,
+                        strategy_used: None,
+                        reason: Some(reason),
+                    },
+                );
             }
             Err(e) => {
                 let error_msg = e.to_string();
@@ -1100,6 +1142,7 @@ fn ensure_output_folder_writable(folder: &str) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::engine::{CompressionProcessor, CompressionResult};
+    use crate::policy::{Change, ConsentSource};
 
     fn result(met: bool, strategy: &str) -> CompressionResult {
         CompressionResult {
@@ -1201,6 +1244,84 @@ mod tests {
         }
     }
 
+    struct GrantAwareProcessor;
+
+    impl CompressionProcessor for GrantAwareProcessor {
+        fn category(&self) -> crate::models::Category {
+            crate::models::Category::Video
+        }
+
+        fn supported_extensions(&self) -> &[&str] {
+            &[]
+        }
+
+        fn declared_changes(&self) -> &'static [Change] {
+            &[Change::Downscale]
+        }
+
+        fn compress(
+            &self,
+            ctx: &crate::engine::JobContext<'_>,
+        ) -> Result<CompressionResult, CompressionError> {
+            assert_eq!(
+                ctx.policy.check(ctx.category, &[Change::Downscale]),
+                Verdict::Allowed,
+                "the context must see the shared batch grant"
+            );
+            assert_eq!(
+                ctx.policy.consent(ctx.category, &[Change::Downscale]),
+                Some(ConsentSource::Batch)
+            );
+            std::fs::write(ctx.output, b"granted").unwrap();
+            Ok(CompressionResult {
+                output_path: ctx.output.to_path_buf(),
+                compressed_size: 7,
+                quality_used: 1,
+                met_target: true,
+                strategy_used: "granted".to_string(),
+                changes: vec![Change::Downscale],
+                consent: ConsentSource::Batch,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_grant_is_shared_between_context_and_decision() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.mp4");
+        std::fs::write(&input, b"input").unwrap();
+        let output = dir.path().join("out.mp4");
+        let temp = dir.path().join("tmp");
+        std::fs::create_dir_all(&temp).unwrap();
+        let policy = std::sync::Arc::new(
+            Policy::new(crate::policy::ConsentSettings::default())
+                .with_batch_grant(crate::models::Category::Video, &[Change::Downscale]),
+        );
+        let registry = std::sync::Arc::new(ProcessorRegistry::with_processor(Box::new(
+            GrantAwareProcessor,
+        )));
+        let entry = crate::models::FileEntry::new(input.to_str().unwrap(), 512);
+
+        let result = run_job_blocking(
+            registry,
+            entry,
+            output,
+            crate::settings::Settings::default(),
+            policy.clone(),
+            CancellationToken::new(),
+            ProgressSender::test_stub(),
+            temp,
+        )
+        .await
+        .expect("the granted rung must produce a result");
+
+        assert_eq!(
+            decide_result_status(&result, crate::models::Category::Video, policy.as_ref()),
+            FileStatus::Done,
+            "the decision must see the same grant the context saw"
+        );
+    }
+
     struct SleepingEngineProcessor;
 
     impl CompressionProcessor for SleepingEngineProcessor {
@@ -1248,12 +1369,14 @@ mod tests {
         let registry = std::sync::Arc::new(ProcessorRegistry::with_processor(Box::new(
             SleepingEngineProcessor,
         )));
+        let policy = std::sync::Arc::new(Policy::default());
 
         let job = run_job_blocking(
             registry,
             entry,
             output,
             crate::settings::Settings::default(),
+            policy,
             CancellationToken::new(),
             ProgressSender::test_stub(),
             temp_dir,

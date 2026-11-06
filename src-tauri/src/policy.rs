@@ -321,6 +321,74 @@ mod tests {
         }
     }
 
+    struct Fixture {
+        _dir: tempfile::TempDir,
+        input: PathBuf,
+        output: PathBuf,
+        temp: PathBuf,
+        floors: crate::settings::QualityFloors,
+        sidecars: crate::engine::SidecarPaths,
+        policy: Policy,
+    }
+
+    impl Fixture {
+        fn new(policy: Policy) -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let input = dir.path().join("in.mp4");
+            let output = dir.path().join("out.mp4");
+            let temp = dir.path().join("tmp");
+            std::fs::create_dir_all(&temp).unwrap();
+            std::fs::write(&input, b"input").unwrap();
+            Fixture {
+                _dir: dir,
+                input,
+                output,
+                temp,
+                floors: crate::settings::QualityFloors::default(),
+                sidecars: crate::engine::SidecarPaths {
+                    vips: None,
+                    ffmpeg: None,
+                    ffprobe: None,
+                    gs: None,
+                    qpdf: None,
+                    gs_resources: None,
+                },
+                policy,
+            }
+        }
+
+        fn ctx<'b>(&'b self, declared: &'b [Change]) -> crate::engine::JobContext<'b> {
+            crate::engine::JobContext::new(
+                &self.input,
+                &self.output,
+                5,
+                &self.floors,
+                tokio_util::sync::CancellationToken::new(),
+                crate::engine::ProgressSender::test_stub(),
+                &self.sidecars,
+                &self.temp,
+            )
+            .with_policy(&self.policy)
+            .with_category(Category::Video)
+            .with_declared(declared)
+        }
+
+        fn attempt(&self) -> PathBuf {
+            self.temp.join("attempt-0.mp4")
+        }
+    }
+
+    fn produced(path: PathBuf, size: u64, changes: Vec<Change>) -> crate::engine::AttemptOutcome {
+        crate::engine::AttemptOutcome::Produced {
+            path,
+            size,
+            quality: 1,
+            strategy: "test".to_string(),
+            changes,
+            consent: ConsentSource::Default,
+        }
+    }
+
     #[test]
     fn matrix_matches_the_agreed_table() {
         use Category::{Document, Image, Other, Pdf, Video};
@@ -362,6 +430,63 @@ mod tests {
 
     #[test]
     fn denied_change_returns_needs_permission_and_no_output() {
+        let fixture = Fixture::new(Policy::default());
+        let attempt = fixture.attempt();
+        std::fs::write(&attempt, b"attempt").unwrap();
+        let ctx = fixture.ctx(&[Change::PageDrop]);
+        let mut ladder = Ladder::new();
+
+        let decision = ladder.record(
+            &ctx,
+            produced(attempt.clone(), 1, vec![Change::PageDrop]),
+        );
+
+        assert!(matches!(decision, crate::engine::AttemptDecision::Continue));
+        assert!(!attempt.exists(), "the denied attempt must be removed");
+        let error = ladder
+            .finish(&ctx)
+            .expect_err("a policy denial must not deliver");
+        assert!(
+            matches!(error, crate::engine::CompressionError::NeedsPermission(_)),
+            "got {error:?}"
+        );
+        assert!(
+            error.to_string().contains("page_drop"),
+            "the denial must explain itself: {error}"
+        );
+        assert!(!fixture.output.exists(), "a denied result must leave no output file");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn denied_change_leaves_no_output_when_output_directory_is_read_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = Fixture::new(Policy::default());
+        let attempt = fixture.attempt();
+        std::fs::write(&attempt, b"attempt").unwrap();
+        let output_dir = fixture._dir.path();
+        let original = std::fs::metadata(output_dir).unwrap().permissions();
+        std::fs::set_permissions(output_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let ctx = fixture.ctx(&[Change::PageDrop]);
+        let mut ladder = Ladder::new();
+        ladder.record(&ctx, produced(attempt, 1, vec![Change::PageDrop]));
+        let error = ladder.finish(&ctx).expect_err("a policy denial must not deliver");
+
+        assert!(matches!(
+            error,
+            crate::engine::CompressionError::NeedsPermission(_)
+        ));
+        assert!(
+            !fixture.output.exists(),
+            "a read-only output directory must never contain a denied delivery"
+        );
+        std::fs::set_permissions(output_dir, original).unwrap();
+    }
+
+    #[test]
+    fn settle_guard_removes_a_delivered_file_that_should_not_have_been_delivered() {
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("out.pdf");
         std::fs::write(&output, b"must be removed").unwrap();
@@ -370,11 +495,38 @@ mod tests {
         let status = settle_result_status(&result, Category::Pdf, &Policy::default());
 
         assert_eq!(status, crate::models::FileStatus::NeedsPermission);
-        assert!(!output.exists(), "a denied result must leave no output file");
-        let reason = Policy::default()
-            .denial_reason(Category::Pdf, &[Change::PageDrop])
-            .expect("a denial must explain itself");
-        assert!(reason.contains("page_drop"), "reason: {reason}");
+        assert!(!output.exists(), "the settle guard must remove a stale delivery");
+    }
+
+    #[test]
+    fn granted_best_effort_delivers_after_the_policy_check() {
+        let policy = Policy::new(ConsentSettings::default())
+            .with_batch_grant(Category::Video, &[Change::Downscale]);
+        let fixture = Fixture::new(policy);
+        let attempt = fixture.attempt();
+        std::fs::write(&attempt, b"attempt").unwrap();
+        let ctx = fixture.ctx(&[Change::Downscale]);
+        let mut ladder = Ladder::new();
+
+        ladder.record(
+            &ctx,
+            crate::engine::AttemptOutcome::Produced {
+                path: attempt,
+                size: 10,
+                quality: 1,
+                strategy: "test".to_string(),
+                changes: vec![Change::Downscale],
+                consent: ConsentSource::Batch,
+            },
+        );
+        let result = ladder
+            .finish(&ctx)
+            .expect("a granted over-target attempt must deliver best effort");
+
+        assert!(!result.met_target);
+        assert_eq!(result.changes, vec![Change::Downscale]);
+        assert_eq!(result.consent, ConsentSource::Batch);
+        assert!(fixture.output.exists());
     }
 
     #[test]
@@ -419,51 +571,14 @@ mod tests {
 
     #[test]
     fn declared_capability_mismatch_is_rejected() {
-        let dir = tempfile::tempdir().unwrap();
-        let input = dir.path().join("in.mp4");
-        let output = dir.path().join("out.mp4");
-        let temp = dir.path().join("tmp");
-        std::fs::create_dir_all(&temp).unwrap();
-        std::fs::write(&input, b"input").unwrap();
-        let attempt = temp.join("attempt-0.mp4");
+        let fixture = Fixture::new(Policy::default());
+        let attempt = fixture.attempt();
         std::fs::write(&attempt, b"attempt").unwrap();
-
-        let floors = crate::settings::QualityFloors::default();
-        let sidecars = crate::engine::SidecarPaths {
-            vips: None,
-            ffmpeg: None,
-            ffprobe: None,
-            gs: None,
-            qpdf: None,
-            gs_resources: None,
-        };
-        let policy = Policy::default();
-        let ctx = crate::engine::JobContext::new(
-            &input,
-            &output,
-            1,
-            &floors,
-            tokio_util::sync::CancellationToken::new(),
-            crate::engine::ProgressSender::test_stub(),
-            &sidecars,
-            &temp,
-        )
-        .with_policy(&policy)
-        .with_category(Category::Video)
-        .with_declared(&[]);
-
+        let ctx = fixture.ctx(&[]);
         let mut ladder = Ladder::new();
-        let decision = ladder.record(
-            &ctx,
-            crate::engine::AttemptOutcome::Produced {
-                path: attempt.clone(),
-                size: 10,
-                quality: 1,
-                strategy: "drop".to_string(),
-                changes: vec![Change::DropStream],
-                consent: ConsentSource::Default,
-            },
-        );
+
+        let decision =
+            ladder.record(&ctx, produced(attempt.clone(), 10, vec![Change::DropStream]));
         assert!(matches!(decision, crate::engine::AttemptDecision::Continue));
 
         let error = ladder
@@ -474,7 +589,7 @@ mod tests {
             "the rejection must name the undeclared change: {error}"
         );
         assert!(!attempt.exists(), "the rejected attempt must be removed");
-        assert!(!output.exists(), "a rejected rung must not deliver");
+        assert!(!fixture.output.exists(), "a rejected rung must not deliver");
         assert!(Ladder::check_declared(&[Change::DropStream], &[Change::DropStream]).is_ok());
     }
 

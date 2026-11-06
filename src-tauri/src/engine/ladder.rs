@@ -52,6 +52,7 @@ pub struct Ladder {
     best: Option<BestAttempt>,
     attempts: Vec<PathBuf>,
     last_error: Option<CompressionError>,
+    permission_denial: Option<String>,
     cancelled: bool,
     progress: Option<ProgressSender>,
 }
@@ -68,6 +69,7 @@ impl Ladder {
             best: None,
             attempts: Vec::new(),
             last_error: None,
+            permission_denial: None,
             cancelled: false,
             progress: None,
         }
@@ -136,6 +138,15 @@ impl Ladder {
                     self.last_error = Some(CompressionError::Unknown(error));
                     return AttemptDecision::Continue;
                 }
+                if ctx.policy.check(ctx.category, &changes) != crate::policy::Verdict::Allowed {
+                    self.remove_attempt(&path);
+                    self.permission_denial = Some(
+                        ctx.policy
+                            .denial_reason(ctx.category, &changes)
+                            .unwrap_or_else(|| "Needs permission".to_string()),
+                    );
+                    return AttemptDecision::Continue;
+                }
                 let attempt = BestAttempt {
                     size,
                     path,
@@ -166,6 +177,7 @@ impl Ladder {
                     Ok(mut result) => {
                         result.changes = attempt.changes;
                         result.consent = attempt.consent;
+                        self.permission_denial = None;
                         self.best = None;
                         self.cleanup_attempts();
                         AttemptDecision::Stop(result)
@@ -213,6 +225,10 @@ impl Ladder {
             self.cleanup_attempts();
             return Err(CompressionError::Cancelled);
         }
+        if let Some(reason) = self.permission_denial.take() {
+            self.cleanup_attempts();
+            return Err(CompressionError::NeedsPermission(reason));
+        }
         let Some(best) = self.best.take() else {
             self.cleanup_attempts();
             return Err(self
@@ -220,6 +236,10 @@ impl Ladder {
                 .take()
                 .unwrap_or_else(|| CompressionError::SidecarFailed("Could not compress file".into())));
         };
+        if let Some(reason) = ctx.policy.denial_reason(ctx.category, &best.changes) {
+            self.cleanup_attempts();
+            return Err(CompressionError::NeedsPermission(reason));
+        }
         let result = deliver_output(
             &best.path,
             ctx.output,

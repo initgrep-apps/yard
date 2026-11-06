@@ -205,7 +205,11 @@ impl VideoProcessor {
         }
     }
 
-    fn attempt_changes(input: &Path, scale_width: Option<u32>) -> Vec<Change> {
+    fn attempt_changes(
+        input: &Path,
+        input_streams: &StreamInfo,
+        scale_width: Option<u32>,
+    ) -> Vec<Change> {
         let mut changes = vec![Change::LossyEncode];
         let input_ext = input
             .extension()
@@ -215,10 +219,13 @@ impl VideoProcessor {
         if input_ext != crate::registry::output_extension(input.to_string_lossy().as_ref()) {
             changes.push(Change::FormatChange);
         }
-        // shortcut: a scale cap on an already-small input still reports
-        // Downscale; add an input-width probe if false consent prompts matter.
-        if scale_width.is_some() {
-            changes.push(Change::Downscale);
+        if input_streams.video > 1 || input_streams.data > 0 {
+            changes.push(Change::DropStream);
+        }
+        if let (Some(cap), Some(input_width)) = (scale_width, input_streams.width) {
+            if cap < input_width {
+                changes.push(Change::Downscale);
+            }
         }
         changes
     }
@@ -519,9 +526,9 @@ impl VideoProcessor {
             "-v".to_string(),
             "error".to_string(),
             "-show_entries".to_string(),
-            "format=duration:stream=codec_type".to_string(),
+            "format=duration:stream=codec_type,width".to_string(),
             "-of".to_string(),
-            "default=noprint_wrappers=1:nokey=1".to_string(),
+            "default=noprint_wrappers=1".to_string(),
             input.display().to_string(),
         ];
         let mut command = std::process::Command::new(ffprobe_path);
@@ -588,11 +595,55 @@ impl VideoProcessor {
         let mut video = 0;
         let mut audio = 0;
         let mut subtitle = 0;
+        let mut data = 0;
+        let mut width = None;
+        let mut pending_width = None;
+        let mut current_is_video = false;
         for line in raw.lines().map(str::trim).filter(|line| !line.is_empty()) {
+            if let Some((key, value)) = line.split_once('=') {
+                match key {
+                    "codec_type" => {
+                        current_is_video = value == "video";
+                        match value {
+                            "video" => {
+                                video += 1;
+                                if width.is_none() {
+                                    width = pending_width.take().flatten();
+                                }
+                            }
+                            "audio" => audio += 1,
+                            "subtitle" => subtitle += 1,
+                            "data" => data += 1,
+                            _ => {}
+                        }
+                    }
+                    "width" => {
+                        let parsed = value.parse::<u32>().ok();
+                        if current_is_video {
+                            if width.is_none() {
+                                width = parsed;
+                            }
+                        } else {
+                            pending_width = Some(parsed);
+                        }
+                    }
+                    "duration" => {
+                        if duration_secs.is_none() {
+                            duration_secs = Self::parse_duration_output(value);
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
+            }
             match line {
-                "video" => video += 1,
+                "video" => {
+                    video += 1;
+                    current_is_video = true;
+                }
                 "audio" => audio += 1,
                 "subtitle" => subtitle += 1,
+                "data" => data += 1,
                 _ => {
                     if duration_secs.is_none() {
                         duration_secs = Self::parse_duration_output(line);
@@ -605,6 +656,8 @@ impl VideoProcessor {
             video,
             audio,
             subtitle,
+            data,
+            width,
         })
     }
 
@@ -765,6 +818,8 @@ struct StreamInfo {
     video: u32,
     audio: u32,
     subtitle: u32,
+    data: u32,
+    width: Option<u32>,
 }
 
 enum VideoAttempt {
@@ -813,7 +868,12 @@ impl CompressionProcessor for VideoProcessor {
     }
 
     fn declared_changes(&self) -> &'static [Change] {
-        &[Change::LossyEncode, Change::Downscale, Change::FormatChange]
+        &[
+            Change::LossyEncode,
+            Change::Downscale,
+            Change::DropStream,
+            Change::FormatChange,
+        ]
     }
 
     fn compress(&self, ctx: &JobContext<'_>) -> Result<CompressionResult, CompressionError> {
@@ -982,7 +1042,8 @@ impl CompressionProcessor for VideoProcessor {
                         VideoAttempt::TwoPass { scale_width, .. }
                         | VideoAttempt::Crf { scale_width, .. } => *scale_width,
                     };
-                    let changes = Self::attempt_changes(ctx.input, scale_width);
+                    let changes =
+                        Self::attempt_changes(ctx.input, &input_streams, scale_width);
                     let consent = ctx.consent_for(&changes);
                     AttemptOutcome::Produced {
                         path: temp_output,
@@ -1025,6 +1086,16 @@ mod tests {
     use crate::settings::QualityFloors;
     use std::fs;
     use std::time::Instant;
+
+    fn permissive_policy() -> &'static crate::policy::Policy {
+        static POLICY: std::sync::OnceLock<crate::policy::Policy> = std::sync::OnceLock::new();
+        POLICY.get_or_init(|| {
+            crate::policy::Policy::new(crate::policy::ConsentSettings {
+                allow_destructive: true,
+                heic_to_jpg: true,
+            })
+        })
+    }
 
     /// BufferedReader over explicit byte chunks with per-read delays: exact
     /// chunk sizes reach `drain_stderr_for_progress` even when the data is
@@ -1203,8 +1274,31 @@ fi
 
     #[cfg(unix)]
     fn fake_ffprobe(dir: &Path, input_lines: &[&str], output_lines: &[&str]) -> String {
-        fn printf_lines(lines: &[&str]) -> String {
-            lines
+        fake_ffprobe_with_width(dir, input_lines, output_lines, Some(1920))
+    }
+
+    #[cfg(unix)]
+    fn fake_ffprobe_with_width(
+        dir: &Path,
+        input_lines: &[&str],
+        output_lines: &[&str],
+        width: Option<u32>,
+    ) -> String {
+        fn printf_lines(lines: &[&str], width: Option<u32>) -> String {
+            let mut keyed: Vec<String> = Vec::new();
+            for line in lines {
+                match *line {
+                    "video" => {
+                        keyed.push("codec_type=video".to_string());
+                        keyed.push(format!("width={}", width.unwrap_or(0)));
+                    }
+                    "audio" => keyed.push("codec_type=audio".to_string()),
+                    "subtitle" => keyed.push("codec_type=subtitle".to_string()),
+                    "data" => keyed.push("codec_type=data".to_string()),
+                    duration => keyed.push(format!("duration={duration}")),
+                }
+            }
+            keyed
                 .iter()
                 .map(|line| format!("'{line}'"))
                 .collect::<Vec<_>>()
@@ -1222,8 +1316,8 @@ case "$last" in
   *) printf '%s\n' {input} ;;
 esac
 "#,
-                output = printf_lines(output_lines),
-                input = printf_lines(input_lines),
+                output = printf_lines(output_lines, width),
+                input = printf_lines(input_lines, width),
             ),
         )
     }
@@ -1275,9 +1369,18 @@ exit 1
 
     #[test]
     fn ffprobe_stream_entries_parse_in_real_output_order() {
-        // Real ffprobe prints stream entries before the format duration.
-        let info = VideoProcessor::parse_stream_info("video\naudio\naudio\nsubtitle\n12.5\n")
-            .expect("duration and streams");
+        // Real ffprobe prints keyed stream entries before the format duration.
+        let raw = "\
+codec_type=video
+width=1920
+codec_type=audio
+codec_type=audio
+codec_type=subtitle
+codec_type=data
+width=N/A
+duration=12.5
+";
+        let info = VideoProcessor::parse_stream_info(raw).expect("duration and streams");
         assert_eq!(
             info,
             StreamInfo {
@@ -1285,10 +1388,55 @@ exit 1
                 video: 1,
                 audio: 2,
                 subtitle: 1,
+                data: 1,
+                width: Some(1920),
             }
         );
         // No duration means no usable probe.
         assert_eq!(VideoProcessor::parse_stream_info("video\naudio\n"), None);
+    }
+
+    #[test]
+    fn small_input_under_the_scale_cap_does_not_report_downscale() {
+        let input = StreamInfo {
+            duration_secs: 1.0,
+            video: 1,
+            audio: 1,
+            subtitle: 0,
+            data: 0,
+            width: Some(640),
+        };
+        let changes =
+            VideoProcessor::attempt_changes(Path::new("in.mp4"), &input, Some(1280));
+        assert!(
+            !changes.contains(&Change::Downscale),
+            "a 1280 cap does not downscale a 640px input: {changes:?}"
+        );
+
+        let changes =
+            VideoProcessor::attempt_changes(Path::new("in.mp4"), &input, Some(480));
+        assert!(
+            changes.contains(&Change::Downscale),
+            "a 480 cap must report the downscale: {changes:?}"
+        );
+    }
+
+    #[test]
+    fn extra_video_and_data_streams_report_drop_stream() {
+        let input = StreamInfo {
+            duration_secs: 1.0,
+            video: 2,
+            audio: 1,
+            subtitle: 0,
+            data: 1,
+            width: Some(1920),
+        };
+        let changes =
+            VideoProcessor::attempt_changes(Path::new("in.mp4"), &input, Some(1920));
+        assert!(
+            changes.contains(&Change::DropStream),
+            "discarded video/data streams must be reported: {changes:?}"
+        );
     }
 
     #[test]
@@ -1637,7 +1785,7 @@ exit 1
             ProgressSender::test_stub(),
             &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
             &tmp,
-        ));
+        ).with_policy(permissive_policy()));
 
         let err = result.unwrap_err();
         assert!(
@@ -1669,7 +1817,7 @@ exit 1
                     ProgressSender::test_stub(),
                     &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
                     &tmp,
-                ))
+                ).with_policy(permissive_policy()))
                 .unwrap();
             assert!(result.met_target, "got: {}", result.strategy_used);
         }
@@ -1696,7 +1844,7 @@ exit 1
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
                 &tmp,
-            ));
+            ).with_policy(permissive_policy()));
 
             let err = result.unwrap_err();
             assert!(
@@ -1728,7 +1876,7 @@ exit 1
             ProgressSender::test_stub(),
             &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
             &tmp,
-        ));
+        ).with_policy(permissive_policy()));
 
         let err = result.unwrap_err();
         assert!(
@@ -1760,7 +1908,7 @@ exit 1
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
                 &tmp,
-            ))
+            ).with_policy(permissive_policy()))
             .unwrap();
 
         assert!(result.met_target, "strategy: {}", result.strategy_used);
@@ -1820,7 +1968,7 @@ exit 1
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
                 &tmp,
-            ))
+            ).with_policy(permissive_policy()))
             .unwrap();
 
         assert!(!result.met_target);
@@ -1886,7 +2034,7 @@ exit 1
                     ProgressSender::test_stub(),
                     &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
                     &tmp,
-                ))
+                ).with_policy(permissive_policy()))
             }
         });
 
@@ -1955,7 +2103,7 @@ exit 1
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
                 &tmp,
-            ))
+            ).with_policy(permissive_policy()))
             .unwrap();
 
         assert!(result.met_target);
@@ -1985,7 +2133,7 @@ exit 1
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(engine.clone()), Some(engine)),
                 &tmp,
-            ))
+            ).with_policy(permissive_policy()))
             .unwrap();
 
         assert!(result.met_target, "strategy: {}", result.strategy_used);
@@ -2012,7 +2160,7 @@ exit 1
             ProgressSender::test_stub(),
             &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
             &tmp,
-        ));
+        ).with_policy(permissive_policy()));
 
         let err = result.unwrap_err();
         assert!(
@@ -2042,7 +2190,7 @@ exit 1
                 // None sidecars: any spawn attempt would fail the job.
                 &test_sidecar_paths(None, None),
                 &tmp,
-            ))
+            ).with_policy(permissive_policy()))
             .unwrap();
 
         assert!(result.met_target);
@@ -2072,7 +2220,7 @@ exit 1
             ProgressSender::test_stub(),
             &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
             &tmp,
-        ));
+        ).with_policy(permissive_policy()));
 
         let err = result.unwrap_err();
         assert!(err.to_string().contains("File may be corrupt"), "got: {err}");
@@ -2099,7 +2247,7 @@ exit 1
             ProgressSender::test_stub(),
             &test_sidecar_paths(None, Some(ffprobe)),
             &tmp,
-        ));
+        ).with_policy(permissive_policy()));
 
         let err = result.unwrap_err();
         assert!(
@@ -2139,7 +2287,7 @@ exit 1
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
                 &tmp,
-            ))
+            ).with_policy(permissive_policy()))
             .unwrap();
 
         let log = ffmpeg_log(&dir.path());
@@ -2232,7 +2380,7 @@ head -c $(( size - 12 )) /dev/zero >> "$out"
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
                 &tmp,
-            ))
+            ).with_policy(permissive_policy()))
             .unwrap();
 
         let log = ffmpeg_log(&dir.path());
@@ -2295,7 +2443,7 @@ exit 1
             ProgressSender::test_stub(),
             &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
             &tmp,
-        ));
+        ).with_policy(permissive_policy()));
 
         let err = result.unwrap_err();
         // The last attempt is the final CRF rung at the 480p cap width.
@@ -2361,7 +2509,7 @@ head -c 88 /dev/zero >> "$out"
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
                 &tmp,
-            ))
+            ).with_policy(permissive_policy()))
             .unwrap();
 
         let log = ffmpeg_log(&dir.path());
@@ -2426,7 +2574,7 @@ head -c 88 /dev/zero >> "$out"
                 progress,
                 &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
                 &tmp,
-            ))
+            ).with_policy(permissive_policy()))
             .unwrap();
 
         assert!(result.met_target);
@@ -2664,7 +2812,7 @@ head -c 88 /dev/zero >> "$out"
                 progress,
                 &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
                 &tmp,
-            ))
+            ).with_policy(permissive_policy()))
             .unwrap();
 
         assert!(result.met_target);
