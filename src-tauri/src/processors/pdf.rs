@@ -36,11 +36,11 @@ const QPDF_JPEG_QUALITY: u32 = 75;
 const PDF_DPI_RUNGS: [u32; 4] = [100, 72, 50, 36];
 const PDF_JPEGQ_RUNGS: [u32; 4] = [60, 40, 25, 15];
 
-/// qpdf exit 2 = "warnings, output still valid"; its output is validated by
-/// `measure_output` and `validate_pdf` instead of failing the pass here.
-/// Other engines (and other exit codes) fail the pass.
+/// qpdf exit 3 = "warnings, output still valid"; exit 2 = "errors" and must
+/// fail the pass. A tolerated warning exit still goes through `measure_output`
+/// and `validate_pdf`, so an unusable output cannot be delivered.
 fn qpdf_tolerated_exit(label: &str, code: Option<i32>) -> bool {
-    label == "qpdf" && code == Some(2)
+    label == "qpdf" && code == Some(3)
 }
 
 impl Default for PdfProcessor {
@@ -106,6 +106,12 @@ impl PdfProcessor {
     /// `Resource/Init/gs_lev2.ps` reads it). `-sICCProfilesDir` is not accepted by
     /// pdfwrite: gs 10.08 aborts device init with "Unable to open the initial
     /// device" whenever it is passed.
+    ///
+    /// `-dPDFSETTINGS=/screen` pins every image resolution to 72 dpi, so `-r`
+    /// alone cannot carry the DPI ladder: it changes the rasterisation
+    /// resolution of vector content, not the downsampling of embedded images.
+    /// The explicit `ColorImageResolution`/`GrayImageResolution`/
+    /// `MonoImageResolution` flags make each rung actually re-sample.
     fn gs_args(
     dpi: Option<u32>,
     jpegq: Option<u32>,
@@ -127,7 +133,12 @@ impl PdfProcessor {
             "-dPDFSETTINGS=/screen".to_string(),
         ]);
         if let Some(dpi) = dpi {
-            args.push(format!("-r{}", dpi));
+            args.extend([
+                format!("-r{}", dpi),
+                format!("-dColorImageResolution={}", dpi),
+                format!("-dGrayImageResolution={}", dpi),
+                format!("-dMonoImageResolution={}", dpi),
+            ]);
         }
         if let Some(jpegq) = jpegq {
             args.push(format!("-dJPEGQ={}", jpegq));
@@ -223,7 +234,7 @@ impl PdfProcessor {
 
 fn page_count(path: &Path, qpdf: &str) -> Result<u32, CompressionError> {
     let args = vec!["--show-npages".to_string(), path.display().to_string()];
-    let (_, stdout) = run_sidecar_capture_stdout(
+    let (_, stdout, stderr) = run_sidecar_capture_stdout(
         qpdf,
         "qpdf",
         &args,
@@ -232,9 +243,10 @@ fn page_count(path: &Path, qpdf: &str) -> Result<u32, CompressionError> {
     )?;
     stdout.trim().parse::<u32>().map_err(|_| {
         CompressionError::SidecarFailed(format!(
-            "unparsable page count for {}: {:?}",
+            "unparsable page count for {}: {:?} (qpdf: {})",
             path.display(),
-            stdout.trim()
+            stdout.trim(),
+            stderr.trim()
         ))
     })
 }
@@ -484,6 +496,9 @@ mod tests {
                 "-sDEVICE=pdfwrite".to_string(),
                 "-dPDFSETTINGS=/screen".to_string(),
                 "-r100".to_string(),
+                "-dColorImageResolution=100".to_string(),
+                "-dGrayImageResolution=100".to_string(),
+                "-dMonoImageResolution=100".to_string(),
                 "-dJPEGQ=40".to_string(),
                 "-dNOPAUSE".to_string(),
                 "-dQUIET".to_string(),
@@ -492,6 +507,36 @@ mod tests {
                 "/tmp/in.pdf".to_string(),
             ],
             "with no staged resources the argument vector is byte-identical to the pre-resources one"
+        );
+    }
+
+    #[test]
+    fn gs_args_pin_each_image_resolution_to_the_dpi_rung() {
+        let args = PdfProcessor::gs_args(
+            Some(50),
+            Some(25),
+            Path::new("/tmp/in.pdf"),
+            Path::new("/tmp/out.pdf"),
+            None,
+        );
+
+        for flag in [
+            "-r50",
+            "-dColorImageResolution=50",
+            "-dGrayImageResolution=50",
+            "-dMonoImageResolution=50",
+        ] {
+            assert!(
+                args.contains(&flag.to_string()),
+                "missing {flag} in {args:?}"
+            );
+        }
+        let rung = args.iter().position(|a| a == "-r50").unwrap();
+        assert!(
+            args[rung + 1..rung + 4]
+                .iter()
+                .all(|a| a.contains("ImageResolution=50")),
+            "image resolutions must follow -r and share its rung: {args:?}"
         );
     }
 
@@ -645,7 +690,7 @@ case "$*" in
   *) head -c $(( {pass1} - 5 )) /dev/zero >> "$out" ;;
 esac
 echo "WARNING: something recoverable happened" >&2
-exit 2
+exit 3
 "#,
                 pass1 = pass1_bytes,
                 pass2 = pass2_bytes,
@@ -1256,7 +1301,7 @@ esac
 
     #[test]
     #[cfg(unix)]
-    fn pdf_qpdf_exit_two_warnings_output_still_measures() {
+    fn pdf_qpdf_exit_three_warnings_output_still_measures() {
         let dir = tempfile::tempdir().unwrap();
         let fake_qpdf = fake_qpdf_warn_ok(&dir.path(), 1000, 1000);
         let fake_gs = fake_gs(&dir.path(), 100, 1);
@@ -1278,7 +1323,7 @@ esac
 
         assert!(
             result.met_target,
-            "qpdf exit 2 (warnings) keeps its output: strategy {}",
+            "qpdf exit 3 (warnings) keeps its output: strategy {}",
             result.strategy_used
         );
         assert_eq!(result.strategy_used, "qpdf-lossless");
@@ -1298,26 +1343,26 @@ esac
             "sidecar-warn",
             r#"#!/bin/bash
 echo "hello" >&2
-exit 2
+exit 3
 "#,
         );
-        let fail3 = make_executable_script(
+        let fail2 = make_executable_script(
             &dir.path(),
-            "sidecar-fail3",
+            "sidecar-fail2",
             r#"#!/bin/bash
 echo "hard error" >&2
-exit 3
+exit 2
 "#,
         );
 
         let cancelled = CancellationToken::new();
         assert!(
             run_sidecar(&warn, "qpdf", &[], &cancelled, qpdf_tolerated_exit).is_ok(),
-            "qpdf exit 2 = warnings; output validity is decided by measure_output"
+            "qpdf exit 3 = warnings; output validity is decided by measure_output"
         );
-        match run_sidecar(&fail3, "qpdf", &[], &cancelled, qpdf_tolerated_exit) {
+        match run_sidecar(&fail2, "qpdf", &[], &cancelled, qpdf_tolerated_exit) {
             Err(CompressionError::SidecarFailed(msg)) => {
-                assert!(msg.contains("exited with code Some(3)"), "msg: {}", msg);
+                assert!(msg.contains("exited with code Some(2)"), "msg: {}", msg);
                 assert!(
                     !msg.contains("File may be corrupt"),
                     "exit code alone must not claim corruption: {}",
@@ -1328,15 +1373,48 @@ exit 3
         }
         match run_sidecar(&warn, "gs", &[], &cancelled, strict_exit) {
             Err(CompressionError::SidecarFailed(msg)) => {
-                assert!(msg.contains("exited with code Some(2)"), "msg: {}", msg);
+                assert!(msg.contains("exited with code Some(3)"), "msg: {}", msg);
                 assert!(
                     !msg.contains("File may be corrupt"),
                     "got: {}",
                     msg
                 );
             }
-            other => panic!("gs exit 2 is not a warning code, got {:?}", other.as_ref().map(|_| ())),
+            other => panic!("gs exit 3 is not a warning code, got {:?}", other.as_ref().map(|_| ())),
         }
+    }
+
+    #[test]
+    fn qpdf_exit_three_is_a_warning_not_a_failure() {
+        assert!(qpdf_tolerated_exit("qpdf", Some(3)));
+        assert!(!qpdf_tolerated_exit("qpdf", Some(2)));
+        assert!(!qpdf_tolerated_exit("qpdf", Some(0)));
+        assert!(!qpdf_tolerated_exit("gs", Some(3)));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn page_count_carries_the_qpdf_stderr_tail_into_the_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = make_executable_script(
+            &dir.path(),
+            "fake-qpdf-encrypted",
+            r#"#!/bin/bash
+if [ "$1" = "--show-npages" ]; then
+  echo "qpdf: invalid password" >&2
+  exit 3
+fi
+exit 0
+"#,
+        );
+        let input = dir.path().join("locked.pdf");
+        fs::write(&input, b"%PDF-1.4").unwrap();
+
+        let message = page_count(&input, &fake).unwrap_err().to_string();
+        assert!(
+            message.contains("invalid password"),
+            "an encrypted PDF must surface qpdf's reason, not just a parse failure: {message}"
+        );
     }
 
     #[test]
@@ -1822,6 +1900,145 @@ exit 3
             result.compressed_size > 0 && fs::metadata(&dir.path().join("out.pdf")).unwrap().len() > 0,
             "output must be a real file, strategy: {}",
             result.strategy_used
+        );
+    }
+
+    /// A 4-inch page embedding the JPEG at 300 ppi at its native pixel size.
+    #[cfg(unix)]
+    fn write_full_page_jpeg_pdf(jpeg: &[u8], path: &Path) {
+        let content = b"q 288 0 0 288 0 0 cm /Im0 Do Q\n";
+        let objects = vec![
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 288 288] /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>".to_vec(),
+            format!(
+                "<< /Type /XObject /Subtype /Image /Width 1200 /Height 1200 \
+                 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /DCTDecode /Length {} >>\nstream\n",
+                jpeg.len()
+            )
+            .into_bytes()
+            .into_iter()
+            .chain(jpeg.iter().copied())
+            .chain(b"\nendstream".iter().copied())
+            .collect(),
+            format!("<< /Length {} >>\nstream\n", content.len())
+                .into_bytes()
+                .into_iter()
+                .chain(content.iter().copied())
+                .chain(b"endstream".iter().copied())
+                .collect(),
+        ];
+
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+            pdf.extend_from_slice(object);
+            pdf.extend_from_slice(b"\nendobj\n");
+        }
+        let xref = pdf.len();
+        pdf.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        for offset in offsets {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n",
+                objects.len() + 1,
+                xref
+            )
+            .as_bytes(),
+        );
+        fs::write(path, pdf).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[ignore = "requires real gs + qpdf sidecars on this machine"]
+    fn real_gs_72_dpi_rung_downamples_an_embedded_300_ppi_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let binaries = format!("{}/binaries", env!("CARGO_MANIFEST_DIR"));
+        let gs = format!(
+            "{}/{}",
+            binaries,
+            crate::sidecar::sidecar_filename("gs").unwrap()
+        );
+        let qpdf = format!(
+            "{}/{}",
+            binaries,
+            crate::sidecar::sidecar_filename("qpdf").unwrap()
+        );
+        assert!(Path::new(&gs).exists(), "gs sidecar missing: {}", gs);
+        assert!(Path::new(&qpdf).exists(), "qpdf sidecar missing: {}", qpdf);
+
+        let jpeg = dir.path().join("noise.jpg");
+        let generated = std::process::Command::new(&gs)
+            .args([
+                "-sDEVICE=jpeggray",
+                "-r300",
+                "-g1200x1200",
+                "-dNOPAUSE",
+                "-dBATCH",
+            ])
+            .arg(format!("-sOutputFile={}", jpeg.display()))
+            .args(["-c", "0.5 setgray 0 0 1200 1200 rectfill showpage"])
+            .output()
+            .expect("gs generates the 300 ppi jpeg");
+        assert!(
+            generated.status.success(),
+            "jpeg generation failed: {}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+
+        let input = dir.path().join("in.pdf");
+        write_full_page_jpeg_pdf(&fs::read(&jpeg).unwrap(), &input);
+        let output = dir.path().join("out.pdf");
+        let run = std::process::Command::new(&gs)
+            .args(PdfProcessor::gs_args(
+                Some(72),
+                Some(40),
+                &input,
+                &output,
+                None,
+            ))
+            .output()
+            .expect("gs downsamples the pdf");
+        assert!(
+            run.status.success(),
+            "gs failed: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+
+        let qdf = dir.path().join("out-qdf.pdf");
+        let converted = std::process::Command::new(&qpdf)
+            .args(["--qdf", "--object-streams=disable"])
+            .arg(&output)
+            .arg(&qdf)
+            .output()
+            .expect("qpdf expands the output");
+        assert!(
+            converted.status.success(),
+            "qpdf failed: {}",
+            String::from_utf8_lossy(&converted.stderr)
+        );
+
+        let expanded = String::from_utf8_lossy(&fs::read(&qdf).unwrap()).into_owned();
+        let image = expanded
+            .split("/Subtype /Image")
+            .nth(1)
+            .expect("output must contain an image");
+        let width: f64 = image
+            .split("/Width ")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|value| value.parse().ok())
+            .expect("image width must be readable");
+        let ppi = width / 4.0;
+        assert!(
+            (ppi - 72.0).abs() <= 3.0,
+            "a 1200 px image on a 4-inch page must be downsampled near 72 ppi, got {ppi} ppi ({width} px)"
         );
     }
 }

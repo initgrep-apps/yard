@@ -350,7 +350,7 @@ pub fn stderr_tail(tail: &StderrTail) -> String {
 }
 
 /// A sidecar exit code that, for this engine, still counts as pass success
-/// and leaves output validation to the caller (e.g. qpdf exit 2 = "warnings,
+/// and leaves output validation to the caller (e.g. qpdf exit 3 = "warnings,
 /// output still valid"). Exit-code policy is per-engine, so the engine layer
 /// takes it as a predicate instead of hardcoding tool quirks.
 pub type ToleratedExit = fn(&str, Option<i32>) -> bool;
@@ -384,17 +384,18 @@ pub fn run_sidecar(
     .map(|_| ())
 }
 
-/// Runs a sidecar and captures its stdout (up to 64 KiB) for callers that
-/// need the tool's answer, such as `qpdf --show-npages`. stderr keeps the
-/// same bounded-tail contract as `run_sidecar`.
+/// Runs a sidecar and captures its stdout (up to 64 KiB) plus the bounded
+/// stderr tail for callers that need the tool's answer, such as
+/// `qpdf --show-npages`. The stderr tail is kept because a tolerated warning
+/// exit can still leave stdout empty (for example an encrypted PDF).
 pub fn run_sidecar_capture_stdout(
     sidecar_path: &str,
     label: &'static str,
     args: &[String],
     cancel_token: &CancellationToken,
     tolerated_exit: ToleratedExit,
-) -> Result<(std::process::ExitStatus, String), CompressionError> {
-    let (status, stdout) = run_sidecar_inner(
+) -> Result<(std::process::ExitStatus, String, String), CompressionError> {
+    let (status, stdout, stderr) = run_sidecar_inner(
         sidecar_path,
         label,
         args,
@@ -402,7 +403,7 @@ pub fn run_sidecar_capture_stdout(
         tolerated_exit,
         true,
     )?;
-    Ok((status, String::from_utf8_lossy(&stdout).into_owned()))
+    Ok((status, String::from_utf8_lossy(&stdout).into_owned(), stderr))
 }
 
 fn run_sidecar_inner(
@@ -412,7 +413,7 @@ fn run_sidecar_inner(
     cancel_token: &CancellationToken,
     tolerated_exit: ToleratedExit,
     capture_stdout: bool,
-) -> Result<(std::process::ExitStatus, Vec<u8>), CompressionError> {
+) -> Result<(std::process::ExitStatus, Vec<u8>, String), CompressionError> {
     let mut command = std::process::Command::new(sidecar_path);
     command.args(args).stderr(std::process::Stdio::piped());
     if capture_stdout {
@@ -507,7 +508,7 @@ fn run_sidecar_inner(
             stderr_tail(&tail)
         )));
     }
-    Ok((status, stdout))
+    Ok((status, stdout, stderr_tail(&tail)))
 }
 
 fn capture_bounded_stdout(mut pipe: impl Read, label: &str) -> Vec<u8> {
@@ -1052,7 +1053,7 @@ printf 'CAPTURE_TAIL\n' >&2
         .unwrap();
         fs::set_permissions(&chatty, fs::Permissions::from_mode(0o755)).unwrap();
 
-        let (status, stdout) = run_sidecar_capture_stdout(
+        let (status, stdout, _stderr) = run_sidecar_capture_stdout(
             chatty.to_str().unwrap(),
             "qpdf",
             &[],
