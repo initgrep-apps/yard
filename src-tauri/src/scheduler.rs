@@ -14,10 +14,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
-use std::pin::Pin;
-use std::task::Poll;
 
 pub struct LaneSpec<J> {
     pub key: String,
@@ -47,7 +45,9 @@ where
 {
     let mut used: u64 = 0;
     let mut total: u64 = 0;
-    let mut inflight: Vec<(usize, u64, tokio::task::JoinHandle<u64>)> = Vec::new();
+    let mut tasks: tokio::task::JoinSet<(usize, u64, u64)> = tokio::task::JoinSet::new();
+    let mut estimates: HashMap<tokio::task::Id, (usize, u64)> = HashMap::new();
+    let mut active_lanes: HashSet<usize> = HashSet::new();
     let mut oversize_warned = false;
 
     loop {
@@ -56,14 +56,14 @@ where
             if lanes[idx].jobs.is_empty() {
                 continue;
             }
-            if inflight.iter().any(|(i, _, _)| *i == idx) {
+            if active_lanes.contains(&idx) {
                 continue;
             }
             let job = lanes[idx].jobs.front().expect("checked non-empty");
             let est = estimate(job);
             let can_admit = if used + est <= budget {
                 true
-            } else if est > budget && inflight.is_empty() {
+            } else if est > budget && tasks.is_empty() {
                 if !oversize_warned {
                     oversize_warned = true;
                     eprintln!(
@@ -87,32 +87,38 @@ where
             }
             let job = lanes[idx].jobs.pop_front().expect("checked non-empty");
             used = used.saturating_add(est);
-            let handle = tokio::spawn(run_job(job));
-            inflight.push((idx, est, handle));
+            active_lanes.insert(idx);
+            let future = run_job(job);
+            let handle = tasks.spawn(async move {
+                let saved = future.await;
+                (idx, est, saved)
+            });
+            estimates.insert(handle.id(), (idx, est));
             dispatched = true;
             break;
         }
 
         if !dispatched {
-            if inflight.is_empty() {
+            if tasks.is_empty() {
                 break;
             }
-            let (done, result) = std::future::poll_fn(|cx| {
-                for (i, (_, _, handle)) in inflight.iter_mut().enumerate() {
-                    if let Poll::Ready(result) = Pin::new(handle).poll(cx) {
-                        return Poll::Ready((i, result));
+            match tasks.join_next_with_id().await {
+                Some(Ok((id, (_idx, _est, saved)))) => {
+                    if let Some((idx, est)) = estimates.remove(&id) {
+                        used = used.saturating_sub(est);
+                        active_lanes.remove(&idx);
                     }
+                    total += saved;
                 }
-                Poll::Pending
-            })
-            .await;
-            let (_idx, est, _) = inflight.remove(done);
-            let output = result.unwrap_or_else(|e| {
-                eprintln!("warn: lane job panicked, counting as 0: {e}");
-                0
-            });
-            used = used.saturating_sub(est);
-            total += output;
+                Some(Err(error)) => {
+                    if let Some((idx, est)) = estimates.remove(&error.id()) {
+                        used = used.saturating_sub(est);
+                        active_lanes.remove(&idx);
+                    }
+                    eprintln!("warn: lane job panicked, counting as 0: {error}");
+                }
+                None => break,
+            }
         }
     }
 

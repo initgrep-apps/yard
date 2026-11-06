@@ -21,13 +21,11 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::engine::result::{CompressionError, CompressionResult, STRATEGY_ALREADY_UNDER_TARGET};
 use crate::engine::{
-    BestAttempt, CompressionProcessor, ProgressSender, SidecarName, SidecarPaths, StderrTail,
-    deliver_output, stderr_tail,
+    AttemptDecision, AttemptOutcome, CompressionError, CompressionProcessor, CompressionResult,
+    JobContext, Ladder, ProgressSender, SidecarName, StderrTail, stderr_tail,
 };
 use crate::models::Category;
-use crate::settings::QualityFloors;
 use crate::sidecar::suppress_console_window;
 
 pub struct VideoProcessor;
@@ -428,16 +426,6 @@ impl VideoProcessor {
         Ok(())
     }
 
-    fn remove_all(paths: &[PathBuf]) {
-        for path in paths {
-            if let Err(e) = std::fs::remove_file(path) {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    eprintln!("warn: temp cleanup failed for {}: {e}", path.display());
-                }
-            }
-        }
-    }
-
     /// Removes every temp-dir file sharing the passlogfile prefix (ffmpeg
     /// writes `<prefix>-0.log`, `<prefix>-0.log.mbtree`, …). Orphan passlogs
     /// after cancel/error are a regression.
@@ -805,41 +793,23 @@ impl CompressionProcessor for VideoProcessor {
         crate::registry::extensions_for(Category::Video)
     }
 
-    fn compress_to_target(
-        &self,
-        input: &Path,
-        output: &Path,
-        target_bytes: u64,
-        quality_floor: &QualityFloors,
-        cancel_token: CancellationToken,
-        progress: ProgressSender,
-        sidecar_paths: &SidecarPaths,
-        temp_dir: &Path,
-    ) -> Result<CompressionResult, CompressionError> {
-        let input_size = std::fs::metadata(input)
+    fn compress(&self, ctx: &JobContext<'_>) -> Result<CompressionResult, CompressionError> {
+        let input_size = std::fs::metadata(ctx.input)
             .map(|m| m.len())
             .map_err(|e| CompressionError::InputFileError(e.to_string()))?;
 
         // Already under target — copy as-is, no sidecar spawn (spec §6).
         // Checked BEFORE requiring ffmpeg/ffprobe so a video under target
         // never fails on missing sidecars.
-        if input_size <= target_bytes {
-            return deliver_output(
-                input,
-                output,
-                input_size,
-                STRATEGY_ALREADY_UNDER_TARGET.to_string(),
-                100,
-                true,
-                &progress,
-                &cancel_token,
-            );
+        let mut ladder = Ladder::new();
+        if let Some(result) = ladder.shortcut(ctx, input_size) {
+            return Ok(result);
         }
 
-        let ffmpeg_path = sidecar_paths.require(SidecarName::Ffmpeg)?;
-        let ffprobe_path = sidecar_paths.require(SidecarName::Ffprobe)?;
+        let ffmpeg_path = ctx.sidecars.require(SidecarName::Ffmpeg)?;
+        let ffprobe_path = ctx.sidecars.require(SidecarName::Ffprobe)?;
 
-        let input_streams = Self::probe_streams_with_cancel(input, ffprobe_path, &cancel_token)?;
+        let input_streams = Self::probe_streams_with_cancel(ctx.input, ffprobe_path, &ctx.cancel)?;
         let duration_secs = input_streams.duration_secs;
         if duration_secs < MIN_DURATION_SECS {
             return Err(CompressionError::SidecarFailed(
@@ -851,20 +821,15 @@ impl CompressionProcessor for VideoProcessor {
                 "File may be corrupt (no video stream)".to_string(),
             ));
         }
-        let bitrate_k = Self::video_bitrate_kbps(target_bytes, duration_secs, AUDIO_KBPS);
+        let bitrate_k = Self::video_bitrate_kbps(ctx.target_bytes, duration_secs, AUDIO_KBPS);
 
         // The .mov → .mp4 output naming is applied by the queue (spec §3
         // format table) BEFORE collision resolution, so the path already
         // ends .mp4 here — overwriting an existing file would never be
         // caught as a rename collision.
-        let final_output = output.to_path_buf();
+        let res_rungs = Self::resolution_rungs(&ctx.floors.video.min_resolution);
+        let crf_values = Self::crf_rungs(ctx.floors.video.min_crf);
 
-        let res_rungs = Self::resolution_rungs(&quality_floor.video.min_resolution);
-        let crf_values = Self::crf_rungs(quality_floor.video.min_crf);
-
-        let mut smallest: Option<BestAttempt> = None;
-        let mut attempt_outputs: Vec<PathBuf> = Vec::new();
-        let mut passlog_prefixes: Vec<PathBuf> = Vec::new();
         let mut last_error: Option<CompressionError> = None;
 
         // One ABR encode at the highest allowed resolution; CRF then takes
@@ -873,7 +838,7 @@ impl CompressionProcessor for VideoProcessor {
         if bitrate_k >= MIN_VIDEO_KBPS {
             attempts.push(VideoAttempt::TwoPass {
                 scale_width: res_rungs.first().map(|(_, width)| *width),
-                passlog_prefix: temp_dir.join("passlog-attempt-0"),
+                passlog_prefix: ctx.temp_dir.join("passlog-attempt-0"),
             });
         } else {
             eprintln!(
@@ -900,13 +865,16 @@ impl CompressionProcessor for VideoProcessor {
             }
         }
 
-        let total_attempts = attempts.len();
-        let span = 95 / total_attempts.max(1);
-
-        let cancel_cleanup = |outputs: &[PathBuf], prefixes: &[PathBuf]| {
-            Self::remove_all(outputs);
+        let total_attempts = attempts.len().max(1);
+        let span = (100 / total_attempts) as u32;
+        let progress = ladder.progress(ctx);
+        if let Some(error) = last_error.take() {
+            ladder.record(ctx, AttemptOutcome::Failed(error));
+        }
+        let mut passlog_prefixes: Vec<PathBuf> = Vec::new();
+        let cleanup_passlogs = |prefixes: &[PathBuf]| {
             for prefix in prefixes {
-                Self::remove_passlogs(temp_dir, prefix);
+                Self::remove_passlogs(ctx.temp_dir, prefix);
             }
         };
 
@@ -919,38 +887,44 @@ impl CompressionProcessor for VideoProcessor {
                     scale_width,
                     passlog_prefix,
                 } => {
-                    let half = (span / 2) as u32;
-                    let pass1 = Self::pass1_args(input, bitrate_k, *scale_width, passlog_prefix);
+                    let half = span / 2;
+                    let pass1 =
+                        Self::pass1_args(ctx.input, bitrate_k, *scale_width, passlog_prefix);
                     Self::run_ffmpeg_with_progress(
                         ffmpeg_path,
                         &pass1,
-                        &cancel_token,
+                        &ctx.cancel,
                         &progress,
                         base,
                         half,
                         duration_secs,
                     )?;
-                    let pass2 =
-                        Self::pass2_args(input, temp_output, bitrate_k, *scale_width, passlog_prefix);
+                    let pass2 = Self::pass2_args(
+                        ctx.input,
+                        temp_output,
+                        bitrate_k,
+                        *scale_width,
+                        passlog_prefix,
+                    );
                     Self::run_ffmpeg_with_progress(
                         ffmpeg_path,
                         &pass2,
-                        &cancel_token,
+                        &ctx.cancel,
                         &progress,
                         base + half,
-                        span as u32 - half,
+                        span - half,
                         duration_secs,
                     )?;
                 }
                 VideoAttempt::Crf { crf, scale_width } => {
-                    let args = Self::crf_args(input, temp_output, *crf, *scale_width);
+                    let args = Self::crf_args(ctx.input, temp_output, *crf, *scale_width);
                     Self::run_ffmpeg_with_progress(
                         ffmpeg_path,
                         &args,
-                        &cancel_token,
+                        &ctx.cancel,
                         &progress,
                         base,
-                        span as u32,
+                        span,
                         duration_secs,
                     )?;
                 }
@@ -962,86 +936,60 @@ impl CompressionProcessor for VideoProcessor {
         };
 
         for (index, attempt) in attempts.iter().enumerate() {
-            if cancel_token.is_cancelled() {
-                cancel_cleanup(&attempt_outputs, &passlog_prefixes);
-                return Err(CompressionError::Cancelled);
+            if ctx.cancel.is_cancelled() {
+                cleanup_passlogs(&passlog_prefixes);
+                return ladder.finish(ctx);
             }
 
-            let temp_output = temp_dir.join(format!("attempt-{index}.mp4"));
+            let temp_output = ctx.temp_dir.join(format!("attempt-{index}.mp4"));
             let passlog_prefix = match attempt {
                 VideoAttempt::TwoPass { passlog_prefix, .. } => Some(passlog_prefix.clone()),
                 VideoAttempt::Crf { .. } => None,
             };
-            attempt_outputs.push(temp_output.clone());
+            ladder.track(&temp_output);
             if let Some(prefix) = &passlog_prefix {
                 passlog_prefixes.push(prefix.clone());
             }
-            let base = (index * span) as u32;
+            let base = (index * span as usize) as u32;
             progress.send_progress(base);
 
-            let outcome = run_attempt(attempt, &temp_output, base);
-
-            match outcome {
-                Ok(size) => {
-                    if size <= target_bytes {
-                        return deliver_output(
-                            &temp_output,
-                            &final_output,
-                            size,
-                            attempt.strategy(bitrate_k),
-                            attempt.quality(bitrate_k),
-                            true,
-                            &progress,
-                            &cancel_token,
-                        );
+            let outcome = match run_attempt(attempt, &temp_output, base) {
+                Ok(size) => AttemptOutcome::Produced {
+                    path: temp_output,
+                    size,
+                    quality: attempt.quality(bitrate_k),
+                    strategy: attempt.strategy(bitrate_k),
+                },
+                Err(error) => {
+                    if !ctx.cancel.is_cancelled() {
+                        eprintln!("warn: video attempt failed, trying next: {error}");
                     }
-                    BestAttempt::keep_smaller_in(
-                        &mut smallest,
-                        BestAttempt {
-                            size,
-                            path: temp_output.clone(),
-                            strategy: attempt.strategy(bitrate_k),
-                            quality: attempt.quality(bitrate_k),
-                        },
-                    );
+                    AttemptOutcome::Failed(error)
                 }
-                Err(CompressionError::Cancelled) => {
-                    cancel_cleanup(&attempt_outputs, &passlog_prefixes);
-                    return Err(CompressionError::Cancelled);
-                }
-                Err(e) => {
-                    eprintln!("warn: video attempt failed, trying next: {e}");
-                    last_error = Some(e);
-                    Self::remove_all(std::slice::from_ref(&temp_output));
-                }
+            };
+            let decision = ladder.record(ctx, outcome);
+            if let AttemptDecision::Stop(result) = decision {
+                cleanup_passlogs(&passlog_prefixes);
+                return Ok(result);
             }
             if let Some(prefix) = &passlog_prefix {
-                Self::remove_passlogs(temp_dir, prefix);
+                Self::remove_passlogs(ctx.temp_dir, prefix);
+            }
+            if ctx.cancel.is_cancelled() {
+                cleanup_passlogs(&passlog_prefixes);
+                return ladder.finish(ctx);
             }
         }
 
-        if let Some(best) = smallest {
-            return deliver_output(
-                &best.path,
-                &final_output,
-                best.size,
-                format!("{},best-effort", best.strategy),
-                best.quality,
-                false,
-                &progress,
-                &cancel_token,
-            );
-        }
-
-        Err(last_error.unwrap_or_else(|| {
-            CompressionError::SidecarFailed("Could not compress video".to_string())
-        }))
+        ladder.finish(ctx)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::{ProgressSender, SidecarPaths};
+    use crate::settings::QualityFloors;
     use std::fs;
     use std::time::Instant;
 
@@ -1127,7 +1075,6 @@ mod tests {
         path.to_string_lossy().to_string()
     }
 
-    #[cfg(unix)]
     fn test_sidecar_paths(ffmpeg: Option<String>, ffprobe: Option<String>) -> SidecarPaths {
         SidecarPaths {
             vips: None,
@@ -1139,14 +1086,12 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     fn oversized_input(dir: &Path, name: &str) -> PathBuf {
         let input = dir.join(name);
         fs::write(&input, vec![0u8; 300 * 1024]).unwrap();
         input
     }
 
-    #[cfg(unix)]
     fn temp_dir_under(dir: &Path) -> PathBuf {
         let tmp = dir.join("tmp");
         fs::create_dir_all(&tmp).unwrap();
@@ -1650,7 +1595,7 @@ exit 1
         let input = oversized_input(&dir.path(), "in.mp4");
         let tmp = temp_dir_under(&dir.path());
 
-        let result = VideoProcessor.compress_to_target(
+        let result = VideoProcessor.compress(&JobContext::new(
             &input,
             &dir.path().join("out.mp4"),
             50000,
@@ -1659,7 +1604,7 @@ exit 1
             ProgressSender::test_stub(),
             &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
             &tmp,
-        );
+        ));
 
         let err = result.unwrap_err();
         assert!(
@@ -1682,7 +1627,7 @@ exit 1
             let tmp = temp_dir_under(&dir.path());
 
             let result = VideoProcessor
-                .compress_to_target(
+                .compress(&JobContext::new(
                     &input,
                     &dir.path().join("out.mp4"),
                     50000,
@@ -1691,7 +1636,7 @@ exit 1
                     ProgressSender::test_stub(),
                     &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
                     &tmp,
-                )
+                ))
                 .unwrap();
             assert!(result.met_target, "got: {}", result.strategy_used);
         }
@@ -1709,7 +1654,7 @@ exit 1
             let input = oversized_input(&dir.path(), "in.mp4");
             let tmp = temp_dir_under(&dir.path());
 
-            let result = VideoProcessor.compress_to_target(
+            let result = VideoProcessor.compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.mp4"),
                 50000,
@@ -1718,7 +1663,7 @@ exit 1
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
                 &tmp,
-            );
+            ));
 
             let err = result.unwrap_err();
             assert!(
@@ -1741,7 +1686,7 @@ exit 1
         let input = oversized_input(&dir.path(), "in.mp4");
         let tmp = temp_dir_under(&dir.path());
 
-        let result = VideoProcessor.compress_to_target(
+        let result = VideoProcessor.compress(&JobContext::new(
             &input,
             &dir.path().join("out.mp4"),
             50000,
@@ -1750,7 +1695,7 @@ exit 1
             ProgressSender::test_stub(),
             &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
             &tmp,
-        );
+        ));
 
         let err = result.unwrap_err();
         assert!(
@@ -1773,7 +1718,7 @@ exit 1
         let tmp = temp_dir_under(&dir.path());
 
         let result = VideoProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.mp4"),
                 50000,
@@ -1782,7 +1727,7 @@ exit 1
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         assert!(result.met_target, "strategy: {}", result.strategy_used);
@@ -1833,7 +1778,7 @@ exit 1
         let tmp = temp_dir_under(&dir.path());
 
         let result = VideoProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.mp4"),
                 500,
@@ -1842,7 +1787,7 @@ exit 1
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         assert!(!result.met_target);
@@ -1899,7 +1844,7 @@ exit 1
             let input = input.clone();
             let tmp = tmp.clone();
             move || {
-                VideoProcessor.compress_to_target(
+                VideoProcessor.compress(&JobContext::new(
                     &input,
                     &output_path,
                     50000,
@@ -1908,7 +1853,7 @@ exit 1
                     ProgressSender::test_stub(),
                     &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
                     &tmp,
-                )
+                ))
             }
         });
 
@@ -1968,7 +1913,7 @@ exit 1
         let output = dir.path().join("clip.mp4");
 
         let result = VideoProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &output,
                 50000,
@@ -1977,10 +1922,40 @@ exit 1
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         assert!(result.met_target);
+        assert_eq!(result.output_path, output, "processor must not re-derive the output name");
+        assert_eq!(result.output_path.extension().unwrap(), "mp4");
+        assert!(result.output_path.exists());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_fake_engine_compresses_a_video() {
+        let engine = crate::engine::fake_engine_path()
+            .to_string_lossy()
+            .to_string();
+        let dir = tempfile::tempdir().unwrap();
+        let input = oversized_input(&dir.path(), "clip.mov");
+        let tmp = temp_dir_under(&dir.path());
+        let output = dir.path().join("clip.mp4");
+
+        let result = VideoProcessor
+            .compress(&JobContext::new(
+                &input,
+                &output,
+                50000,
+                &QualityFloors::default(),
+                CancellationToken::new(),
+                ProgressSender::test_stub(),
+                &test_sidecar_paths(Some(engine.clone()), Some(engine)),
+                &tmp,
+            ))
+            .unwrap();
+
+        assert!(result.met_target, "strategy: {}", result.strategy_used);
         assert_eq!(result.output_path, output, "processor must not re-derive the output name");
         assert_eq!(result.output_path.extension().unwrap(), "mp4");
         assert!(result.output_path.exists());
@@ -1995,7 +1970,7 @@ exit 1
         let input = oversized_input(&dir.path(), "broken.mp4");
         let tmp = temp_dir_under(&dir.path());
 
-        let result = VideoProcessor.compress_to_target(
+        let result = VideoProcessor.compress(&JobContext::new(
             &input,
             &dir.path().join("out.mp4"),
             50000,
@@ -2004,7 +1979,7 @@ exit 1
             ProgressSender::test_stub(),
             &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
             &tmp,
-        );
+        ));
 
         let err = result.unwrap_err();
         assert!(
@@ -2024,7 +1999,7 @@ exit 1
         let tmp = temp_dir_under(&dir.path());
 
         let result = VideoProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("small.mp4"),
                 50000,
@@ -2034,7 +2009,7 @@ exit 1
                 // None sidecars: any spawn attempt would fail the job.
                 &test_sidecar_paths(None, None),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         assert!(result.met_target);
@@ -2055,7 +2030,7 @@ exit 1
         let input = oversized_input(&dir.path(), "in.mp4");
         let tmp = temp_dir_under(&dir.path());
 
-        let result = VideoProcessor.compress_to_target(
+        let result = VideoProcessor.compress(&JobContext::new(
             &input,
             &dir.path().join("out.mp4"),
             50000,
@@ -2064,7 +2039,7 @@ exit 1
             ProgressSender::test_stub(),
             &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
             &tmp,
-        );
+        ));
 
         let err = result.unwrap_err();
         assert!(err.to_string().contains("File may be corrupt"), "got: {err}");
@@ -2082,7 +2057,7 @@ exit 1
         let input = oversized_input(&dir.path(), "in.mp4");
         let tmp = temp_dir_under(&dir.path());
 
-        let result = VideoProcessor.compress_to_target(
+        let result = VideoProcessor.compress(&JobContext::new(
             &input,
             &dir.path().join("out.mp4"),
             50000,
@@ -2091,7 +2066,7 @@ exit 1
             ProgressSender::test_stub(),
             &test_sidecar_paths(None, Some(ffprobe)),
             &tmp,
-        );
+        ));
 
         let err = result.unwrap_err();
         assert!(
@@ -2122,7 +2097,7 @@ exit 1
         };
 
         let result = VideoProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.mp4"),
                 50000,
@@ -2131,7 +2106,7 @@ exit 1
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         let log = ffmpeg_log(&dir.path());
@@ -2215,7 +2190,7 @@ head -c $(( size - 12 )) /dev/zero >> "$out"
         let tmp = temp_dir_under(&dir.path());
 
         let result = VideoProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.mp4"),
                 50000,
@@ -2224,7 +2199,7 @@ head -c $(( size - 12 )) /dev/zero >> "$out"
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         let log = ffmpeg_log(&dir.path());
@@ -2278,7 +2253,7 @@ exit 1
         let input = oversized_input(&dir.path(), "in.mp4");
         let tmp = temp_dir_under(&dir.path());
 
-        let result = VideoProcessor.compress_to_target(
+        let result = VideoProcessor.compress(&JobContext::new(
             &input,
             &dir.path().join("out.mp4"),
             50000,
@@ -2287,7 +2262,7 @@ exit 1
             ProgressSender::test_stub(),
             &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
             &tmp,
-        );
+        ));
 
         let err = result.unwrap_err();
         // The last attempt is the final CRF rung at the 480p cap width.
@@ -2344,7 +2319,7 @@ head -c 88 /dev/zero >> "$out"
         let tmp = temp_dir_under(&dir.path());
 
         let result = VideoProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.mp4"),
                 50000,
@@ -2353,7 +2328,7 @@ head -c 88 /dev/zero >> "$out"
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         let log = ffmpeg_log(&dir.path());
@@ -2409,7 +2384,7 @@ head -c 88 /dev/zero >> "$out"
         let (progress, seen) = ProgressSender::test_collector();
 
         let result = VideoProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.mp4"),
                 50000,
@@ -2418,7 +2393,7 @@ head -c 88 /dev/zero >> "$out"
                 progress,
                 &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         assert!(result.met_target);
@@ -2647,7 +2622,7 @@ head -c 88 /dev/zero >> "$out"
         let (progress, seen) = ProgressSender::test_collector();
 
         let result = VideoProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &output,
                 50000,
@@ -2656,7 +2631,7 @@ head -c 88 /dev/zero >> "$out"
                 progress,
                 &test_sidecar_paths(Some(ffmpeg), Some(ffprobe)),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         assert!(result.met_target);

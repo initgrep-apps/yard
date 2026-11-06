@@ -15,16 +15,15 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use tokio_util::sync::CancellationToken;
 
 use crate::engine::processor::run_sidecar_capture_stdout;
-use crate::engine::result::STRATEGY_ALREADY_UNDER_TARGET;
 use crate::engine::{
-    BestAttempt, CompressionError, CompressionProcessor, CompressionResult, ProgressSender,
-    SidecarName, SidecarPaths, ToleratedExit, deliver_output, gs_failure_with_resources_hint,
-    run_sidecar, strict_exit,
+    AttemptDecision, AttemptOutcome, CompressionError, CompressionProcessor, CompressionResult,
+    JobContext, Ladder, SidecarName, ToleratedExit, gs_failure_with_resources_hint, run_sidecar,
+    strict_exit,
 };
 use crate::models::Category;
 use crate::settings::QualityFloors;
@@ -199,16 +198,6 @@ impl PdfProcessor {
         Ok(size)
     }
 
-    fn remove_all(paths: &[PathBuf]) {
-        for path in paths {
-            if let Err(e) = std::fs::remove_file(path) {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    eprintln!("warn: temp cleanup failed for {}: {e}", path.display());
-                }
-            }
-        }
-    }
-
     fn ladder_passes(quality_floor: &QualityFloors) -> Vec<PdfPass> {
         let mut passes = vec![PdfPass::QpdfLossless, PdfPass::QpdfImageOpt];
         let min_dpi = quality_floor.pdf.min_dpi;
@@ -262,66 +251,44 @@ impl CompressionProcessor for PdfProcessor {
         crate::registry::extensions_for(Category::Pdf)
     }
 
-    fn compress_to_target(
-        &self,
-        input: &Path,
-        output: &Path,
-        target_bytes: u64,
-        quality_floor: &QualityFloors,
-        cancel_token: CancellationToken,
-        progress: ProgressSender,
-        sidecar_paths: &SidecarPaths,
-        temp_dir: &Path,
-    ) -> Result<CompressionResult, CompressionError> {
-        let input_size = std::fs::metadata(input)
+    fn compress(&self, ctx: &JobContext<'_>) -> Result<CompressionResult, CompressionError> {
+        let input_size = std::fs::metadata(ctx.input)
             .map(|m| m.len())
             .map_err(|e| CompressionError::InputFileError(e.to_string()))?;
 
-        // Already under target — copy as-is (spec §6)
-        if input_size <= target_bytes {
-            return deliver_output(
-                input,
-                output,
-                input_size,
-                STRATEGY_ALREADY_UNDER_TARGET.to_string(),
-                100,
-                true,
-                &progress,
-                &cancel_token,
-            );
+        let mut ladder = Ladder::new();
+        if let Some(result) = ladder.shortcut(ctx, input_size) {
+            return Ok(result);
         }
 
-        let qpdf_path = sidecar_paths.require(SidecarName::Qpdf)?;
-        let gs_path = sidecar_paths.require(SidecarName::Gs)?;
+        let qpdf_path = ctx.sidecars.require(SidecarName::Qpdf)?;
+        let gs_path = ctx.sidecars.require(SidecarName::Gs)?;
 
-        let passes = Self::ladder_passes(quality_floor);
+        let passes = Self::ladder_passes(ctx.floors);
         let total = passes.len();
-        let mut smallest: Option<BestAttempt> = None;
-        let mut attempt_paths: Vec<PathBuf> = Vec::new();
-        let mut last_error: Option<CompressionError> = None;
+        let progress = ladder.progress(ctx);
 
         for (index, pass) in passes.iter().enumerate() {
-            if cancel_token.is_cancelled() {
-                Self::remove_all(&attempt_paths);
-                return Err(CompressionError::Cancelled);
+            if ctx.cancel.is_cancelled() {
+                return ladder.finish(ctx);
             }
 
-            let temp_file = temp_dir.join(format!("attempt-{}.pdf", index));
-            attempt_paths.push(temp_file.clone());
-            let gs_resources = sidecar_paths.gs_resources.as_ref();
-            let spec = Self::pass_spec(pass, input, &temp_file, gs_resources);
+            let temp_file = ctx.temp_dir.join(format!("attempt-{}.pdf", index));
+            ladder.track(&temp_file);
+            let gs_resources = ctx.sidecars.gs_resources.as_ref();
+            let spec = Self::pass_spec(pass, ctx.input, &temp_file, gs_resources);
             let sidecar_path = match pass {
                 PdfPass::QpdfLossless | PdfPass::QpdfImageOpt => qpdf_path,
                 PdfPass::GsLadder { .. } => gs_path,
             };
 
-            progress.send_progress(((index * 95) / total) as u32);
+            progress.send_progress(((index * 100) / total.max(1)) as u32);
 
             let attempt = run_sidecar(
                 sidecar_path,
                 spec.label,
                 &spec.args,
-                &cancel_token,
+                &ctx.cancel,
                 match pass {
                     PdfPass::QpdfLossless | PdfPass::QpdfImageOpt => {
                         qpdf_tolerated_exit as ToleratedExit
@@ -329,79 +296,58 @@ impl CompressionProcessor for PdfProcessor {
                     PdfPass::GsLadder { .. } => strict_exit as ToleratedExit,
                 },
             )
-            .and_then(|_| Self::measure_output(&temp_file))
-            .and_then(|size| validate_pdf(input, &temp_file, qpdf_path).map(|()| size));
+            .and_then(|()| Self::measure_output(&temp_file))
+            .and_then(|size| validate_pdf(ctx.input, &temp_file, qpdf_path).map(|()| size));
 
             match attempt {
                 Ok(size) => {
-                    if cancel_token.is_cancelled() {
-                        Self::remove_all(&attempt_paths);
-                        return Err(CompressionError::Cancelled);
-                    }
-                    if size <= target_bytes {
-                        return deliver_output(
-                            &temp_file,
-                            output,
+                    let decision = ladder.record(
+                        ctx,
+                        AttemptOutcome::Produced {
+                            path: temp_file,
                             size,
-                            spec.strategy,
-                            spec.quality,
-                            true,
-                            &progress,
-                            &cancel_token,
-                        );
-                    }
-                    BestAttempt::keep_smaller_in(
-                        &mut smallest,
-                        BestAttempt {
-                            size,
-                            path: temp_file.clone(),
-                            strategy: spec.strategy.clone(),
                             quality: spec.quality,
+                            strategy: spec.strategy,
                         },
                     );
-                }
-                Err(CompressionError::Cancelled) => {
-                    Self::remove_all(&attempt_paths);
-                    return Err(CompressionError::Cancelled);
+                    if let AttemptDecision::Stop(result) = decision {
+                        return Ok(result);
+                    }
+                    if ctx.cancel.is_cancelled() {
+                        return ladder.finish(ctx);
+                    }
                 }
                 // Spec §5: one failing pass must not abort the remaining
                 // passes — a corrupt-input failure in qpdf still leaves the
                 // gs ladder a chance to succeed. Record the attempt as
                 // failed and move on (issue 13).
-                Err(e) => {
-                    eprintln!("warn: {} pass failed, trying next: {e}", spec.label);
-                    last_error = Some(if spec.label == "gs" && gs_resources.is_none() {
-                        gs_failure_with_resources_hint(e)
+                Err(error) => {
+                    if ctx.cancel.is_cancelled() {
+                        return ladder.finish(ctx);
+                    }
+                    eprintln!("warn: {} pass failed, trying next: {error}", spec.label);
+                    let error = if spec.label == "gs" && gs_resources.is_none() {
+                        gs_failure_with_resources_hint(error)
                     } else {
-                        e
-                    });
-                    Self::remove_all(std::slice::from_ref(&temp_file));
+                        error
+                    };
+                    ladder.record(ctx, AttemptOutcome::Failed(error));
+                    if ctx.cancel.is_cancelled() {
+                        return ladder.finish(ctx);
+                    }
                 }
             }
         }
 
-        if let Some(best) = smallest {
-            return deliver_output(
-                &best.path,
-                output,
-                best.size,
-                format!("{},best-effort", best.strategy),
-                best.quality,
-                false,
-                &progress,
-                &cancel_token,
-            );
-        }
-
-        Err(last_error.unwrap_or_else(|| {
-            CompressionError::SidecarFailed("Could not compress pdf".to_string())
-        }))
+        ladder.finish(ctx)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::{ProgressSender, SidecarPaths};
+    use std::path::PathBuf;
     use crate::sidecar::GsResources;
     use std::fs;
     use std::time::{Duration, Instant};
@@ -834,7 +780,7 @@ esac
         let tmp = temp_dir_under(&dir.path());
 
         let result = PdfProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.pdf"),
                 2000,
@@ -843,7 +789,7 @@ esac
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         assert!(result.met_target, "strategy: {}", result.strategy_used);
@@ -876,7 +822,7 @@ esac
         let tmp = temp_dir_under(&dir.path());
 
         let result = PdfProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.pdf"),
                 2000,
@@ -885,7 +831,7 @@ esac
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         assert!(result.met_target, "strategy: {}", result.strategy_used);
@@ -980,7 +926,7 @@ esac
         });
 
         let result = PdfProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.pdf"),
                 2000,
@@ -989,7 +935,7 @@ esac
                 ProgressSender::test_stub(),
                 &paths,
                 &tmp,
-            )
+            ))
             .unwrap();
 
         assert_eq!(result.strategy_used, "gs dpi=100,jpegq=15");
@@ -1026,7 +972,7 @@ esac
         };
 
         let result = PdfProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.pdf"),
                 2000,
@@ -1035,7 +981,7 @@ esac
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         assert!(
@@ -1119,7 +1065,7 @@ esac
         let tmp = temp_dir_under(&dir.path());
 
         let result = PdfProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.pdf"),
                 2000,
@@ -1128,7 +1074,7 @@ esac
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         assert!(!result.met_target);
@@ -1162,7 +1108,7 @@ esac
         let tmp = temp_dir_under(&dir.path());
 
         let result = PdfProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.pdf"),
                 2000,
@@ -1171,7 +1117,7 @@ esac
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         assert!(result.met_target);
@@ -1192,7 +1138,7 @@ esac
         let input = oversized_input(&dir.path());
         let tmp = temp_dir_under(&dir.path());
 
-        let result = PdfProcessor.compress_to_target(
+        let result = PdfProcessor.compress(&JobContext::new(
             &input,
             &dir.path().join("out.pdf"),
             2000,
@@ -1201,7 +1147,7 @@ esac
             ProgressSender::test_stub(),
             &test_sidecar_paths(Some(fake_qpdf), None),
             &tmp,
-        );
+        ));
         match result {
             Err(e) => {
                 assert!(
@@ -1228,7 +1174,7 @@ esac
         let input = oversized_input(&dir.path());
         let tmp = temp_dir_under(&dir.path());
 
-        let result = PdfProcessor.compress_to_target(
+        let result = PdfProcessor.compress(&JobContext::new(
             &input,
             &dir.path().join("out.pdf"),
             2000,
@@ -1237,7 +1183,7 @@ esac
             ProgressSender::test_stub(),
             &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
             &tmp,
-        );
+        ));
         match result {
             Err(CompressionError::SidecarFailed(msg)) => {
                 assert!(
@@ -1265,7 +1211,7 @@ esac
         let tmp = temp_dir_under(&dir.path());
 
         let result = PdfProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.pdf"),
                 2000,
@@ -1274,7 +1220,7 @@ esac
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         assert!(
@@ -1302,7 +1248,7 @@ esac
         let tmp = temp_dir_under(&dir.path());
 
         let result = PdfProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.pdf"),
                 2000,
@@ -1311,7 +1257,7 @@ esac
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         assert!(
@@ -1414,7 +1360,7 @@ exit 3
         let worker_token = token.clone();
         let started = Instant::now();
         let handle = std::thread::spawn(move || {
-            PdfProcessor.compress_to_target(
+            PdfProcessor.compress(&JobContext::new(
                 &worker_input,
                 &worker_output,
                 2000,
@@ -1423,7 +1369,7 @@ exit 3
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(worker_qpdf), Some(worker_gs)),
                 &worker_tmp,
-            )
+            ))
         });
         std::thread::sleep(Duration::from_millis(300));
         token.cancel();
@@ -1456,7 +1402,7 @@ exit 3
         let input = oversized_input(&dir.path());
         let tmp = temp_dir_under(&dir.path());
 
-        let result = PdfProcessor.compress_to_target(
+        let result = PdfProcessor.compress(&JobContext::new(
             &input,
             &dir.path().join("out.pdf"),
             2000,
@@ -1465,7 +1411,7 @@ exit 3
             ProgressSender::test_stub(),
             &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
             &tmp,
-        );
+        ));
         match result {
             Err(CompressionError::SidecarFailed(msg)) => {
                 assert!(msg.contains("exited with code Some(1)"), "msg: {}", msg);
@@ -1491,7 +1437,7 @@ exit 3
         let input = oversized_input(&dir.path());
         let tmp = temp_dir_under(&dir.path());
 
-        let without = PdfProcessor.compress_to_target(
+        let without = PdfProcessor.compress(&JobContext::new(
             &input,
             &dir.path().join("out.pdf"),
             2000,
@@ -1503,7 +1449,7 @@ exit 3
                 Some(fake_gs_stderr_chatter_failer(&dir.path())),
             ),
             &tmp,
-        );
+        ));
         match without {
             Err(CompressionError::SidecarFailed(msg)) => {
                 assert!(
@@ -1527,7 +1473,7 @@ exit 3
             Some(staged_gs.clone()),
         );
         paths.gs_resources = Some(gs_resources_fixture());
-        let with = PdfProcessor.compress_to_target(
+        let with = PdfProcessor.compress(&JobContext::new(
             &input,
             &dir.path().join("out2.pdf"),
             2000,
@@ -1536,7 +1482,7 @@ exit 3
             ProgressSender::test_stub(),
             &paths,
             &tmp,
-        );
+        ));
         match with {
             Err(CompressionError::SidecarFailed(msg)) => {
                 assert!(msg.contains("exited with code Some(1)"), "msg: {}", msg);
@@ -1559,7 +1505,7 @@ exit 3
         let input = oversized_input(&dir.path());
         let tmp = temp_dir_under(&dir.path());
 
-        let result = PdfProcessor.compress_to_target(
+        let result = PdfProcessor.compress(&JobContext::new(
             &input,
             &dir.path().join("out.pdf"),
             2000,
@@ -1568,7 +1514,7 @@ exit 3
             ProgressSender::test_stub(),
             &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
             &tmp,
-        );
+        ));
         match result {
             Err(e) => {
                 assert!(
@@ -1595,7 +1541,7 @@ exit 3
         let tmp = temp_dir_under(&dir.path());
 
         let result = PdfProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.pdf"),
                 2000,
@@ -1604,7 +1550,7 @@ exit 3
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         assert!(!result.met_target);
@@ -1663,7 +1609,7 @@ exit 3
         let input = oversized_input(&dir.path());
         let tmp = temp_dir_under(&dir.path());
 
-        let result = PdfProcessor.compress_to_target(
+        let result = PdfProcessor.compress(&JobContext::new(
             &input,
             &dir.path().join("out.pdf"),
             2000,
@@ -1672,7 +1618,7 @@ exit 3
             ProgressSender::test_stub(),
             &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
             &tmp,
-        );
+        ));
 
         match result {
             Err(CompressionError::SidecarFailed(msg)) => {
@@ -1719,7 +1665,7 @@ exit 3
         let input = oversized_input(&dir.path());
         let tmp = temp_dir_under(&dir.path());
 
-        let result = PdfProcessor.compress_to_target(
+        let result = PdfProcessor.compress(&JobContext::new(
             &input,
             &dir.path().join("out.pdf"),
             2000,
@@ -1728,7 +1674,7 @@ exit 3
             ProgressSender::test_stub(),
             &test_sidecar_paths(Some(fake_qpdf), Some(fake_gs)),
             &tmp,
-        );
+        ));
 
         match result {
             Err(CompressionError::SidecarFailed(msg)) => {
@@ -1769,7 +1715,7 @@ exit 3
             (None, None, "qpdf"),
         ];
         for (qpdf, gs, expected) in cases {
-            let result = PdfProcessor.compress_to_target(
+            let result = PdfProcessor.compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.pdf"),
                 2000,
@@ -1778,7 +1724,7 @@ exit 3
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(qpdf, gs),
                 &tmp,
-            );
+            ));
             match result {
                 Err(CompressionError::SidecarNotFound(name)) => assert_eq!(
                     name, expected,
@@ -1844,7 +1790,7 @@ exit 3
 
         let tmp = temp_dir_under(&dir.path());
         let result = PdfProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.pdf"),
                 10 * 1024,
@@ -1853,7 +1799,7 @@ exit 3
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(qpdf), Some(gs)),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         assert!(

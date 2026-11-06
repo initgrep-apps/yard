@@ -18,13 +18,11 @@ use std::path::{Path, PathBuf};
 
 use tokio_util::sync::CancellationToken;
 
-use crate::engine::result::STRATEGY_ALREADY_UNDER_TARGET;
 use crate::engine::{
-    deliver_output, run_sidecar, strict_exit, BestAttempt, CompressionError, CompressionProcessor,
-    CompressionResult, ProgressSender, SidecarName, SidecarPaths,
+    AttemptDecision, AttemptOutcome, CompressionError, CompressionProcessor, CompressionResult,
+    JobContext, Ladder, SidecarName, run_sidecar, strict_exit,
 };
 use crate::models::Category;
-use crate::settings::QualityFloors;
 
 pub struct ImageProcessor;
 
@@ -117,7 +115,6 @@ fn binary_search_quality(
     max_iterations: u32,
     target_bytes: u64,
     cancel_token: &CancellationToken,
-    progress: &ProgressSender,
     attempt: &mut dyn FnMut(u32) -> Result<(u64, PathBuf), CompressionError>,
 ) -> Result<Option<(u32, u64, PathBuf)>, CompressionError> {
     debug_assert!(lo <= hi, "binary_search_quality requires lo <= hi");
@@ -125,7 +122,7 @@ fn binary_search_quality(
     let mut hi = hi;
     let mut best: Option<(u32, u64, PathBuf)> = None;
 
-    for iteration in 0..max_iterations {
+    for _iteration in 0..max_iterations {
         if cancel_token.is_cancelled() {
             return Err(CompressionError::Cancelled);
         }
@@ -134,7 +131,6 @@ fn binary_search_quality(
         }
 
         let mid = (lo + hi) / 2;
-        progress.send_progress((iteration * 100 / max_iterations).min(90));
 
         let (size, path) = attempt(mid)?;
         if size <= target_bytes {
@@ -316,40 +312,21 @@ impl CompressionProcessor for ImageProcessor {
         crate::registry::extensions_for(Category::Image)
     }
 
-    fn compress_to_target(
-        &self,
-        input: &Path,
-        output: &Path,
-        target_bytes: u64,
-        quality_floor: &QualityFloors,
-        cancel_token: CancellationToken,
-        progress: ProgressSender,
-        sidecar_paths: &SidecarPaths,
-        temp_dir: &Path,
-    ) -> Result<CompressionResult, CompressionError> {
-        let input_size = std::fs::metadata(input)
+    fn compress(&self, ctx: &JobContext<'_>) -> Result<CompressionResult, CompressionError> {
+        let input_size = std::fs::metadata(ctx.input)
             .map(|m| m.len())
             .map_err(|e| CompressionError::InputFileError(e.to_string()))?;
 
-        // Already under target — copy as-is (spec §6)
-        if input_size <= target_bytes {
-            return deliver_output(
-                input,
-                output,
-                input_size,
-                STRATEGY_ALREADY_UNDER_TARGET.to_string(),
-                100,
-                true,
-                &progress,
-                &cancel_token,
-            );
+        let mut ladder = Ladder::new();
+        if let Some(result) = ladder.shortcut(ctx, input_size) {
+            return Ok(result);
         }
 
-        let ext = crate::registry::output_extension(input.to_string_lossy().as_ref());
+        let ext = crate::registry::output_extension(ctx.input.to_string_lossy().as_ref());
         let png_output = ext == "png";
-        let min_quality = quality_floor.image.min_quality;
-        let min_long_edge = quality_floor.image.min_long_edge;
-        let sidecar_path = sidecar_paths.require(SidecarName::Vips)?;
+        let min_quality = ctx.floors.image.min_quality;
+        let min_long_edge = ctx.floors.image.min_long_edge;
+        let sidecar_path = ctx.sidecars.require(SidecarName::Vips)?;
 
         // PNG has no lossy Q search; its palette save always runs at the
         // maximum quantisation quality and pays for it with dimensions.
@@ -358,20 +335,40 @@ impl CompressionProcessor for ImageProcessor {
         } else {
             min_quality
         };
-        let long_edge = read_dimensions(input).map(|(width, height)| width.max(height));
+        let long_edge = read_dimensions(ctx.input).map(|(width, height)| width.max(height));
+
+        // One full-size palette attempt gives PNG a chance to fit without
+        // touching dimensions (and the only legal attempt below the floor).
+        let mut widths = if png_output {
+            vec![NO_DOWNSCALE_WIDTH]
+        } else {
+            Vec::new()
+        };
+        if let Some(long_edge) = long_edge {
+            widths.extend(dimension_ladder(long_edge, min_long_edge));
+        }
+        let total_attempts = (usize::try_from(MAX_SEARCH_ITERATIONS).unwrap_or(usize::MAX)
+            + widths.len())
+        .max(1);
+        let progress = ladder.progress(ctx);
 
         // Distinct temp file per attempt — a later attempt must never
         // overwrite the file recorded as the best one.
         let attempt =
-            |n: u32, quality: u32, width: u32| -> Result<(u64, PathBuf), CompressionError> {
-                let temp_file = temp_dir.join(format!("attempt-{n}.{ext}"));
+            |ladder: &mut Ladder,
+             n: u32,
+             quality: u32,
+             width: u32|
+             -> Result<(u64, PathBuf), CompressionError> {
+                let temp_file = ctx.temp_dir.join(format!("attempt-{n}.{ext}"));
+                ladder.track(&temp_file);
                 Self::run_vips(
                     sidecar_path,
-                    input,
+                    ctx.input,
                     &temp_file,
                     width,
                     quality,
-                    &cancel_token,
+                    &ctx.cancel,
                 )?;
                 let size = std::fs::metadata(&temp_file)
                     .map(|m| m.len())
@@ -393,131 +390,117 @@ impl CompressionProcessor for ImageProcessor {
                 Ok((size, temp_file))
             };
 
-        // Smallest over-target attempt across quality search + dims search —
-        // the best-effort fallback (spec §5 step 7).
-        let mut smallest: Option<BestAttempt> = None;
+        let advance = |n: u32| {
+            progress.send_progress((u64::from(n) * 100 / total_attempts as u64).min(100) as u32);
+        };
         let mut attempt_n: u32 = 0;
 
         let quality_search = if png_output {
             None
         } else {
-            binary_search_quality(
+            match binary_search_quality(
                 min_quality,
                 95,
                 MAX_SEARCH_ITERATIONS,
-                target_bytes,
-                &cancel_token,
-                &progress,
+                ctx.target_bytes,
+                &ctx.cancel,
                 &mut |q| {
-                    let r = attempt(attempt_n, q, NO_DOWNSCALE_WIDTH)?;
+                    let (size, path) =
+                        attempt(&mut ladder, attempt_n, q, NO_DOWNSCALE_WIDTH)?;
+                    advance(attempt_n);
                     attempt_n += 1;
-                    if r.0 > target_bytes {
-                        BestAttempt::keep_smaller_in(
-                            &mut smallest,
-                            BestAttempt {
-                                size: r.0,
-                                path: r.1.clone(),
-                                strategy: format!("quality={}", q),
+                    if size > ctx.target_bytes {
+                        ladder.record(
+                            ctx,
+                            AttemptOutcome::Produced {
+                                path: path.clone(),
+                                size,
                                 quality: q,
+                                strategy: format!("quality={}", q),
                             },
                         );
                     }
-                    Ok(r)
+                    Ok((size, path))
                 },
-            )?
+            ) {
+                Ok(result) => result,
+                Err(error) => {
+                    if ctx.cancel.is_cancelled() {
+                        return ladder.finish(ctx);
+                    }
+                    ladder.abandon();
+                    return Err(error);
+                }
+            }
         };
 
         if let Some((quality, size, path)) = quality_search {
-            return deliver_output(
-                &path,
-                output,
-                size,
-                format!("quality={}", quality),
-                quality,
-                true,
-                &progress,
-                &cancel_token,
-            );
-        }
-
-        // One full-size palette attempt gives PNG a chance to fit without
-        // touching dimensions (and the only legal attempt below the floor).
-        let mut widths = if png_output {
-            vec![NO_DOWNSCALE_WIDTH]
-        } else {
-            Vec::new()
-        };
-        if let Some(long_edge) = long_edge {
-            widths.extend(dimension_ladder(long_edge, min_long_edge));
-        }
-
-        progress.send_progress(92);
-        for width in widths {
-            if cancel_token.is_cancelled() {
-                return Err(CompressionError::Cancelled);
-            }
-            let r = attempt(attempt_n, save_quality, width)?;
-            attempt_n += 1;
-
-            if r.0 <= target_bytes {
-                let strategy_used = if png_output {
-                    if width == NO_DOWNSCALE_WIDTH {
-                        "palette".to_string()
-                    } else {
-                        format!("palette,dims={}px", width)
-                    }
-                } else {
-                    format!("quality={},dims={}px", save_quality, width)
-                };
-                return deliver_output(
-                    &r.1,
-                    output,
-                    r.0,
-                    strategy_used,
-                    save_quality,
-                    true,
-                    &progress,
-                    &cancel_token,
-                );
-            }
-            BestAttempt::keep_smaller_in(
-                &mut smallest,
-                BestAttempt {
-                    size: r.0,
-                    path: r.1.clone(),
-                    strategy: if png_output {
-                        "palette".to_string()
-                    } else {
-                        format!("quality={}", save_quality)
-                    },
-                    quality: save_quality,
+            let decision = ladder.record(
+                ctx,
+                AttemptOutcome::Produced {
+                    path,
+                    size,
+                    quality,
+                    strategy: format!("quality={}", quality),
                 },
             );
+            return match decision {
+                AttemptDecision::Stop(result) => Ok(result),
+                AttemptDecision::Continue => ladder.finish(ctx),
+            };
         }
 
-        // Best effort — smallest attempt wins (spec §5 step 7)
-        if let Some(best) = smallest {
-            return deliver_output(
-                &best.path,
-                output,
-                best.size,
-                format!("{},best-effort", best.strategy),
-                best.quality,
-                false,
-                &progress,
-                &cancel_token,
+        for width in widths {
+            if ctx.cancel.is_cancelled() {
+                return ladder.finish(ctx);
+            }
+            let (size, path) = match attempt(&mut ladder, attempt_n, save_quality, width) {
+                Ok(pair) => pair,
+                Err(error) => {
+                    if ctx.cancel.is_cancelled() {
+                        return ladder.finish(ctx);
+                    }
+                    ladder.abandon();
+                    return Err(error);
+                }
+            };
+            advance(attempt_n);
+            attempt_n += 1;
+
+            let strategy = if png_output {
+                if width == NO_DOWNSCALE_WIDTH {
+                    "palette".to_string()
+                } else {
+                    format!("palette,dims={}px", width)
+                }
+            } else {
+                format!("quality={},dims={}px", save_quality, width)
+            };
+            let decision = ladder.record(
+                ctx,
+                AttemptOutcome::Produced {
+                    path,
+                    size,
+                    quality: save_quality,
+                    strategy,
+                },
             );
+            if let AttemptDecision::Stop(result) = decision {
+                return Ok(result);
+            }
+            if ctx.cancel.is_cancelled() {
+                return ladder.finish(ctx);
+            }
         }
 
-        Err(CompressionError::SidecarFailed(
-            "Could not compress image".to_string(),
-        ))
+        ladder.finish(ctx)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::{ProgressSender, SidecarPaths};
     use std::fs;
 
     /// Writes an executable bash fake (chmod 755) — unix only.
@@ -557,7 +540,6 @@ mod tests {
             MAX_SEARCH_ITERATIONS,
             120_000,
             &CancellationToken::new(),
-            &ProgressSender::test_stub(),
             &mut |q| attempt(q),
         )
         .unwrap();
@@ -576,7 +558,6 @@ mod tests {
             MAX_SEARCH_ITERATIONS,
             1, // target 1 byte — nothing fits
             &CancellationToken::new(),
-            &ProgressSender::test_stub(),
             &mut |_q| {
                 count.set(count.get() + 1);
                 Ok((u64::MAX, PathBuf::from("t")))
@@ -596,7 +577,6 @@ mod tests {
             MAX_SEARCH_ITERATIONS,
             1,
             &CancellationToken::new(),
-            &ProgressSender::test_stub(),
             &mut |_q| {
                 count.set(count.get() + 1);
                 Ok((u64::MAX, PathBuf::from("t")))
@@ -618,7 +598,6 @@ mod tests {
             MAX_SEARCH_ITERATIONS,
             100,
             &token,
-            &ProgressSender::test_stub(),
             &mut |_q| {
                 count.set(count.get() + 1);
                 Ok((1, PathBuf::from("t")))
@@ -638,7 +617,6 @@ mod tests {
             MAX_SEARCH_ITERATIONS,
             100,
             &token,
-            &ProgressSender::test_stub(),
             &mut |_q| {
                 count.set(count.get() + 1);
                 if count.get() == 3 {
@@ -658,7 +636,7 @@ mod tests {
         fs::write(&input, b"tiny").unwrap();
 
         let result = ImageProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &output,
                 200 * 1024,
@@ -667,7 +645,7 @@ mod tests {
                 ProgressSender::test_stub(),
                 &sidecar_paths("/bin/false"), // must never be invoked
                 &dir.path().join("tmp"),
-            )
+            ))
             .unwrap();
 
         assert!(result.met_target);
@@ -684,7 +662,7 @@ mod tests {
         let tmp = dir.path().join("tmp");
         fs::create_dir_all(&tmp).unwrap();
 
-        let result = ImageProcessor.compress_to_target(
+        let result = ImageProcessor.compress(&JobContext::new(
             &input,
             &dir.path().join("out.jpg"),
             200 * 1024,
@@ -700,7 +678,7 @@ mod tests {
                 gs_resources: None,
             },
             &tmp,
-        );
+        ));
         match result {
             Err(e) => {
                 assert!(
@@ -727,7 +705,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let input = dir.path().join("in.jpg");
         fs::write(&input, vec![0u8; 300 * 1024]).unwrap(); // over target → search runs
-        let result = ImageProcessor.compress_to_target(
+        let result = ImageProcessor.compress(&JobContext::new(
             &input,
             &dir.path().join("out.jpg"),
             200 * 1024,
@@ -736,7 +714,7 @@ mod tests {
             ProgressSender::test_stub(),
             &sidecar_paths("/bin/false"),
             &dir.path().join("tmp"),
-        );
+        ));
         match result {
             Err(CompressionError::SidecarFailed(msg)) => {
                 assert!(msg.contains("exited with code"))
@@ -983,7 +961,7 @@ exit 1
         fs::create_dir_all(&tmp).unwrap();
         let output = dir.path().join("out.jpg");
 
-        let result = ImageProcessor.compress_to_target(
+        let result = ImageProcessor.compress(&JobContext::new(
             &input,
             &output,
             200 * 1024,
@@ -992,7 +970,7 @@ exit 1
             ProgressSender::test_stub(),
             &sidecar_paths(&fake),
             &tmp,
-        );
+        ));
 
         match result {
             Err(CompressionError::SidecarFailed(msg)) => {
@@ -1026,7 +1004,7 @@ exit 1
         // target 56320 (55 KB): quality attempts (100_000) fail; the 4000px
         // ladder produces 90k, 81k, 72.9k, 65.6k, 59k, 53.1k — 2124px fits
         let result = ImageProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.jpg"),
                 55 * 1024,
@@ -1035,7 +1013,7 @@ exit 1
                 ProgressSender::test_stub(),
                 &sidecar_paths(&fake),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         assert!(result.met_target);
@@ -1045,6 +1023,42 @@ exit 1
             result.strategy_used
         );
         assert_eq!(result.compressed_size, 53_100);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_fake_engine_compresses_a_file() {
+        let engine = crate::engine::fake_engine_path();
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.jpg");
+        write_jpeg_with_dimensions(&input, 4000, 3000, 300 * 1024);
+        let tmp = dir.path().join("tmp");
+        fs::create_dir_all(&tmp).unwrap();
+
+        let result = ImageProcessor
+            .compress(&JobContext::new(
+                &input,
+                &dir.path().join("out.jpg"),
+                55 * 1024,
+                &crate::settings::QualityFloors::default(),
+                CancellationToken::new(),
+                ProgressSender::test_stub(),
+                &sidecar_paths(engine.to_str().unwrap()),
+                &tmp,
+            ))
+            .unwrap();
+
+        assert!(result.met_target);
+        assert!(
+            result.strategy_used.contains("dims=2124px"),
+            "got: {}",
+            result.strategy_used
+        );
+        assert_eq!(result.compressed_size, 53_100);
+        assert_eq!(
+            fs::metadata(dir.path().join("out.jpg")).unwrap().len(),
+            53_100
+        );
     }
 
     #[test]
@@ -1060,7 +1074,7 @@ exit 1
         // target 61_440: one full-size palette attempt (100_000) fails; the
         // ladder's 2361px attempt (59_025) fits. No Q search may run.
         let result = ImageProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.png"),
                 60 * 1024,
@@ -1069,7 +1083,7 @@ exit 1
                 ProgressSender::test_stub(),
                 &sidecar_paths(&fake),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         assert!(result.met_target);
@@ -1118,7 +1132,7 @@ exit 1
 
         // target 10 KB: nothing fits; the smallest ladder rung is 1392px
         let result = ImageProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.jpg"),
                 10 * 1024,
@@ -1127,7 +1141,7 @@ exit 1
                 ProgressSender::test_stub(),
                 &sidecar_paths(&fake),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         assert!(!result.met_target);
@@ -1155,7 +1169,7 @@ exit 1
         // target 10 KB: nothing fits — best effort must describe the actual
         // png save (palette), never a quality value pngsave ignores
         let result = ImageProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.png"),
                 10 * 1024,
@@ -1164,7 +1178,7 @@ exit 1
                 ProgressSender::test_stub(),
                 &sidecar_paths(&fake),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         assert!(!result.met_target);
@@ -1199,7 +1213,7 @@ base="${out%%\[*}"
 
         // exit 0 + 0-byte output: 0 ≤ target would deliver an empty file as
         // Done — it must be a failed attempt instead (spec §6)
-        let result = ImageProcessor.compress_to_target(
+        let result = ImageProcessor.compress(&JobContext::new(
             &input,
             &dir.path().join("out.jpg"),
             200 * 1024,
@@ -1208,7 +1222,7 @@ base="${out%%\[*}"
             ProgressSender::test_stub(),
             &sidecar_paths(&fake),
             &tmp,
-        );
+        ));
         match result {
             Err(CompressionError::SidecarFailed(msg)) => {
                 assert!(
@@ -1262,7 +1276,7 @@ esac
         let worker_fake = fake.clone();
 
         let handle = std::thread::spawn(move || {
-            ImageProcessor.compress_to_target(
+            ImageProcessor.compress(&JobContext::new(
                 &worker_input,
                 &worker_output,
                 95 * 1024,
@@ -1271,7 +1285,7 @@ esac
                 ProgressSender::test_stub(),
                 &sidecar_paths(&worker_fake),
                 &worker_tmp,
-            )
+            ))
         });
         std::thread::sleep(std::time::Duration::from_millis(500));
         token.cancel();
@@ -1317,7 +1331,7 @@ esac
         );
 
         let result = ImageProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.jpg"),
                 200 * 1024,
@@ -1326,7 +1340,7 @@ esac
                 ProgressSender::test_stub(),
                 &sidecar_paths(&sidecar),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         assert!(result.met_target, "strategy: {}", result.strategy_used);
@@ -1488,7 +1502,7 @@ esac
             let output = dir.path().join(format!("out-{orientation}.jpg"));
 
             ImageProcessor
-                .compress_to_target(
+                .compress(&JobContext::new(
                     &input,
                     &output,
                     60 * 1024,
@@ -1497,7 +1511,7 @@ esac
                     ProgressSender::test_stub(),
                     &sidecar_paths(&sidecar),
                     &tmp,
-                )
+                ))
                 .unwrap();
 
             let expected = if orientation >= 5 {
@@ -1559,7 +1573,7 @@ esac
         fs::create_dir_all(&tmp).unwrap();
         let sidecar = real_vips_path();
         ImageProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &output,
                 input_size / 2,
@@ -1568,7 +1582,7 @@ esac
                 ProgressSender::test_stub(),
                 &sidecar_paths(&sidecar),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         let bytes = fs::read(&output).unwrap();

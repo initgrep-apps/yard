@@ -160,7 +160,11 @@ pub(crate) fn setup_hook<R: tauri::Runtime>(
     app: &mut tauri::App<R>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let handle = app.handle().clone();
-    if !app.manage(QueueState::new(handle)) {
+    let registry = std::sync::Arc::new(processors::ProcessorRegistry::new());
+    if !app.manage(registry.clone()) {
+        eprintln!("warn: ProcessorRegistry already managed, new registry discarded");
+    }
+    if !app.manage(QueueState::new(handle, registry)) {
         eprintln!("warn: QueueState already managed, new state and its worker discarded");
     }
     temp::cleanup_stale_temp_files(app.handle());

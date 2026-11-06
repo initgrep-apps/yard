@@ -31,13 +31,11 @@ use tokio_util::sync::CancellationToken;
 use zip::CompressionMethod;
 use zip::write::SimpleFileOptions;
 
-use crate::engine::result::STRATEGY_ALREADY_UNDER_TARGET;
 use crate::engine::{
-    CompressionError, CompressionProcessor, CompressionResult, ProgressSender, SidecarName,
-    SidecarPaths, deliver_output, run_sidecar, strict_exit,
+    AttemptDecision, AttemptOutcome, CompressionError, CompressionProcessor, CompressionResult,
+    JobContext, Ladder, SidecarName, run_sidecar, strict_exit,
 };
 use crate::models::Category;
-use crate::settings::QualityFloors;
 
 pub struct DocumentProcessor;
 
@@ -432,38 +430,12 @@ fn remove_all(paths: &[PathBuf]) {
     }
 }
 
-fn deliver_or_cancel(
-    pending: Result<(PathBuf, u64, String, u32, bool), CompressionError>,
-    output: &Path,
-    cancel_token: &CancellationToken,
-    temp_paths: &[PathBuf],
-    progress: &ProgressSender,
-) -> Result<CompressionResult, CompressionError> {
-    if cancel_token.is_cancelled() {
-        remove_all(temp_paths);
-        return Err(CompressionError::Cancelled);
-    }
-    let (path, size, strategy, quality, met_target) = match pending {
-        Ok(deliverable) => deliverable,
-        Err(e) => {
-            remove_all(temp_paths);
-            return Err(e);
-        }
-    };
-    let result = deliver_output(
-        &path, output, size, strategy, quality, met_target, progress, cancel_token,
-    );
-    if result.is_err() {
-        remove_all(temp_paths);
-    }
-    result
-}
-
 fn per_media_progress(pass: u32, media_done: usize, media_total: usize) -> u32 {
-    let total_units = u64::from(MAX_SEARCH_ITERATIONS) * u64::try_from(media_total).unwrap_or(1);
+    let total_units =
+        u64::from(MAX_SEARCH_ITERATIONS + 1) * u64::try_from(media_total).unwrap_or(1);
     let done_units = u64::from(pass) * u64::try_from(media_total).unwrap_or(1)
         + u64::try_from(media_done).unwrap_or(0);
-    ((done_units * 100 / total_units) as u32).min(90)
+    ((done_units * 100 / total_units) as u32).min(100)
 }
 
 fn search_quality(
@@ -519,59 +491,42 @@ impl CompressionProcessor for DocumentProcessor {
         crate::registry::extensions_for(Category::Document)
     }
 
-    fn compress_to_target(
-        &self,
-        input: &Path,
-        output: &Path,
-        target_bytes: u64,
-        quality_floor: &QualityFloors,
-        cancel_token: CancellationToken,
-        progress: ProgressSender,
-        sidecar_paths: &SidecarPaths,
-        temp_dir: &Path,
-    ) -> Result<CompressionResult, CompressionError> {
-        let input_size = std::fs::metadata(input)
+    fn compress(&self, ctx: &JobContext<'_>) -> Result<CompressionResult, CompressionError> {
+        let input_size = std::fs::metadata(ctx.input)
             .map(|m| m.len())
             .map_err(|e| CompressionError::InputFileError(e.to_string()))?;
 
-        if input_size <= target_bytes {
-            return deliver_output(
-                input,
-                output,
-                input_size,
-                STRATEGY_ALREADY_UNDER_TARGET.to_string(),
-                100,
-                true,
-                &progress,
-                &cancel_token,
-            );
+        let mut ladder = Ladder::new();
+        if let Some(result) = ladder.shortcut(ctx, input_size) {
+            return Ok(result);
         }
 
-        let sidecar = sidecar_paths.require(SidecarName::Vips)?;
-        let floor = quality_floor.document.min_media_quality;
+        let sidecar = ctx.sidecars.require(SidecarName::Vips)?;
+        let floor = ctx.floors.document.min_media_quality;
         let (min_quality, max_quality) = if floor > START_QUALITY {
             (floor, floor)
         } else {
             (floor, START_QUALITY)
         };
-        let ext = input
+        let ext = ctx
+            .input
             .extension()
             .and_then(|e| e.to_str())
             .map(|e| e.to_lowercase())
             .unwrap_or_else(|| "docx".to_string());
 
-        let metas = read_index(input)?;
+        let metas = read_index(ctx.input)?;
         let media_total = metas
             .iter()
             .filter(|m| media_disposition(&m.name) == MediaDisposition::Recompress)
             .count();
         let temp_paths = Rc::new(RefCell::new(Vec::<PathBuf>::new()));
 
-        if cancel_token.is_cancelled() {
-            return Err(CompressionError::Cancelled);
+        if ctx.cancel.is_cancelled() {
+            return ladder.finish(ctx);
         }
 
-        let media_map = extract_media(input, &metas, temp_dir)?;
+        let media_map = extract_media(ctx.input, &metas, ctx.temp_dir)?;
         {
             let mut paths = temp_paths.borrow_mut();
             for path in media_map.values() {
@@ -579,38 +534,63 @@ impl CompressionProcessor for DocumentProcessor {
             }
         }
 
-        let fixed_len = measure_fixed_part(input, &metas, temp_dir)?;
+        let fixed_len = measure_fixed_part(ctx.input, &metas, ctx.temp_dir)?;
 
-        if media_total == 0 {
-            let attempt_path = temp_dir.join(format!("attempt-0.{}", ext));
-            temp_paths.borrow_mut().push(attempt_path.clone());
-            write_archive(input, &metas, &media_map, &attempt_path)?;
+        let build_attempt = |ladder: &mut Ladder,
+                             quality: u32,
+                             chosen: HashMap<usize, PathBuf>|
+         -> Result<(PathBuf, u64), CompressionError> {
+            if ctx.cancel.is_cancelled() {
+                return Err(CompressionError::Cancelled);
+            }
+            let attempt_path = ctx.temp_dir.join(format!("attempt-{quality}.{ext}"));
+            ladder.track(&attempt_path);
+            write_archive(ctx.input, &metas, &chosen, &attempt_path)?;
             let size = std::fs::metadata(&attempt_path)
                 .map_err(|e| output_file_error(&attempt_path, e))?
                 .len();
-            let pending = Ok((
-                attempt_path,
-                size,
-                if size <= target_bytes {
-                    "rezip-deflate9".to_string()
-                } else {
-                    "rezip-deflate9,best-effort".to_string()
+            Ok((attempt_path, size))
+        };
+
+        let record = |ladder: &mut Ladder, quality: u32, path: PathBuf, size: u64| {
+            ladder.record(
+                ctx,
+                AttemptOutcome::Produced {
+                    path,
+                    size,
+                    quality,
+                    strategy: format!("quality={quality}"),
                 },
-                100,
-                size <= target_bytes,
-            ));
-            return deliver_or_cancel(
-                pending,
-                output,
-                &cancel_token,
-                &*temp_paths.borrow(),
-                &progress,
+            )
+        };
+
+        if media_total == 0 {
+            let attempt_path = ctx.temp_dir.join(format!("attempt-0.{ext}"));
+            ladder.track(&attempt_path);
+            write_archive(ctx.input, &metas, &media_map, &attempt_path)?;
+            let size = std::fs::metadata(&attempt_path)
+                .map_err(|e| output_file_error(&attempt_path, e))?
+                .len();
+            let decision = ladder.record(
+                ctx,
+                AttemptOutcome::Produced {
+                    path: attempt_path,
+                    size,
+                    quality: 100,
+                    strategy: "rezip-deflate9".to_string(),
+                },
             );
+            remove_all(&temp_paths.borrow());
+            return match decision {
+                AttemptDecision::Stop(result) => Ok(result),
+                AttemptDecision::Continue => ladder.finish(ctx),
+            };
         }
 
+        let progress = ladder.progress(ctx);
         let temp_paths_for_attempt = Rc::clone(&temp_paths);
         let mut attempt = |pass: u32, quality: u32| -> Result<(u64, HashMap<usize, PathBuf>), CompressionError> {
-            if cancel_token.is_cancelled() {
+            if ctx.cancel.is_cancelled() {
                 return Err(CompressionError::Cancelled);
             }
             let mut chosen: HashMap<usize, PathBuf> = HashMap::new();
@@ -633,14 +613,14 @@ impl CompressionProcessor for DocumentProcessor {
                 let mut picked = original.clone();
 
                 if disposition == MediaDisposition::Recompress {
-                    let recompressed = temp_dir.join(format!("media-{}-q{}.{}", meta.index, quality, ext));
+                    let recompressed = ctx.temp_dir.join(format!("media-{}-q{}.{}", meta.index, quality, ext));
                     temp_paths_for_attempt.borrow_mut().push(recompressed.clone());
                     let args = vec![
                         "copy".to_string(),
                         original.display().to_string(),
                         format!("{}{}", recompressed.display(), media_save_options(&ext, quality)),
                     ];
-                    match run_sidecar(sidecar, "vips", &args, &cancel_token, strict_exit) {
+                    match run_sidecar(sidecar, "vips", &args, &ctx.cancel, strict_exit) {
                         Ok(()) => match std::fs::metadata(&recompressed) {
                             Ok(m) if m.len() > 0 => {
                                 let original_len = std::fs::metadata(&original).map(|m| m.len()).unwrap_or(u64::MAX);
@@ -655,8 +635,10 @@ impl CompressionProcessor for DocumentProcessor {
                                 eprintln!("warn: cannot read recompressed media {}: {e}, keeping original", meta.name);
                             }
                         },
-                        Err(CompressionError::Cancelled) => return Err(CompressionError::Cancelled),
                         Err(e) => {
+                            if matches!(e, CompressionError::Cancelled) {
+                                return Err(e);
+                            }
                             eprintln!("warn: vips failed for {}, keeping original bytes: {e}", meta.name);
                         }
                     }
@@ -677,81 +659,94 @@ impl CompressionProcessor for DocumentProcessor {
             min_quality,
             max_quality,
             MAX_SEARCH_ITERATIONS,
-            target_bytes,
-            &cancel_token,
+            ctx.target_bytes,
+            &ctx.cancel,
             &mut attempt,
         );
 
-        let temp_paths_for_build = Rc::clone(&temp_paths);
-        let build_and_deliver =
-            |quality: u32,
-             chosen: HashMap<usize, PathBuf>,
-             met_target: bool|
-             -> Result<CompressionResult, CompressionError> {
-                if cancel_token.is_cancelled() {
-                    remove_all(&*temp_paths_for_build.borrow());
-                    return Err(CompressionError::Cancelled);
+        let search = match search {
+            Ok(search) => search,
+            Err(error) => {
+                remove_all(&temp_paths.borrow());
+                ladder.abandon();
+                return Err(error);
+            }
+        };
+
+        if let Some((quality, _predicted, chosen)) = search.0 {
+            let (path, size) = match build_attempt(&mut ladder, quality, chosen) {
+                Ok(built) => built,
+                Err(error) => {
+                    remove_all(&temp_paths.borrow());
+                    ladder.abandon();
+                    return Err(error);
                 }
-                let attempt_path = temp_dir.join(format!("attempt-{quality}.{ext}"));
-                temp_paths_for_build.borrow_mut().push(attempt_path.clone());
-                write_archive(input, &metas, &chosen, &attempt_path)?;
-                let size = std::fs::metadata(&attempt_path)
-                    .map_err(|e| output_file_error(&attempt_path, e))?
-                    .len();
-                let strategy = if met_target {
-                    format!("quality={}", quality)
-                } else {
-                    format!("quality={},best-effort", quality)
-                };
-                let pending = Ok((attempt_path, size, strategy, quality, met_target));
-                deliver_or_cancel(
-                    pending,
-                    output,
-                    &cancel_token,
-                    &*temp_paths_for_build.borrow(),
-                    &progress,
-                )
             };
-
-        match search {
-            Ok((fit, effort)) => {
-                if let Some((quality, _predicted, chosen)) = fit {
-                    let result = build_and_deliver(quality, chosen, true)?;
-                    if result.compressed_size <= target_bytes || quality <= min_quality {
-                        return Ok(result);
+            let decision = record(&mut ladder, quality, path, size);
+            if let AttemptDecision::Stop(result) = decision {
+                remove_all(&temp_paths.borrow());
+                return Ok(result);
+            }
+            if ctx.cancel.is_cancelled() {
+                remove_all(&temp_paths.borrow());
+                return ladder.finish(ctx);
+            }
+            if quality > min_quality {
+                let lower = quality - 1;
+                let (_, chosen_lower) = match attempt(MAX_SEARCH_ITERATIONS, lower) {
+                    Ok(result) => result,
+                    Err(error) => {
+                        remove_all(&temp_paths.borrow());
+                        ladder.abandon();
+                        return Err(error);
                     }
-                    let lower = (quality - 1).max(min_quality);
-                    if lower == quality {
-                        return Ok(result);
+                };
+                let (path, size) = match build_attempt(&mut ladder, lower, chosen_lower) {
+                    Ok(built) => built,
+                    Err(error) => {
+                        remove_all(&temp_paths.borrow());
+                        ladder.abandon();
+                        return Err(error);
                     }
-                    let (_, chosen_lower) = attempt(MAX_SEARCH_ITERATIONS, lower)?;
-                    return build_and_deliver(lower, chosen_lower, false);
-                }
-
-                if let Some((quality, _predicted, chosen)) = effort {
-                    return build_and_deliver(quality, chosen, false);
-                }
-
-                remove_all(&*temp_paths.borrow());
-                Err(CompressionError::SidecarFailed(
-                    "Could not compress document".to_string(),
-                ))
+                };
+                let decision = record(&mut ladder, lower, path, size);
+                remove_all(&temp_paths.borrow());
+                return match decision {
+                    AttemptDecision::Stop(result) => Ok(result),
+                    AttemptDecision::Continue => ladder.finish(ctx),
+                };
             }
-            Err(CompressionError::Cancelled) => {
-                remove_all(&*temp_paths.borrow());
-                Err(CompressionError::Cancelled)
-            }
-            Err(e) => {
-                remove_all(&*temp_paths.borrow());
-                Err(e)
-            }
+            remove_all(&temp_paths.borrow());
+            return ladder.finish(ctx);
         }
+
+        if let Some((quality, _predicted, chosen)) = search.1 {
+            let (path, size) = match build_attempt(&mut ladder, quality, chosen) {
+                Ok(built) => built,
+                Err(error) => {
+                    remove_all(&temp_paths.borrow());
+                    ladder.abandon();
+                    return Err(error);
+                }
+            };
+            record(&mut ladder, quality, path, size);
+            remove_all(&temp_paths.borrow());
+            return ladder.finish(ctx);
+        }
+
+        remove_all(&temp_paths.borrow());
+        ladder.abandon();
+        Err(CompressionError::SidecarFailed(
+            "Could not compress document".to_string(),
+        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::{ProgressSender, SidecarPaths};
+    use crate::settings::QualityFloors;
     use std::fs;
     use std::io::{Read, Write};
     use zip::ZipArchive;
@@ -987,7 +982,7 @@ awk -v n="$n" 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
         fs::create_dir_all(&tmp).unwrap();
 
         DocumentProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.docx"),
                 6144,
@@ -996,7 +991,7 @@ awk -v n="$n" 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake.clone())),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         let remaining: Vec<_> = fs::read_dir(&tmp).unwrap().flatten().collect();
@@ -1015,7 +1010,7 @@ awk -v n="$n" 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
         let worker_tmp = tmp.clone();
         let worker_fake = fake.clone();
         let handle = std::thread::spawn(move || {
-            DocumentProcessor.compress_to_target(
+            DocumentProcessor.compress(&JobContext::new(
                 &worker_input,
                 &worker_output,
                 100,
@@ -1024,7 +1019,7 @@ awk -v n="$n" 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(worker_fake)),
                 &worker_tmp,
-            )
+            ))
         });
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -1150,7 +1145,7 @@ awk -v n="$n" 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
         fs::create_dir_all(&tmp).unwrap();
 
         DocumentProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.docx"),
                 100,
@@ -1159,7 +1154,7 @@ awk -v n="$n" 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         let out = dir.path().join("out.docx");
@@ -1209,7 +1204,7 @@ awk -v n=9500 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
         fs::create_dir_all(&tmp).unwrap();
 
         DocumentProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.docx"),
                 100,
@@ -1218,7 +1213,7 @@ awk -v n=9500 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         let output = read_zip_contents(&dir.path().join("out.docx"));
@@ -1289,7 +1284,7 @@ awk -v n=9500 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
         fs::create_dir_all(&tmp).unwrap();
 
         DocumentProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.docx"),
                 100,
@@ -1298,7 +1293,7 @@ awk -v n=9500 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         let output_path = dir.path().join("out.docx");
@@ -1513,7 +1508,7 @@ awk -v n=9500 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
         FINISH_COUNT.with(|c| *c.borrow_mut() = 0);
 
         let result = DocumentProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.docx"),
                 6144,
@@ -1522,7 +1517,7 @@ awk -v n=9500 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         assert!(result.met_target, "strategy: {}", result.strategy_used);
@@ -1618,7 +1613,7 @@ awk -v n=9500 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
         fs::create_dir_all(&tmp).unwrap();
 
         let result = DocumentProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.docx"),
                 6000,
@@ -1627,7 +1622,7 @@ awk -v n=9500 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         assert!(result.met_target, "strategy: {}", result.strategy_used);
@@ -1671,7 +1666,7 @@ awk -v n=9500 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
         fs::create_dir_all(&tmp).unwrap();
 
         let result = DocumentProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.docx"),
                 100,
@@ -1680,7 +1675,7 @@ awk -v n=9500 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            )
+            ))
             .unwrap();
         assert!(!result.met_target, "strategy: {}", result.strategy_used);
 
@@ -1756,7 +1751,7 @@ awk -v n=9500 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
         let tmp = dir.path().join("tmp40");
         fs::create_dir_all(&tmp).unwrap();
         let result = DocumentProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out40.docx"),
                 100,
@@ -1765,7 +1760,7 @@ awk -v n=9500 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake.clone())),
                 &tmp,
-            )
+            ))
             .unwrap();
         assert!(!result.met_target);
         let q40_run = read_q_log(&dir.path());
@@ -1782,7 +1777,7 @@ awk -v n=9500 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
         let tmp = dir.path().join("tmp10");
         fs::create_dir_all(&tmp).unwrap();
         DocumentProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out10.docx"),
                 100,
@@ -1791,7 +1786,7 @@ awk -v n=9500 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            )
+            ))
             .unwrap();
         let q10_run = read_q_log(&dir.path());
         assert!(
@@ -1824,7 +1819,7 @@ awk -v n=9500 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
         fs::create_dir_all(&tmp).unwrap();
 
         let result = DocumentProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.docx"),
                 100,
@@ -1833,7 +1828,7 @@ awk -v n=9500 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         assert!(!result.met_target, "strategy: {}", result.strategy_used);
@@ -1874,7 +1869,7 @@ awk -v n=9500 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
         let target = 5500;
 
         let result = DocumentProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.docx"),
                 target,
@@ -1883,7 +1878,7 @@ awk -v n=9500 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         assert!(result.met_target, "strategy: {}", result.strategy_used);
@@ -1948,7 +1943,7 @@ awk -v n=9500 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
         fs::create_dir_all(&tmp).unwrap();
 
         let result = DocumentProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.docx"),
                 6144,
@@ -1957,7 +1952,7 @@ awk -v n=9500 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         assert!(
@@ -2011,7 +2006,7 @@ exit 1
         fs::create_dir_all(&tmp).unwrap();
 
         DocumentProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.docx"),
                 6144,
@@ -2020,7 +2015,7 @@ exit 1
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         let raw_log = fs::read_to_string(dir.path().join("q.log")).unwrap_or_default();
@@ -2059,7 +2054,7 @@ exit 1
         fs::create_dir_all(&tmp).unwrap();
 
         let result = DocumentProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.docx"),
                 100,
@@ -2068,7 +2063,7 @@ exit 1
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         assert!(
@@ -2112,7 +2107,7 @@ exit 1
         let tmp = dir.path().join("tmp");
         fs::create_dir_all(&tmp).unwrap();
 
-        let result = DocumentProcessor.compress_to_target(
+        let result = DocumentProcessor.compress(&JobContext::new(
             &input,
             &dir.path().join("out.docx"),
             1024,
@@ -2121,7 +2116,7 @@ exit 1
             ProgressSender::test_stub(),
             &test_sidecar_paths(Some(fake)),
             &tmp,
-        );
+        ));
 
         match result {
             Err(e) => {
@@ -2163,7 +2158,7 @@ exit 1
         fs::create_dir_all(&tmp).unwrap();
 
         let result = DocumentProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.docx"),
                 200 * 1024,
@@ -2172,7 +2167,7 @@ exit 1
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         assert_eq!(result.strategy_used, "already-under-target");
@@ -2233,7 +2228,7 @@ exit 1
         let worker_fake = fake.clone();
 
         let handle = std::thread::spawn(move || {
-            DocumentProcessor.compress_to_target(
+            DocumentProcessor.compress(&JobContext::new(
                 &worker_input,
                 &worker_output,
                 100,
@@ -2242,7 +2237,7 @@ exit 1
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(worker_fake)),
                 &worker_tmp,
-            )
+            ))
         });
 
         wait_for_q_entries(&dir.path(), 1);
@@ -2311,7 +2306,7 @@ awk -v n="$n" 'BEGIN { for (i = 0; i < n; i++) printf "%c", i % 251 }' > "$base"
         let worker_fake = fake.clone();
 
         let handle = std::thread::spawn(move || {
-            DocumentProcessor.compress_to_target(
+            DocumentProcessor.compress(&JobContext::new(
                 &worker_input,
                 &worker_output,
                 5 * 1024,
@@ -2320,7 +2315,7 @@ awk -v n="$n" 'BEGIN { for (i = 0; i < n; i++) printf "%c", i % 251 }' > "$base"
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(worker_fake)),
                 &worker_tmp,
-            )
+            ))
         });
 
         wait_for_q_entries(&dir.path(), 2);
@@ -2369,7 +2364,7 @@ awk -v n="$n" 'BEGIN { for (i = 0; i < n; i++) printf "%c", i % 251 }' > "$base"
         let output_path = dir.path().join("out.docx");
         fs::write(&output_path, b"precious-unrelated-content").unwrap();
 
-        let result = DocumentProcessor.compress_to_target(
+        let result = DocumentProcessor.compress(&JobContext::new(
             &input,
             &output_path,
             100,
@@ -2378,7 +2373,7 @@ awk -v n="$n" 'BEGIN { for (i = 0; i < n; i++) printf "%c", i % 251 }' > "$base"
             ProgressSender::test_stub(),
             &test_sidecar_paths(Some(fake)),
             &tmp,
-        );
+        ));
 
         assert!(
             matches!(result, Err(CompressionError::OutputFileError(_))),
@@ -2428,7 +2423,7 @@ awk -v n="$n" 'BEGIN { for (i = 0; i < n; i++) printf "%c", i % 251 }' > "$base"
             (input.clone(), dir.path().join("out.docx"), tmp.clone(), fake.clone());
 
         let handle = std::thread::spawn(move || {
-            DocumentProcessor.compress_to_target(
+            DocumentProcessor.compress(&JobContext::new(
                 &worker_input,
                 &worker_output,
                 24 * 1024,
@@ -2437,7 +2432,7 @@ awk -v n="$n" 'BEGIN { for (i = 0; i < n; i++) printf "%c", i % 251 }' > "$base"
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(worker_fake)),
                 &worker_tmp,
-            )
+            ))
         });
 
         wait_for_file(&tmp, "fixed.docx");
@@ -2480,7 +2475,7 @@ awk -v n="$n" 'BEGIN { for (i = 0; i < n; i++) printf "%c", i % 251 }' > "$base"
         fs::create_dir_all(&tmp).unwrap();
 
         let result = DocumentProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.docx"),
                 14 * 1024,
@@ -2489,7 +2484,7 @@ awk -v n="$n" 'BEGIN { for (i = 0; i < n; i++) printf "%c", i % 251 }' > "$base"
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            )
+            ))
             .unwrap();
         assert!(result.met_target, "strategy: {}", result.strategy_used);
 
@@ -2545,7 +2540,7 @@ awk -v n="$n" 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
         fs::create_dir_all(&tmp).unwrap();
 
         let result = DocumentProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.docx"),
                 100,
@@ -2554,7 +2549,7 @@ awk -v n="$n" 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         assert!(
@@ -2615,7 +2610,7 @@ awk -v n="$n" 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
         let (progress, seen) = ProgressSender::test_collector();
 
         let result = DocumentProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.docx"),
                 6144,
@@ -2624,7 +2619,7 @@ awk -v n="$n" 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
                 progress,
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         assert!(result.met_target, "strategy: {}", result.strategy_used);
@@ -2675,7 +2670,7 @@ base="${out%%\[*]}"
         fs::create_dir_all(&tmp).unwrap();
 
         DocumentProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.docx"),
                 9 * 1024,
@@ -2684,7 +2679,7 @@ base="${out%%\[*]}"
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         let output = read_zip_contents(&dir.path().join("out.docx"));
@@ -2726,7 +2721,7 @@ rm "$base"
         fs::create_dir_all(&tmp).unwrap();
 
         DocumentProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.docx"),
                 9 * 1024,
@@ -2735,7 +2730,7 @@ rm "$base"
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         let output = read_zip_contents(&dir.path().join("out.docx"));
@@ -2770,7 +2765,7 @@ rm "$base"
         fs::create_dir_all(&tmp).unwrap();
 
         DocumentProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.docx"),
                 9 * 1024,
@@ -2779,7 +2774,7 @@ rm "$base"
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(sidecar)),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         let output = read_zip_contents(&dir.path().join("out.docx"));
@@ -2813,7 +2808,7 @@ rm "$base"
         let tmp = dir.path().join("tmp");
         fs::create_dir_all(&tmp).unwrap();
 
-        let result = DocumentProcessor.compress_to_target(
+        let result = DocumentProcessor.compress(&JobContext::new(
             &input,
             &dir.path().join("out.docx"),
             input_size - 486,
@@ -2822,7 +2817,7 @@ rm "$base"
             ProgressSender::test_stub(),
             &test_sidecar_paths(Some(fake)),
             &tmp,
-        );
+        ));
 
         // zip 9.x reads the central directory and exposes only one entry per
         // name, so the processor sees a normal two-entry archive.
@@ -2865,7 +2860,7 @@ rm "$base"
 
         let input_size = fs::metadata(&input).unwrap().len();
         let result = DocumentProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.docx"),
                 input_size.saturating_sub(1),
@@ -2874,7 +2869,7 @@ rm "$base"
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         assert_eq!(
@@ -2962,7 +2957,7 @@ rm "$base"
         assert!(input_size > 50 * 1024, "input unexpectedly small: {input_size}");
 
         let result = DocumentProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.docx"),
                 1 * 1024 * 1024,
@@ -2971,7 +2966,7 @@ rm "$base"
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(sidecar)),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         assert!(result.compressed_size < input_size, "strategy: {}", result.strategy_used);
@@ -3026,7 +3021,7 @@ rm "$base"
         fs::create_dir_all(&tmp).unwrap();
 
         let result = DocumentProcessor
-            .compress_to_target(
+            .compress(&JobContext::new(
                 &input,
                 &dir.path().join("out.docx"),
                 128 * 1024 * 1024,
@@ -3035,7 +3030,7 @@ rm "$base"
                 ProgressSender::test_stub(),
                 &test_sidecar_paths(Some(fake)),
                 &tmp,
-            )
+            ))
             .unwrap();
 
         let output = read_zip_contents(&dir.path().join("out.docx"));

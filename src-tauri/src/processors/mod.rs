@@ -59,6 +59,16 @@ impl ProcessorRegistry {
         self.processors.get(&category).map(|p| p.as_ref())
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_processor(processor: Box<dyn CompressionProcessor>) -> Self {
+        let mut registry = ProcessorRegistry {
+            processors: HashMap::new(),
+            extension_map: HashMap::new(),
+        };
+        registry.register(processor);
+        registry
+    }
+
     pub fn lookup(&self, ext: &str) -> Option<Category> {
         self.extension_map.get(&ext.to_lowercase()).copied()
     }
@@ -73,10 +83,7 @@ impl Default for ProcessorRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::{CompressionError, CompressionResult, ProgressSender, SidecarPaths};
-    use crate::settings::QualityFloors;
-    use std::path::Path;
-    use tokio_util::sync::CancellationToken;
+    use crate::engine::{CompressionError, CompressionResult};
 
     #[test]
     fn registry_maps_every_file_type_to_its_category() {
@@ -131,16 +138,9 @@ mod tests {
             self.0
         }
 
-        fn compress_to_target(
+        fn compress(
             &self,
-            _input: &Path,
-            _output: &Path,
-            _target_bytes: u64,
-            _quality_floor: &QualityFloors,
-            _cancel_token: CancellationToken,
-            _progress: ProgressSender,
-            _sidecar_paths: &SidecarPaths,
-            _temp_dir: &Path,
+            _ctx: &crate::engine::JobContext<'_>,
         ) -> Result<CompressionResult, CompressionError> {
             unreachable!()
         }

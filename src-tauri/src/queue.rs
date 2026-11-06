@@ -54,6 +54,65 @@ fn run_processor_catch_panic(
         .unwrap_or_else(|payload| Err(CompressionError::OutputFileError(panic_payload_message(&payload))))
 }
 
+fn run_job(
+    registry: std::sync::Arc<ProcessorRegistry>,
+    entry: FileEntry,
+    output_path: std::path::PathBuf,
+    settings: crate::settings::Settings,
+    cancel_token: CancellationToken,
+    progress: ProgressSender,
+    temp_dir: std::path::PathBuf,
+) -> Result<CompressionResult, CompressionError> {
+    let processor = registry.get_processor(entry.category).ok_or_else(|| {
+        CompressionError::Unknown("No processor registered for this file type".to_string())
+    })?;
+    let sidecar_paths = match sidecar::resolve_all_sidecar_paths() {
+        Ok(paths) => paths,
+        Err(error) => return Err(CompressionError::Unknown(error)),
+    };
+    let ctx = crate::engine::JobContext::new(
+        std::path::Path::new(&entry.path),
+        &output_path,
+        entry.target_bytes,
+        &settings.quality_floors,
+        cancel_token,
+        progress,
+        &sidecar_paths,
+        &temp_dir,
+    );
+    run_processor_catch_panic(|| processor.compress(&ctx))
+}
+
+async fn run_job_blocking(
+    registry: std::sync::Arc<ProcessorRegistry>,
+    entry: FileEntry,
+    output_path: std::path::PathBuf,
+    settings: crate::settings::Settings,
+    cancel_token: CancellationToken,
+    progress: ProgressSender,
+    temp_dir: std::path::PathBuf,
+) -> Result<CompressionResult, CompressionError> {
+    let job = tokio::task::spawn_blocking(move || {
+        let result = run_job(
+            registry,
+            entry,
+            output_path,
+            settings,
+            cancel_token,
+            progress,
+            temp_dir.clone(),
+        );
+        temp::cleanup_temp_dir(&temp_dir);
+        result
+    });
+    match job.await {
+        Ok(result) => result,
+        Err(error) => Err(CompressionError::OutputFileError(format!(
+            "job panicked: {error}"
+        ))),
+    }
+}
+
 /// HEIC/HEIF input → .jpg output and MOV input → .mp4 output (spec §3),
 /// case-insensitive. Resolving the real output extension here is what makes
 /// collision detection apply before any processor touches the filename.
@@ -123,6 +182,7 @@ pub struct QueueState<R: Runtime = tauri::Wry> {
     history_records: Mutex<HashMap<String, Vec<FileResultRecord>>>,
     history_error_sent: Mutex<HashSet<String>>,
     sender: mpsc::UnboundedSender<BatchMessage>,
+    registry: std::sync::Arc<ProcessorRegistry>,
     #[cfg(test)]
     test_estimate: Mutex<Option<fn(crate::models::Category, u64, Option<u32>) -> u64>>,
     #[cfg(test)]
@@ -131,7 +191,7 @@ pub struct QueueState<R: Runtime = tauri::Wry> {
 }
 
 impl<R: Runtime> QueueState<R> {
-    pub fn new(app: AppHandle<R>) -> Self {
+    pub fn new(app: AppHandle<R>, registry: std::sync::Arc<ProcessorRegistry>) -> Self {
         let (sender, mut receiver) = mpsc::unbounded_channel::<BatchMessage>();
         let worker_app = app.clone();
         tauri::async_runtime::spawn(async move {
@@ -145,6 +205,7 @@ impl<R: Runtime> QueueState<R> {
             history_records: Mutex::new(HashMap::new()),
             history_error_sent: Mutex::new(HashSet::new()),
             sender,
+            registry,
             #[cfg(test)]
             test_estimate: Mutex::new(None),
             #[cfg(test)]
@@ -529,7 +590,6 @@ impl<R: Runtime> QueueState<R> {
         reserved: &crate::output::ReservedNames,
     ) -> u64 {
         let queue = app.state::<QueueState<R>>();
-        let registry = ProcessorRegistry::new();
         let state = app.state::<FileListState>();
         let mut total_saved: u64 = 0;
         let started = std::time::Instant::now();
@@ -589,7 +649,7 @@ impl<R: Runtime> QueueState<R> {
 
         let progress = ProgressSender::new(app.clone(), file_id.clone());
 
-        let result = match registry.get_processor(entry.category) {
+        let result = match queue.registry.get_processor(entry.category) {
             None => {
                 // No processor registered for this category (Other —
                 // unsupported formats): skip as Unsupported — NOT
@@ -628,7 +688,7 @@ impl<R: Runtime> QueueState<R> {
                 queue.remove_token(&file_id);
                 return total_saved;
             }
-            Some(processor) => {
+            Some(_) => {
                 let temp_dir = match temp::create_temp_dir(&app) {
                     Ok(d) => d,
                     Err(e) => {
@@ -668,35 +728,16 @@ impl<R: Runtime> QueueState<R> {
                 let output_path =
                     crate::output::resolve_output_path_reserved(&output_folder, &output_filename, reserved);
 
-                let run = match sidecar::resolve_all_sidecar_paths() {
-                    Ok(sidecar_paths) => {
-                        run_processor_catch_panic(|| {
-                            processor.compress_to_target(
-                                std::path::Path::new(&entry.path),
-                                &output_path,
-                                entry.target_bytes,
-                                &settings.quality_floors,
-                                cancel_token,
-                                progress,
-                                &sidecar_paths,
-                                &temp_dir,
-                            )
-                        })
-                    }
-                    // resolve_all_sidecar_paths already carries the
-                    // "Engine error: …" wording; Unknown only re-labels
-                    // pre-formatted text. A portable test trigger is
-                    // hard: happy-path exe dirs always resolve, and
-                    // simulating a broken current_exe() (no parent dir,
-                    // non-UTF-8 cwd) is not feasible from a spawned test
-                    // binary — the failure shape is pinned indirectly via
-                    // sidecar.rs resolve/resolve_for unit tests.
-                    Err(e) => Err(CompressionError::Unknown(e)),
-                };
-
-                // Temp cleaned after each job, even on error/cancel (spec §6)
-                temp::cleanup_temp_dir(&temp_dir);
-                run
+                run_job_blocking(
+                    queue.registry.clone(),
+                    entry.clone(),
+                    output_path,
+                    settings,
+                    cancel_token,
+                    progress,
+                    temp_dir,
+                )
+                .await
             }
         };
 
@@ -1061,6 +1102,86 @@ mod tests {
         assert_eq!(panic_payload_message(&payload), "job panicked");
     }
 
+    struct SleepingEngineProcessor;
+
+    impl CompressionProcessor for SleepingEngineProcessor {
+        fn category(&self) -> crate::models::Category {
+            crate::models::Category::Image
+        }
+
+        fn supported_extensions(&self) -> &[&str] {
+            &[]
+        }
+
+        fn compress(
+            &self,
+            ctx: &crate::engine::JobContext<'_>,
+        ) -> Result<CompressionResult, CompressionError> {
+            let status = std::process::Command::new(crate::engine::fake_engine_path())
+                .env("FAKE_ENGINE_MODE", "sleep")
+                .arg("sleep-1500")
+                .status()
+                .expect("fake engine must start");
+            assert!(status.success(), "fake engine sleep must succeed");
+            Ok(CompressionResult {
+                output_path: ctx.output.to_path_buf(),
+                compressed_size: 1,
+                quality_used: 100,
+                met_target: true,
+                strategy_used: "fake".to_string(),
+            })
+        }
+    }
+
+    // One worker exposes an inline job body: it would starve the pulse,
+    // while spawn_blocking runs on the separate blocking pool.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn job_body_runs_in_spawn_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.jpg");
+        std::fs::write(&input, vec![0u8; 1024]).unwrap();
+        let entry = crate::models::FileEntry::new(input.to_str().unwrap(), 512);
+        let output = dir.path().join("out.jpg");
+        let temp_dir = dir.path().join("tmp");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let registry = std::sync::Arc::new(ProcessorRegistry::with_processor(Box::new(
+            SleepingEngineProcessor,
+        )));
+
+        let job = run_job_blocking(
+            registry,
+            entry,
+            output,
+            crate::settings::Settings::default(),
+            CancellationToken::new(),
+            ProgressSender::test_stub(),
+            temp_dir,
+        );
+        tokio::pin!(job);
+        let started = std::time::Instant::now();
+        let pulse = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            std::time::Instant::now()
+        });
+
+        let pulsed_at = tokio::select! {
+            result = &mut job => {
+                panic!(
+                    "job body finished before the fake engine sleep: {:?}",
+                    result.map(|r| r.compressed_size)
+                )
+            }
+            at = pulse => at.unwrap(),
+        };
+        assert!(
+            pulsed_at.duration_since(started) < std::time::Duration::from_millis(750),
+            "the runtime worker was parked while the fake engine slept"
+        );
+
+        let result = job.await.unwrap();
+        assert_eq!(result.compressed_size, 1);
+    }
+
     #[test]
     fn output_file_name_follows_the_registry_for_every_row() {
         for row in crate::registry::FILE_TYPES {
@@ -1269,7 +1390,7 @@ mod tests {
             .manage(FileListState(std::sync::Mutex::new(Vec::new())))
             .build(ctx)
             .unwrap();
-        app.manage(QueueState::new(app.handle().clone()));
+        app.manage(QueueState::new(app.handle().clone(), std::sync::Arc::new(ProcessorRegistry::new())));
 
         let (tx, rx) = std::sync::mpsc::channel::<(String, serde_json::Value)>();
         let event_sink = |topic: &'static str| {
@@ -1371,7 +1492,7 @@ mod tests {
             .manage(FileListState(std::sync::Mutex::new(Vec::new())))
             .build(ctx)
             .unwrap();
-        app.manage(QueueState::new(app.handle().clone()));
+        app.manage(QueueState::new(app.handle().clone(), std::sync::Arc::new(ProcessorRegistry::new())));
         if manage_history {
             app.manage(crate::history::HistoryStore::new_in(root));
         }
@@ -2919,16 +3040,9 @@ mod tests {
             fn supported_extensions(&self) -> &[&str] {
                 &["jpg"]
             }
-            fn compress_to_target(
+            fn compress(
                 &self,
-                _input: &std::path::Path,
-                _output: &std::path::Path,
-                _target_bytes: u64,
-                _quality_floor: &crate::settings::QualityFloors,
-                _cancel_token: CancellationToken,
-                _progress: ProgressSender,
-                _sidecar_paths: &crate::engine::SidecarPaths,
-                _temp_dir: &std::path::Path,
+                _ctx: &crate::engine::JobContext<'_>,
             ) -> Result<CompressionResult, CompressionError> {
                 panic!("simulated processor panic");
             }
@@ -2937,7 +3051,7 @@ mod tests {
         // Exercise the same catch-unwind wrapper used by process_single_job
         // and assert it maps a panic to a file-class error.
         let result = run_processor_catch_panic(|| {
-            PanicProcessor.compress_to_target(
+            PanicProcessor.compress(&crate::engine::JobContext::new(
                 std::path::Path::new("/tmp/missing.jpg"),
                 &out.join("panic.jpg"),
                 1,
@@ -2953,7 +3067,7 @@ mod tests {
                     gs_resources: None,
                 },
                 &out,
-            )
+            ))
         });
         match result {
             Err(CompressionError::OutputFileError(msg)) => {

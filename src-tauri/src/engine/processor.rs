@@ -17,7 +17,6 @@
 use crate::engine::progress::ProgressSender;
 use crate::engine::result::{CompressionError, CompressionResult};
 use crate::models::Category;
-use crate::settings::QualityFloors;
 use crate::sidecar::{
     GsResources, prepend_engine_dir_to_path, resolve_engine_candidate, resolve_gs_resources,
     resolve_sidecar_candidate, suppress_console_window,
@@ -517,18 +516,9 @@ fn capture_bounded_stdout(mut pipe: impl Read, label: &str) -> Vec<u8> {
 pub trait CompressionProcessor: Send + Sync {
     fn category(&self) -> Category;
     fn supported_extensions(&self) -> &[&str];
-
-    #[allow(clippy::too_many_arguments)]
-    fn compress_to_target(
+    fn compress(
         &self,
-        input: &Path,
-        output: &Path,
-        target_bytes: u64,
-        quality_floor: &QualityFloors,
-        cancel_token: CancellationToken,
-        progress: ProgressSender,
-        sidecar_paths: &SidecarPaths,
-        temp_dir: &Path,
+        ctx: &crate::engine::context::JobContext<'_>,
     ) -> Result<CompressionResult, CompressionError>;
 }
 
