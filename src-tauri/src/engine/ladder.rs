@@ -627,7 +627,7 @@ mod tests {
         );
         assert!(!output.exists(), "cancelled shortcut must not deliver");
         assert!(
-            !output.with_extension("yard-tmp").exists(),
+            !crate::engine::processor::temp_path_for(&output).exists(),
             "the partial copy must be removed on cancel"
         );
     }

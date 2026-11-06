@@ -180,7 +180,7 @@ pub fn deliver_output(
         });
     }
 
-    let temp_path = output.with_extension("yard-tmp");
+    let temp_path = temp_path_for(output);
     if let Err(e) = std::fs::remove_file(&temp_path) {
         if e.kind() != std::io::ErrorKind::NotFound {
             eprintln!("warn: could not remove stale temp {}: {e}", temp_path.display());
@@ -234,6 +234,18 @@ pub fn deliver_output(
         changes: Vec::new(),
         consent: ConsentSource::Default,
     })
+}
+
+/// Delivery temp beside the destination, built by appending to the full file
+/// name (`report.jpg.yard-tmp`) so same-stem outputs in different categories
+/// (`report.jpg` / `report.pdf`) never share a temp path.
+pub fn temp_path_for(dest: &Path) -> PathBuf {
+    let Some(name) = dest.file_name() else {
+        return dest.with_extension("yard-tmp");
+    };
+    let mut temp = name.to_os_string();
+    temp.push(".yard-tmp");
+    dest.with_file_name(temp)
 }
 
 /// Atomically commits a temp file to its final destination. `hard_link`
@@ -808,7 +820,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let input = dir.path().join("in.bin");
         let output = dir.path().join("out.bin");
-        let temp_path = output.with_extension("yard-tmp");
+        let temp_path = temp_path_for(&output);
         let size = 64 * 1024 * 1024;
         fs::write(&input, vec![0u8; size]).unwrap();
         fs::write(&temp_path, b"stale").unwrap();
@@ -881,7 +893,7 @@ mod tests {
             result
         );
         assert!(
-            !output.with_extension("yard-tmp").exists(),
+            !temp_path_for(&output).exists(),
             "temp file must not be left in the read-only directory"
         );
 
@@ -914,7 +926,7 @@ mod tests {
             "got: {:?}",
             result
         );
-        assert!(!output.with_extension("yard-tmp").exists(), "temp must be removed");
+        assert!(!temp_path_for(&output).exists(), "temp must be removed");
         assert_eq!(
             fs::read(&output).unwrap(),
             b"precious existing data",
@@ -945,9 +957,66 @@ mod tests {
         assert!(output.exists(), "destination must exist");
         assert_eq!(fs::read(&output).unwrap(), b"delivered");
         assert!(
-            !output.with_extension("yard-tmp").exists(),
+            !temp_path_for(&output).exists(),
             "temp must be removed after successful commit"
         );
+    }
+
+    #[test]
+    fn temp_paths_are_unique_per_extension() {
+        let jpg = temp_path_for(Path::new("/out/report.jpg"));
+        let pdf = temp_path_for(Path::new("/out/report.pdf"));
+        assert_ne!(
+            jpg, pdf,
+            "same-stem outputs in different category lanes must not share a temp path"
+        );
+        assert_eq!(jpg, PathBuf::from("/out/report.jpg.yard-tmp"));
+        assert_eq!(pdf, PathBuf::from("/out/report.pdf.yard-tmp"));
+    }
+
+    #[test]
+    fn concurrent_delivery_keeps_same_stem_outputs_separate() {
+        use std::sync::{Arc, Barrier};
+
+        let dir = tempfile::tempdir().unwrap();
+        let size = 32 * 1024 * 1024;
+        let jpg_src = dir.path().join("jpg-src.bin");
+        let pdf_src = dir.path().join("pdf-src.bin");
+        fs::write(&jpg_src, vec![b'j'; size]).unwrap();
+        fs::write(&pdf_src, vec![b'p'; size]).unwrap();
+        let jpg_out = dir.path().join("report.jpg");
+        let pdf_out = dir.path().join("report.pdf");
+
+        let barrier = Arc::new(Barrier::new(2));
+        let deliver = |from: PathBuf, to: PathBuf, barrier: Arc<Barrier>| {
+            std::thread::spawn(move || {
+                barrier.wait();
+                deliver_output(
+                    &from,
+                    &to,
+                    size as u64,
+                    "test".to_string(),
+                    75,
+                    true,
+                    &ProgressSender::test_stub(),
+                    &CancellationToken::new(),
+                )
+            })
+        };
+        let a = deliver(jpg_src, jpg_out.clone(), barrier.clone());
+        let b = deliver(pdf_src, pdf_out.clone(), barrier);
+
+        a.join().unwrap().unwrap();
+        b.join().unwrap().unwrap();
+
+        let jpg = fs::read(&jpg_out).unwrap();
+        let pdf = fs::read(&pdf_out).unwrap();
+        assert_eq!(jpg.len(), size);
+        assert_eq!(pdf.len(), size);
+        assert!(jpg.iter().all(|b| *b == b'j'), "jpg lane must keep jpg bytes");
+        assert!(pdf.iter().all(|b| *b == b'p'), "pdf lane must keep pdf bytes");
+        assert!(!temp_path_for(&jpg_out).exists(), "jpg temp must be gone");
+        assert!(!temp_path_for(&pdf_out).exists(), "pdf temp must be gone");
     }
 
     #[test]
