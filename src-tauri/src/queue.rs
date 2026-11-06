@@ -451,11 +451,7 @@ impl<R: Runtime> QueueState<R> {
         if allow && scope == ConsentScope::Batch {
             self.grant_waiting_batch(&pending);
         } else if !allow && scope == ConsentScope::Batch {
-            let mut denials = poison_recover(self.consent_denials.lock());
-            let entry = denials.entry(pending.batch_id.clone()).or_default();
-            for change in &pending.changes {
-                entry.insert((pending.category, *change), CONSENT_DENIAL_LIMIT);
-            }
+            self.deny_waiting_batch(&pending);
         }
         let _ = pending.sender.send(ConsentAnswer { allow, scope });
     }
@@ -484,6 +480,36 @@ impl<R: Runtime> QueueState<R> {
                 let _ = pending
                     .sender
                     .send(ConsentAnswer { allow: true, scope: ConsentScope::Batch });
+            }
+        }
+    }
+
+    fn deny_waiting_batch(&self, answered: &PendingConsent) {
+        {
+            let mut denials = poison_recover(self.consent_denials.lock());
+            let entry = denials.entry(answered.batch_id.clone()).or_default();
+            for change in &answered.changes {
+                entry.insert((answered.category, *change), CONSENT_DENIAL_LIMIT);
+            }
+        }
+        let mut waiting = poison_recover(self.consent_pending.lock());
+        let ids: Vec<String> = waiting
+            .iter()
+            .filter(|(_, pending)| {
+                pending.batch_id == answered.batch_id
+                    && pending.category == answered.category
+                    && pending
+                        .changes
+                        .iter()
+                        .all(|change| answered.changes.contains(change))
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ids {
+            if let Some(pending) = waiting.remove(&id) {
+                let _ = pending
+                    .sender
+                    .send(ConsentAnswer { allow: false, scope: ConsentScope::Batch });
             }
         }
     }
@@ -4290,6 +4316,70 @@ mod tests {
             other_category.join().unwrap(),
             crate::engine::ConsentDecision::Deny(_)
         ));
+    }
+
+    #[test]
+    fn batch_deny_wakes_only_covered_requests() {
+        let (_root, app) = consent_test_app();
+        let rx = events_of(&app.handle(), &["consent:required"]);
+        let batch = "consent-deny-scope";
+        let queue = app.state::<QueueState<tauri::test::MockRuntime>>();
+
+        let spawn = |file_id: &str,
+                     category: crate::models::Category,
+                     changes: Vec<Change>|
+         -> std::thread::JoinHandle<crate::engine::ConsentDecision> {
+            let policy = std::sync::Arc::new(std::sync::Mutex::new(Policy::new(
+                crate::policy::ConsentSettings::default(),
+            )));
+            spawn_authorize(
+                app.handle().clone(),
+                batch,
+                file_id,
+                category,
+                changes,
+                policy,
+                CancellationToken::new(),
+                std::time::Duration::from_secs(2),
+            )
+        };
+
+        let answered = spawn("f1", crate::models::Category::Video, vec![Change::Downscale]);
+        let covered = spawn("f2", crate::models::Category::Video, vec![Change::Downscale]);
+        let other_change = spawn("f3", crate::models::Category::Video, vec![Change::FormatChange]);
+        let other_category = spawn("f4", crate::models::Category::Image, vec![Change::Downscale]);
+
+        let mut ids = HashMap::new();
+        for _ in 0..4 {
+            let payload = next_consent(&rx);
+            ids.insert(
+                payload["fileId"].as_str().unwrap().to_string(),
+                payload["requestId"].as_str().unwrap().to_string(),
+            );
+        }
+
+        queue.answer_consent(&ids["f1"], false, ConsentScope::Batch);
+        assert!(matches!(
+            answered.join().unwrap(),
+            crate::engine::ConsentDecision::Deny(_)
+        ));
+        assert!(
+            matches!(
+                covered.join().unwrap(),
+                crate::engine::ConsentDecision::Deny(_)
+            ),
+            "a waiter covered by the denied changes must wake instead of waiting for the timeout"
+        );
+        assert_eq!(
+            queue.pending_consent_count(),
+            2,
+            "an uncovered change and another category must stay pending"
+        );
+
+        queue.answer_consent(&ids["f3"], false, ConsentScope::Once);
+        queue.answer_consent(&ids["f4"], false, ConsentScope::Once);
+        let _ = other_change.join().unwrap();
+        let _ = other_category.join().unwrap();
     }
 
     #[test]
