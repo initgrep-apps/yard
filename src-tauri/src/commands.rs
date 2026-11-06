@@ -281,11 +281,16 @@ pub async fn get_history<R: tauri::Runtime>(
     page_size: u32,
     app: tauri::AppHandle<R>,
 ) -> Result<HistoryResponse, String> {
-    let Some(store) = app.try_state::<HistoryStore>() else {
+    if app.try_state::<HistoryStore>().is_none() {
         warn_missing_store_get_history();
         return Ok(HistoryResponse::empty(page_size));
-    };
-    let fold = store.load()?;
+    }
+    let load_app = app.clone();
+    let fold = tauri::async_runtime::spawn_blocking(move || {
+        load_app.state::<HistoryStore>().load()
+    })
+    .await
+    .map_err(|e| format!("history load task failed: {e}"))??;
     Ok(crate::history::query_history(
         fold,
         &filters,

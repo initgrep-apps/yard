@@ -1003,7 +1003,7 @@ impl<R: Runtime> QueueState<R> {
         .await;
         emit_handle.abort();
         let _ = emit_handle.await;
-        Self::finish_batch(app, &batch_id, total_saved);
+        Self::finish_batch(app, &batch_id, total_saved).await;
     }
 
     fn fail_preflight(app: &AppHandle<R>, queue: &tauri::State<'_, QueueState<R>>, batch_id: &str, error: String) {
@@ -1349,7 +1349,7 @@ impl<R: Runtime> QueueState<R> {
         total_saved
     }
 
-    fn finish_batch(app: &AppHandle<R>, batch_id: &str, total_saved: u64) {
+    async fn finish_batch(app: &AppHandle<R>, batch_id: &str, total_saved: u64) {
         let queue = app.state::<QueueState<R>>();
         queue.clear_batch_consent(batch_id);
         let cancelled = queue.batch_cancelled(batch_id);
@@ -1370,11 +1370,21 @@ impl<R: Runtime> QueueState<R> {
 
         let settings = crate::commands::load_settings(app);
         match app.try_state::<HistoryStore>() {
-            Some(store) => {
-                if let Err(e) =
-                    store.trim(settings.history.effective_retention_days(), now_ms())
+            Some(_) => {
+                let retention = settings.history.effective_retention_days();
+                let trim_app = app.clone();
+                match tauri::async_runtime::spawn_blocking(move || {
+                    trim_app.state::<HistoryStore>().trim(retention, now_ms())
+                })
+                .await
                 {
-                    eprintln!("warn: history trim after batch {batch_id} failed: {e}");
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => {
+                        eprintln!("warn: history trim after batch {batch_id} failed: {e}");
+                    }
+                    Err(e) => {
+                        eprintln!("warn: history trim task for batch {batch_id} failed: {e}");
+                    }
                 }
             }
             None => {
@@ -1461,6 +1471,9 @@ fn append_history<R: tauri::Runtime>(
         }
         return Ok(());
     };
+    // shortcut: per-file history appends are synchronous small file writes on
+    // the batch task; upgrade to a dedicated writer thread if batches grow to
+    // thousands of files or the disk stalls.
     let result = match record {
         HistoryRecordRef::SessionStart(rec) => store.append_session_start(rec),
         HistoryRecordRef::File(rec) => store.append_file(rec),
