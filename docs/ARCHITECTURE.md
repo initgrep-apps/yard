@@ -235,7 +235,7 @@ Details that change behavior:
 ### Concurrency and memory (ADR 0003, ADR 0010)
 
 - One lane per category; at most one job per lane. Each lane keeps file-list order. The lane model is retained from ADR 0003; only the admission currency changed.
-- A job is admitted only when `used + estimate ≤ budget`. Estimates come from `memory.rs`: image 4 × input, PDF 3 × input, document 4 MiB, video input + 400 MiB (scaled by width when known), other 0. They are conservative figures, never measurements.
+- A job is admitted only when `used + estimate ≤ budget`. Estimates come from `memory.rs`: image 4 × input, PDF 3 × input, document max(4 MiB, 4 × input), video input + 400 MiB × (width / 1920)² with an unknown width assumed to be 3840 px, other 0. They are conservative figures, never measurements.
 - Budget: `adaptiveMemory` on → `clamp(total RAM / 8, 300 MiB, 2 GiB)`; off → `memoryCeilingMb` clamped to the same bounds.
 - An estimate larger than the whole budget runs alone rather than deadlocking; that case is logged once per batch.
 - A job that finishes frees its estimate immediately, so a queued job in another lane can start while a long video still runs.
@@ -310,7 +310,7 @@ Poisoned mutexes are recovered with a warning, never a permanent stall. Missing 
 | Batch budget | `adaptiveMemory` on: `clamp(total RAM / 8, 300 MiB, 2 GiB)` · off: `memoryCeilingMb` clamped the same way |
 | Jobs at once | As many as fit the budget; one per category lane |
 | Same-category jobs | 1 |
-| Admission estimate | image 4 × input · PDF 3 × input · document 4 MiB · video input + 400 MiB (width-scaled when known) · other 0 |
+| Admission estimate | image 4 × input · PDF 3 × input · document max(4 MiB, 4 × input) · video input + 400 MiB × (width / 1920)², unknown width = 3840 · other 0 |
 | Oversize job | An estimate above the whole budget runs alone |
 | Engines per job | image: ≤ 8 quality probes plus one vips run per 0.9× dimension rung · video: ≤ 7 attempts (one two-pass + up to six CRF) = ≤ 8 ffmpeg runs and ≤ 8 ffprobe probes · PDF: ≤ 18 compression passes (2 qpdf + up to 16 gs) plus two qpdf page probes per validated pass · document: ≤ 9 vips passes per recompressible media entry (8 search + 1 confirmation) |
 | Memory | bounded per file: documents stream one entry at a time; images hold one image; engine children get the admission estimate. RSS is displayed, never enforced. |
@@ -318,7 +318,7 @@ Poisoned mutexes are recovered with a warning, never a permanent stall. Missing 
 | CPU | one video encode uses every core; other lanes compete for what is left |
 | Webview | every progress event re-renders the run view; no throttling |
 
-Practical guidance: input size no longer translates into a RAM requirement for documents. A very large document streams through a 4 MiB estimate, but its extracted media and attempt archives consume temp disk until the job ends; an archive declaring more than 4 GiB uncompressed is rejected before extraction. A large image or PDF still contributes a proportionally large admission estimate, so the budget may limit how many run together. Disk preflight is a floor, not a cap: a batch can still fill the volume with several large attempts. Hardware tiers and the plain-language requirements are in `README.md → System requirements`.
+Practical guidance: input size no longer translates into a RAM requirement for documents. A very large document streams with an estimate of at least 4 MiB (four times its input for large archives), but its extracted media and attempt archives consume temp disk until the job ends; an archive declaring more than 4 GiB uncompressed is rejected before extraction. A large image or PDF still contributes a proportionally large admission estimate, so the budget may limit how many run together. Disk preflight is a floor, not a cap: a batch can still fill the volume with several large attempts. Hardware tiers and the plain-language requirements are in `README.md → System requirements`.
 
 Shipped replacement for the former slot model: ADR 0010 bounds per-file memory and replaces `maxConcurrent` with the machine-derived budget; ADR 0011 defines the consent-gated fidelity ladder and `needs_permission`; ADR 0012 makes `registry.rs` and the 7×5 capability matrix the only tables; ADR 0013 moves shared ladder state into `JobContext`/`Ladder`; ADR 0014 moves job bodies to `spawn_blocking` and restores unwind panics.
 

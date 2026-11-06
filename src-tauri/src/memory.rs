@@ -26,6 +26,7 @@ const MIB: u64 = 1024 * 1024;
 const DOCUMENT_ESTIMATE_BYTES: u64 = 4 * MIB;
 const VIDEO_BASE_MEMORY_BYTES: u64 = 400 * MIB;
 const VIDEO_BASE_WIDTH: u32 = 1920;
+const VIDEO_UNKNOWN_WIDTH: u32 = 3840;
 
 static SYSTEM: OnceLock<System> = OnceLock::new();
 
@@ -68,11 +69,14 @@ pub fn estimate_job(category: crate::models::Category, input_size: u64, width: O
     let estimate = match category {
         crate::models::Category::Image => input_size.saturating_mul(4),
         crate::models::Category::Pdf => input_size.saturating_mul(3),
-        crate::models::Category::Document => DOCUMENT_ESTIMATE_BYTES,
+        crate::models::Category::Document => input_size
+            .saturating_mul(4)
+            .max(DOCUMENT_ESTIMATE_BYTES),
         crate::models::Category::Video => {
-            let width = width.unwrap_or(VIDEO_BASE_WIDTH);
-            let scaled = (u128::from(VIDEO_BASE_MEMORY_BYTES) * u128::from(width))
-                / u128::from(VIDEO_BASE_WIDTH);
+            let width = width.unwrap_or(VIDEO_UNKNOWN_WIDTH);
+            let base = u128::from(VIDEO_BASE_WIDTH);
+            let scaled = u128::from(VIDEO_BASE_MEMORY_BYTES) * u128::from(width) * u128::from(width)
+                / (base * base);
             input_size.saturating_add(scaled as u64)
         }
         crate::models::Category::Other => 0,
@@ -165,19 +169,34 @@ mod tests {
     }
 
     #[test]
-    fn document_estimate_is_bounded() {
+    fn document_estimate_floors_at_4_mib_and_scales_with_input() {
+        assert_eq!(
+            estimate_job(crate::models::Category::Document, 1 * MIB, None),
+            DOCUMENT_ESTIMATE_BYTES
+        );
         assert_eq!(
             estimate_job(crate::models::Category::Document, 100 * MIB, None),
-            DOCUMENT_ESTIMATE_BYTES
+            400 * MIB,
+            "a large archive must reserve four times its input, not a flat 4 MiB"
         );
     }
 
     #[test]
-    fn video_estimate_scales_by_width() {
+    fn video_estimate_uses_4k_for_unknown_width() {
         let base = estimate_job(crate::models::Category::Video, 0, Some(1920));
         let half = estimate_job(crate::models::Category::Video, 0, Some(960));
+        let unknown = estimate_job(crate::models::Category::Video, 0, None);
         assert_eq!(base, VIDEO_BASE_MEMORY_BYTES);
-        assert_eq!(half, VIDEO_BASE_MEMORY_BYTES / 2);
+        assert_eq!(
+            half,
+            VIDEO_BASE_MEMORY_BYTES / 4,
+            "memory tracks pixel count, so half the width is a quarter of the estimate"
+        );
+        assert_eq!(
+            unknown,
+            VIDEO_BASE_MEMORY_BYTES * 4,
+            "a missing width must assume 4K, not 1080p"
+        );
     }
 
     #[test]
