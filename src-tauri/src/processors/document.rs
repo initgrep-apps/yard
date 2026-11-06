@@ -347,9 +347,10 @@ fn measure_fixed_part(
 
 /// Writes a complete archive: non-media entries streamed from `input`; media
 /// entries are streamed from `media` and stored uncompressed. The chosen media
-/// file is compared against the original entry size, and if it grew, the
-/// original entry bytes are streamed instead. The file is finished but not
-/// committed to the final output path.
+/// file is compared against the original entry's compressed size — a deflated
+/// original can be smaller than its uncompressed length — and pass-through
+/// media is raw-copied so its existing compression is preserved. The file is
+/// finished but not committed to the final output path.
 pub fn write_archive(
     input: &Path,
     metas: &[EntryMeta],
@@ -392,13 +393,14 @@ pub fn write_archive(
             .map_err(|e| output_file_error(chosen_path, e))?
             .len();
 
-        let mut entry = archive.by_index(meta.index).map_err(|e| {
+        let entry = archive.by_index(meta.index).map_err(|e| {
             eprintln!("warn: cannot read zip entry {} of {}: {e}", meta.name, input.display());
             CompressionError::SidecarFailed(CORRUPT.to_string())
         })?;
-        let original_len = entry.size();
+        let original_compressed = entry.compressed_size();
+        let pass_through = media_disposition(&meta.name) == MediaDisposition::PassThrough;
 
-        if chosen_len > original_len {
+        if pass_through || chosen_len >= original_compressed {
             writer
                 .raw_copy_file(entry)
                 .map_err(|e| CompressionError::OutputFileError(format!("rezip entry {}: {e}", meta.name)))?;
@@ -636,9 +638,16 @@ impl CompressionProcessor for DocumentProcessor {
                     let recompressed = ctx.temp_dir.join(format!("media-{}-q{}.{}", meta.index, quality, ext));
                     temp_paths_for_attempt.borrow_mut().push(recompressed.clone());
                     let args = vec![
-                        "copy".to_string(),
+                        "thumbnail".to_string(),
                         original.display().to_string(),
                         format!("{}{}", recompressed.display(), media_save_options(&ext, quality)),
+                        "100000".to_string(),
+                        "--size".to_string(),
+                        "down".to_string(),
+                        "--output-profile".to_string(),
+                        "srgb".to_string(),
+                        "--fail-on".to_string(),
+                        "error".to_string(),
                     ];
                     match run_sidecar(sidecar, "vips", &args, &ctx.cancel, strict_exit) {
                         Ok(()) => match std::fs::metadata(&recompressed) {
@@ -908,16 +917,17 @@ mod tests {
     const DOCUMENT_XML: &[u8] = b"<?xml version=\"1.0\"?><w:document xmlns:w=\"x\"></w:document>";
     const RELS_XML: &[u8] = b"<?xml version=\"1.0\"?><Relationships></Relationships>";
 
-    /// Fake vips: `copy IN OUT[opts]` writes exactly `q * 100` bytes of the
-    /// deterministic LCG noise pattern, where q is parsed from the `[Q=…]`
-    /// save string. Logs one `q` per invocation to `q.log` beside the
-    /// script.
+    /// Fake vips: `thumbnail IN OUT[opts] WIDTH --size down ...` writes
+    /// exactly `q * 100` bytes of the deterministic LCG noise pattern, where
+    /// q is parsed from the `[Q=…]` save string. Logs the full argv to
+    /// `args.log` and one `q` per invocation to `q.log` beside the script.
     #[cfg(unix)]
     fn write_fake_vips(dir: &Path) -> String {
         make_executable_script(
             dir,
             "fake-vips",
             r#"#!/bin/bash
+echo "$*" >> "$(dirname "$0")/args.log"
 out="$3"
 base="${out%%\[*]}"
 q="${out#*\[Q=}"; q="${q%,*}"; q="${q%%\]*}"
@@ -1151,16 +1161,26 @@ awk -v n="$n" 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
         let dir = tempfile::tempdir().unwrap();
         let fake = write_fake_vips(&dir.path());
         let input = dir.path().join("in.docx");
-        build_docx(
-            &input,
-            &[
-                ("[Content_Types].xml", CONTENT_TYPES.to_vec()),
-                ("word/document.xml", DOCUMENT_XML.to_vec()),
-                ("word/media/image1.jpg", noise_bytes(9000)),
-                ("word/media/image2.png", vec![9; 500]),
-                ("word/media/image3.jpeg", vec![7; 500]),
-            ],
-        );
+        let file = fs::File::create(&input).unwrap();
+        let mut writer = ZipWriter::new(file);
+        for (name, content) in [
+            ("[Content_Types].xml", CONTENT_TYPES.to_vec()),
+            ("word/document.xml", DOCUMENT_XML.to_vec()),
+            ("word/media/image1.jpg", noise_bytes(9000)),
+            ("word/media/image2.png", vec![9; 500]),
+            ("word/media/image3.jpeg", vec![7; 500]),
+        ] {
+            let method = if name.starts_with("word/media/") {
+                CompressionMethod::Stored
+            } else {
+                CompressionMethod::Deflated
+            };
+            writer
+                .start_file(name, SimpleFileOptions::default().compression_method(method))
+                .unwrap();
+            writer.write_all(&content).unwrap();
+        }
+        writer.finish().unwrap();
         let tmp = dir.path().join("tmp");
         fs::create_dir_all(&tmp).unwrap();
 
@@ -1336,6 +1356,116 @@ awk -v n=9500 'BEGIN { s = 12345; for (i = 0; i < n; i++) { s = (s * 16807 + 11)
             }
         }
         panic!("media entry missing in output");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn document_media_is_thumbnail_oriented_and_srgb_normalised() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = write_fake_vips(&dir.path());
+        let input = dir.path().join("in.docx");
+        build_docx(
+            &input,
+            &[
+                ("[Content_Types].xml", CONTENT_TYPES.to_vec()),
+                ("word/document.xml", DOCUMENT_XML.to_vec()),
+                ("word/media/image1.jpg", noise_bytes(2000)),
+            ],
+        );
+        let tmp = dir.path().join("tmp");
+        fs::create_dir_all(&tmp).unwrap();
+
+        DocumentProcessor
+            .compress(&JobContext::new(
+                &input,
+                &dir.path().join("out.docx"),
+                100,
+                &floors_with(40),
+                CancellationToken::new(),
+                ProgressSender::test_stub(),
+                &test_sidecar_paths(Some(fake)),
+                &tmp,
+            ))
+            .unwrap();
+
+        let log = fs::read_to_string(dir.path().join("args.log")).unwrap();
+        let line = log
+            .lines()
+            .find(|line| line.starts_with("thumbnail "))
+            .unwrap_or_else(|| panic!("document media must use thumbnail: {log}"));
+        assert!(
+            line.contains("--output-profile srgb"),
+            "embedded media must be normalised to sRGB: {line}"
+        );
+        assert!(
+            line.contains("--size down") && line.contains("--fail-on error"),
+            "document media must share the image invocation shape: {line}"
+        );
+        assert!(
+            line.contains("keep=icc"),
+            "ICC data must be kept alongside the sRGB transform: {line}"
+        );
+        assert!(
+            !line.contains("strip"),
+            "media must not strip orientation/colour metadata: {line}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deflated_media_fallback_never_exceeds_the_original_compressed_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = make_executable_script(
+            dir.path(),
+            "fake-vips-grow",
+            r#"#!/bin/bash
+out="$3"
+base="${out%%\[*]}"
+head -c 9000 /dev/zero > "$base"
+"#,
+        );
+        let input = dir.path().join("in.docx");
+        build_docx(
+            &input,
+            &[
+                ("[Content_Types].xml", CONTENT_TYPES.to_vec()),
+                ("word/document.xml", DOCUMENT_XML.to_vec()),
+                ("word/media/image1.jpg", vec![7u8; 4000]),
+            ],
+        );
+        let input_size = fs::metadata(&input).unwrap().len();
+        let input_compressed = entry_compressed_size(&input, "word/media/image1.jpg");
+        assert!(
+            input_compressed < 4000,
+            "the fixture media must actually deflate: {input_compressed}"
+        );
+
+        let tmp = dir.path().join("tmp");
+        fs::create_dir_all(&tmp).unwrap();
+        DocumentProcessor
+            .compress(&JobContext::new(
+                &input,
+                &dir.path().join("out.docx"),
+                100,
+                &floors_with(40),
+                CancellationToken::new(),
+                ProgressSender::test_stub(),
+                &test_sidecar_paths(Some(fake)),
+                &tmp,
+            ))
+            .unwrap();
+
+        let output = dir.path().join("out.docx");
+        let output_compressed = entry_compressed_size(&output, "word/media/image1.jpg");
+        assert!(
+            output_compressed <= input_compressed,
+            "raw-copied fallback must not exceed the deflated original: {output_compressed} > {input_compressed}"
+        );
+        let output_size = fs::metadata(&output).unwrap().len();
+        assert!(
+            output_size <= input_size,
+            "a growing vips must not grow the archive: {output_size} > {input_size}"
+        );
     }
 
     fn crc32(data: &[u8]) -> u32 {
