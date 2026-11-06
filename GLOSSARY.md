@@ -90,7 +90,7 @@ The per-category queue inside a batch (image, video, pdf, document, other). One 
 _Avoid_: queue, pool
 
 **Attempt**:
-One complete try at producing an output: one engine run, or one two-pass encode.
+One complete try at producing an output: one ladder rung. It may run one engine command (two for a two-pass encode) and, for documents, one vips run per recompressible media entry.
 _Avoid_: pass, run, iteration
 
 **Rung**:
@@ -113,21 +113,25 @@ _Avoid_: convert, rewrap
 Re-encoding that lowers fidelity while keeping the same contents: every page, track and frame, in the same format.
 _Avoid_: destructive change, compression
 
+**Fidelity ladder**:
+The shipped attempt order: copy when already under target, lossless pass, lossy encode inside the quality floors, destructive change only with consent, then best effort or `needs_permission`. Each rung declares the changes it can make; the ladder rejects an undeclared change.
+_Avoid_: fallback chain, retry loop
+
 **Destructive change**:
-A change the user can notice in the result: fewer pixels, a missing track or page, a different format, rasterised pages. Requires consent.
+A change the user can notice in the result: fewer pixels, a missing track or page, a different format, rasterised pages. Requires consent unless a setting grants it.
 _Avoid_: lossy, degradation
 
 **Batch budget**:
-The total RAM a running batch may use, derived from the machine's RAM (`clamp(total/8, 300 MiB, 2 GiB)`) or fixed by the user. Replaces the old slot count.
+The total RAM a running batch may use, derived from the machine's RAM (`clamp(total/8, 300 MiB, 2 GiB)`) or fixed by `memoryCeilingMb` and clamped the same way. Replaces the old slot count.
 _Avoid_: slot, concurrency limit, thread pool
 
-**Job ceiling**:
-The maximum peak RAM one job may use. It never grows with input size.
-_Avoid_: memory limit, cap
+**Job estimate**:
+The conservative peak RAM attributed to one job for admission: image 4 × input, PDF 3 × input, document 4 MiB, video input + 400 MiB (width-scaled when known). An estimate, never a measurement, and never a kill threshold.
+_Avoid_: memory limit, job ceiling, engine memory
 
-**Engine estimate**:
-The conservative RAM figure attributed to a job's engine child for admission. An estimate, never a measurement.
-_Avoid_: engine memory
+**Registry**:
+`registry.rs` — the single file-type table mapping extension → category → output extension. Detection, each processor's accepted extensions, output naming and the capability matrix's category columns all read it.
+_Avoid_: type map, extension list
 
 **Target**:
 The per-category size cap a batch aims for (image 200 KB, video 10 MB, PDF 2 MB, document 1 MB by default).
@@ -138,11 +142,11 @@ The user's minimum acceptable quality per category (image Q30, video CRF 28 at 4
 _Avoid_: limits, thresholds
 
 **Resolution floor**:
-The smallest size the user accepts before a downscale counts as destructive (video 480p, image long edge 1280 px).
+The smallest size the user accepts. A downscale below it is denied; any downscale still needs consent. Video 480p, image long edge 1280 px.
 _Avoid_: minimum size, scale limit
 
 **Free zone**:
-The range of degradation the user already authorised through the quality and resolution floors. Rungs inside it need no consent.
+The degradation the user already authorised through the quality floors. Lossy re-encoding inside the floors needs no consent; downscaling above the resolution floor still does, and below the floor it is denied.
 _Avoid_: allowed loss, safe range
 
 **Capability**:
@@ -150,19 +154,23 @@ One kind of change a rung can make: lossy encode, downscale, drop stream, format
 _Avoid_: permission, flag
 
 **Capability matrix**:
-The table that maps a capability and a category to allowed, needs consent, or denied.
+The 7 × 5 table in `policy.rs` that maps every capability and category to allowed, needs consent, or denied.
 _Avoid_: rules engine, policy config
 
 **Consent**:
-An explicit user decision permitting a specific destructive change for a stated scope: once, this batch, or this category.
+An explicit user decision permitting a specific destructive change for a stated scope: once, this batch, or the global allow-destructive setting.
 _Avoid_: approval, confirmation
 
+**Consent source**:
+Where an authorisation came from: `default` (allowed with no grant, including the built-in HEIC → JPEG permission), `global`, `category` (policy-level, no shipped UI control), `batch`, or `once`. History records the source only when it is not `default`.
+_Avoid_: consent type, scope
+
 **Pre-flight consent**:
-One prompt before a batch for destructive changes that can be predicted from the file type alone, such as HEIC to JPG.
+One prompt before a batch for destructive changes that can be predicted from the file type alone, such as HEIC to JPG when the default permission is off.
 _Avoid_: batch warning, upfront dialog
 
 **Needs permission**:
-The outcome of a file whose required destructive change was denied or left unanswered. Nothing is delivered.
+The `needs_permission` status of a file whose required destructive change was denied or left unanswered. Nothing is delivered, and any delivered file is removed.
 _Avoid_: failed, blocked, best effort
 
 **Best effort**:

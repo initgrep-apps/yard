@@ -36,7 +36,7 @@ Superpowers specs and plans are working artifacts. When a slice merges: digest t
 - **Image processing:** libvips 8.18.7 (`vips` sidecar; Intel macOS frozen at 8.18.6)
 - **Video processing:** FFmpeg 9.0.2 + ffprobe (sidecars)
 - **PDF processing:** Ghostscript 10.08.0 + qpdf 12.4.2 (sidecars; Intel macOS gs frozen at 10.07.1)
-- **Document processing:** Rust `zip` 8.x crate + vips sidecar
+- **Document processing:** Rust `zip` 9.x crate + vips sidecar
 - **Rust deps:** serde 1.0, uuid 1.26, dirs 7.0
 - **Package manager:** yarn
 - **License:** GPLv3
