@@ -302,6 +302,7 @@ export function useCompression(
   }, [setFiles, clearWatchdog, kickWatchdog])
 
   const compressAll = useCallback(async (grants?: ConsentGrant[]) => {
+    if (isCompressingRef.current) return
     const pendingCount = filesRef.current.filter((f) => f.status === 'pending').length
     if (pendingCount === 0) return
     clearWatchdog()

@@ -136,6 +136,8 @@ describe('CompressView', () => {
       name: `photo-${index}.heic`,
       path: `/t/photo-${index}.heic`,
       category: 'image' as const,
+      originalSize: 4_000_000,
+      targetBytes: 204_800,
     }))
     await addFilesInView(heic)
     vi.mocked(invoke).mockImplementation(async (command: string) => {
@@ -269,6 +271,22 @@ describe('CompressView', () => {
     await user.click(btn)
     expect(invoke).toHaveBeenCalledWith('compress_all')
     expect(screen.queryByRole('table')).not.toBeInTheDocument()
+  })
+
+  it('double-clicking Compress starts a single batch', async () => {
+    renderView()
+    await addFileInView()
+    const button = screen.getByRole('button', { name: 'Compress' })
+
+    fireEvent.click(button)
+    fireEvent.click(button)
+
+    await waitFor(() => {
+      const calls = vi
+        .mocked(invoke)
+        .mock.calls.filter(([command]) => command === 'compress_all')
+      expect(calls).toHaveLength(1)
+    })
   })
 
   it('compress press switches to locked run screen with Batch #1, Compressing pill, and roster lanes', async () => {

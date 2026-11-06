@@ -72,6 +72,7 @@ export function CompressionProvider({ children }: { children: ReactNode }) {
 
   const filesRef = useRef(files)
   filesRef.current = files
+  const startingRef = useRef(false)
   const [runScreen, setRunScreen] = useState<RunScreen>('staging')
   const [batchNumber, setBatchNumber] = useState(0)
   const [batchError, setBatchError] = useState<string | null>(null)
@@ -79,16 +80,21 @@ export function CompressionProvider({ children }: { children: ReactNode }) {
   const [roster, setRoster] = useState<Array<FileEntry['id']>>([])
 
   const startRun = useCallback(async () => {
-    if (isCompressing) return
-    const pending = filesRef.current.filter((f) => f.status === 'pending')
-    if (pending.length === 0) return
-    const grants = await requestPreflight(pending)
-    if (grants === null) return
-    setRoster(pending.map((f) => f.id))
-    setBatchNumber((n) => n + 1)
-    setBatchCancelled(false)
-    setRunScreen('run')
-    void compressAll(grants.length > 0 ? grants : undefined)
+    if (startingRef.current || isCompressing) return
+    startingRef.current = true
+    try {
+      const pending = filesRef.current.filter((f) => f.status === 'pending')
+      if (pending.length === 0) return
+      const grants = await requestPreflight(pending)
+      if (grants === null) return
+      setRoster(pending.map((f) => f.id))
+      setBatchNumber((n) => n + 1)
+      setBatchCancelled(false)
+      setRunScreen('run')
+      void compressAll(grants.length > 0 ? grants : undefined)
+    } finally {
+      startingRef.current = false
+    }
   }, [compressAll, isCompressing])
 
   const endRun = useCallback(() => {
