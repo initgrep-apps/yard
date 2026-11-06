@@ -72,6 +72,7 @@ function session13(): HistorySession {
       cancelled: 0,
       unsupported: 0,
       alreadyUnderTarget: 4,
+      needsPermission: 0,
     },
     totalSavedBytes: ORIGINAL - CURRENT,
     cancelled: false,

@@ -67,6 +67,7 @@ function session(files: HistoryFile[]): HistorySession {
       cancelled: 0,
       unsupported: 0,
       alreadyUnderTarget: 0,
+      needsPermission: 0,
     },
     totalSavedBytes: 0,
     cancelled: false,

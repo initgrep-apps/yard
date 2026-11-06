@@ -20,6 +20,7 @@ use crate::history::{
     Counts, FileResultRecord, HistoryRecordRef, HistoryStore, SessionEndRecord, SessionStartRecord,
 };
 use crate::models::{FileEntry, FileStatus};
+use crate::policy::{Change, ConsentSource, Policy, Verdict};
 use crate::processors::ProcessorRegistry;
 use crate::scheduler;
 use crate::sidecar;
@@ -70,6 +71,7 @@ fn run_job(
         Ok(paths) => paths,
         Err(error) => return Err(CompressionError::Unknown(error)),
     };
+    let policy = Policy::new(settings.consent);
     let ctx = crate::engine::JobContext::new(
         std::path::Path::new(&entry.path),
         &output_path,
@@ -79,7 +81,10 @@ fn run_job(
         progress,
         &sidecar_paths,
         &temp_dir,
-    );
+    )
+    .with_policy(&policy)
+    .with_category(entry.category)
+    .with_declared(processor.declared_changes());
     run_processor_catch_panic(|| processor.compress(&ctx))
 }
 
@@ -121,7 +126,14 @@ pub(crate) fn output_file_name(name: &str) -> String {
 }
 
 /// Map a successful CompressionResult to its final FileStatus.
-pub(crate) fn decide_result_status(result: &CompressionResult) -> FileStatus {
+pub(crate) fn decide_result_status(
+    result: &CompressionResult,
+    category: crate::models::Category,
+    policy: &Policy,
+) -> FileStatus {
+    if policy.check(category, &result.changes) != Verdict::Allowed {
+        return FileStatus::NeedsPermission;
+    }
     if !result.met_target {
         FileStatus::BestEffort
     } else if result.is_already_under_target() {
@@ -129,6 +141,27 @@ pub(crate) fn decide_result_status(result: &CompressionResult) -> FileStatus {
     } else {
         FileStatus::Done
     }
+}
+
+/// Decides the status and removes a delivered file when the policy denied the
+/// changes it made, so `needs_permission` never leaves an output behind.
+pub(crate) fn settle_result_status(
+    result: &CompressionResult,
+    category: crate::models::Category,
+    policy: &Policy,
+) -> FileStatus {
+    let status = decide_result_status(result, category, policy);
+    if status == FileStatus::NeedsPermission {
+        if let Err(error) = std::fs::remove_file(&result.output_path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                eprintln!(
+                    "warn: could not remove denied output {}: {error}",
+                    result.output_path.display()
+                );
+            }
+        }
+    }
+    status
 }
 
 #[derive(serde::Serialize)]
@@ -156,6 +189,7 @@ struct FileCompletePayload<'a> {
     met_target: bool,
     quality_used: Option<u32>,
     strategy_used: Option<String>,
+    reason: Option<String>,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -591,6 +625,7 @@ impl<R: Runtime> QueueState<R> {
     ) -> u64 {
         let queue = app.state::<QueueState<R>>();
         let state = app.state::<FileListState>();
+        let policy = Policy::new(settings.consent.clone());
         let mut total_saved: u64 = 0;
         let started = std::time::Instant::now();
         let elapsed_ms = || (started.elapsed().as_millis() as u64).max(1);
@@ -683,6 +718,7 @@ impl<R: Runtime> QueueState<R> {
                         met_target: false,
                         quality_used: None,
                         strategy_used: None,
+                        reason: None,
                     },
                 );
                 queue.remove_token(&file_id);
@@ -743,21 +779,34 @@ impl<R: Runtime> QueueState<R> {
 
         match result {
             Ok(compression_result) => {
-                let saved = entry
-                    .original_size
-                    .saturating_sub(compression_result.compressed_size);
-                total_saved += saved;
-                let status = decide_result_status(&compression_result);
-                let out_path = compression_result.output_path.to_string_lossy().to_string();
-                let quality_used = Some(compression_result.quality_used);
-                let strategy_used = Some(compression_result.strategy_used.clone());
+                let status =
+                    settle_result_status(&compression_result, entry.category, &policy);
+                let delivered = status != FileStatus::NeedsPermission;
+                let reason = if delivered {
+                    None
+                } else {
+                    policy.denial_reason(entry.category, &compression_result.changes)
+                };
+                let out_path = delivered
+                    .then(|| compression_result.output_path.to_string_lossy().to_string());
+                let compressed_size =
+                    delivered.then_some(compression_result.compressed_size);
+                let quality_used = delivered.then_some(compression_result.quality_used);
+                let strategy_used = delivered
+                    .then(|| compression_result.strategy_used.clone());
+                if delivered {
+                    total_saved += entry
+                        .original_size
+                        .saturating_sub(compression_result.compressed_size);
+                }
 
                 {
                     let mut list = poison_recover(state.0.lock());
                     if let Some(e) = list.iter_mut().find(|e| e.id == file_id) {
                         e.status = status;
-                        e.compressed_size = Some(compression_result.compressed_size);
-                        e.output_path = Some(out_path.clone());
+                        e.compressed_size = compressed_size;
+                        e.output_path = out_path.clone();
+                        e.error = reason.clone();
                     }
                 }
 
@@ -766,11 +815,11 @@ impl<R: Runtime> QueueState<R> {
                     &batch_id,
                     &entry,
                     status,
-                    Some(out_path.clone()),
-                    Some(compression_result.compressed_size),
+                    out_path.clone(),
+                    compressed_size,
                     quality_used,
                     strategy_used.clone(),
-                    None,
+                    reason.clone(),
                     elapsed_ms(),
                 );
 
@@ -778,13 +827,14 @@ impl<R: Runtime> QueueState<R> {
                     "file:complete",
                     FileCompletePayload {
                         file_id: &file_id,
-                        output_path: out_path,
+                        output_path: out_path.unwrap_or_default(),
                         original_size: entry.original_size,
-                        compressed_size: compression_result.compressed_size,
+                        compressed_size: compressed_size.unwrap_or(0),
                         status,
-                        met_target: compression_result.met_target,
+                        met_target: delivered && compression_result.met_target,
                         quality_used,
                         strategy_used,
+                        reason,
                     },
                 );
             }
@@ -899,6 +949,7 @@ fn status_key(status: &FileStatus) -> &'static str {
         FileStatus::Cancelled => "cancelled",
         FileStatus::Unsupported => "unsupported",
         FileStatus::AlreadyUnderTarget => "already_under_target",
+        FileStatus::NeedsPermission => "needs_permission",
     }
 }
 
@@ -912,6 +963,7 @@ fn history_counts_of(files: &[FileResultRecord]) -> Counts {
             "cancelled" => counts.cancelled += 1,
             "unsupported" => counts.unsupported += 1,
             "already_under_target" => counts.already_under_target += 1,
+            "needs_permission" => counts.needs_permission += 1,
             other => {
                 eprintln!("warn: history counts ignored unknown status: {other}");
             }
@@ -1056,13 +1108,15 @@ mod tests {
             quality_used: 75,
             met_target: met,
             strategy_used: strategy.to_string(),
+            changes: Vec::new(),
+            consent: ConsentSource::Default,
         }
     }
 
     #[test]
     fn decide_result_status_maps_already_under_target() {
         assert_eq!(
-            decide_result_status(&result(true, "already-under-target")),
+            decide_result_status(&result(true, "already-under-target"), crate::models::Category::Image, &Policy::default()),
             FileStatus::AlreadyUnderTarget
         );
     }
@@ -1070,7 +1124,7 @@ mod tests {
     #[test]
     fn decide_result_status_maps_met_target_to_done() {
         assert_eq!(
-            decide_result_status(&result(true, "quality=75")),
+            decide_result_status(&result(true, "quality=75"), crate::models::Category::Image, &Policy::default()),
             FileStatus::Done
         );
     }
@@ -1078,7 +1132,7 @@ mod tests {
     #[test]
     fn decide_result_status_maps_unmet_target_to_best_effort() {
         assert_eq!(
-            decide_result_status(&result(false, "quality=30,best-effort")),
+            decide_result_status(&result(false, "quality=30,best-effort"), crate::models::Category::Image, &Policy::default()),
             FileStatus::BestEffort
         );
     }
@@ -1086,7 +1140,7 @@ mod tests {
     #[test]
     fn decide_result_status_unmet_target_beats_already_under_strategy() {
         assert_eq!(
-            decide_result_status(&result(false, "already-under-target")),
+            decide_result_status(&result(false, "already-under-target"), crate::models::Category::Image, &Policy::default()),
             FileStatus::BestEffort
         );
     }
@@ -1141,6 +1195,8 @@ mod tests {
                 quality_used: 100,
                 met_target: true,
                 strategy_used: "blocking".to_string(),
+                changes: Vec::new(),
+                consent: ConsentSource::Default,
             })
         }
     }
@@ -1172,6 +1228,8 @@ mod tests {
                 quality_used: 100,
                 met_target: true,
                 strategy_used: "fake".to_string(),
+                changes: Vec::new(),
+                consent: ConsentSource::Default,
             })
         }
     }
@@ -2137,8 +2195,9 @@ mod tests {
             FileStatus::Cancelled,
             FileStatus::Unsupported,
             FileStatus::AlreadyUnderTarget,
+            FileStatus::NeedsPermission,
         ];
-        assert_eq!(all.len(), 8, "status_key must cover every FileStatus variant");
+        assert_eq!(all.len(), 9, "status_key must cover every FileStatus variant");
         for status in all {
             let expected = serde_json::to_value(status).unwrap();
             assert_eq!(
@@ -2150,6 +2209,7 @@ mod tests {
         assert_eq!(status_key(&FileStatus::AlreadyUnderTarget), "already_under_target");
         assert_eq!(status_key(&FileStatus::Pending), "pending");
         assert_eq!(status_key(&FileStatus::Compressing), "compressing");
+        assert_eq!(status_key(&FileStatus::NeedsPermission), "needs_permission");
     }
 
     #[test]
@@ -2184,10 +2244,12 @@ mod tests {
             met_target: true,
             quality_used: Some(70),
             strategy_used: Some("quality=70".into()),
+            reason: Some("Needs permission: page_drop".into()),
         };
         let v = serde_json::to_value(&payload).unwrap();
         assert_eq!(v["qualityUsed"], 70);
         assert_eq!(v["strategyUsed"], "quality=70");
+        assert_eq!(v["reason"], "Needs permission: page_drop");
     }
 
     #[tokio::test]

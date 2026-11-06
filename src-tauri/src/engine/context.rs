@@ -15,12 +15,20 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use std::path::Path;
+use std::sync::OnceLock;
 
 use tokio_util::sync::CancellationToken;
 
 use crate::engine::processor::SidecarPaths;
 use crate::engine::progress::ProgressSender;
+use crate::models::Category;
+use crate::policy::{Change, ConsentSource, Policy};
 use crate::settings::QualityFloors;
+
+fn default_policy() -> &'static Policy {
+    static POLICY: OnceLock<Policy> = OnceLock::new();
+    POLICY.get_or_init(Policy::default)
+}
 
 /// Everything a processor needs for one job. Values are resolved once by the
 /// job body and handed over unchanged, so a processor never re-derives the
@@ -34,6 +42,9 @@ pub struct JobContext<'a> {
     pub progress: ProgressSender,
     pub sidecars: &'a SidecarPaths,
     pub temp_dir: &'a Path,
+    pub policy: &'a Policy,
+    pub category: Category,
+    pub declared: &'a [Change],
 }
 
 impl<'a> JobContext<'a> {
@@ -57,7 +68,31 @@ impl<'a> JobContext<'a> {
             progress,
             sidecars,
             temp_dir,
+            policy: default_policy(),
+            category: crate::detection::detect_category(&input.to_string_lossy()),
+            declared: &Change::ALL,
         }
+    }
+
+    pub fn with_policy(mut self, policy: &'a Policy) -> Self {
+        self.policy = policy;
+        self
+    }
+
+    pub fn with_category(mut self, category: Category) -> Self {
+        self.category = category;
+        self
+    }
+
+    pub fn with_declared(mut self, declared: &'a [Change]) -> Self {
+        self.declared = declared;
+        self
+    }
+
+    pub fn consent_for(&self, changes: &[Change]) -> ConsentSource {
+        self.policy
+            .consent(self.category, changes)
+            .unwrap_or(ConsentSource::Default)
     }
 }
 

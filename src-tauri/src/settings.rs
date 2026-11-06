@@ -17,6 +17,8 @@
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
+use crate::policy::ConsentSettings;
+
 const KB: u64 = 1024;
 const MB: u64 = 1024 * 1024;
 
@@ -181,6 +183,8 @@ pub struct Settings {
     pub performance: Performance,
     #[serde(default)]
     pub history: HistorySettings,
+    #[serde(default)]
+    pub consent: ConsentSettings,
 }
 
 fn default_category_targets() -> std::collections::HashMap<String, CategoryTarget> {
@@ -224,6 +228,7 @@ impl Default for Settings {
             quality_floors: QualityFloors::default(),
             performance: Performance::default(),
             history: HistorySettings::default(),
+            consent: ConsentSettings::default(),
         }
     }
 }
@@ -298,8 +303,19 @@ mod tests {
     }
 
     #[test]
-    fn test_target_bytes_conversion() {
+    fn consent_defaults_deny_destructive_and_allow_heic_to_jpg() {
         let s = Settings::default();
+        assert!(!s.consent.allow_destructive);
+        assert!(s.consent.heic_to_jpg);
+        let value = serde_json::to_value(&s).unwrap();
+        assert_eq!(value["consent"]["allowDestructive"], false);
+        assert_eq!(value["consent"]["heicToJpg"], true);
+        let roundtripped: Settings = serde_json::from_value(value).unwrap();
+        assert_eq!(roundtripped.consent, s.consent);
+    }
+
+    #[test]
+    fn test_target_bytes_conversion() {        let s = Settings::default();
         assert_eq!(s.target_bytes_for("image"), 200 * 1024);
         assert_eq!(s.target_bytes_for("video"), 10 * 1024 * 1024);
         assert_eq!(s.target_bytes_for("pdf"), 2 * 1024 * 1024);

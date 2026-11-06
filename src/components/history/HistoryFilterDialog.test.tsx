@@ -170,7 +170,7 @@ describe("HistoryFilterDialog", () => {
     expect(payload.statuses).toHaveLength(2)
   })
 
-  it("renders six status chips including the three terminal outcomes", () => {
+  it("renders seven status chips including the three terminal outcomes", () => {
     renderDialog()
 
     const statusGroup = mainDialog().querySelector(
@@ -179,10 +179,11 @@ describe("HistoryFilterDialog", () => {
 
     expect(
       within(statusGroup as HTMLElement).getAllByRole("button"),
-    ).toHaveLength(6)
+    ).toHaveLength(7)
     expect(button("Best effort")).toBeInTheDocument()
     expect(button("Under target")).toBeInTheDocument()
     expect(button("Unsupported")).toBeInTheDocument()
+    expect(button("Needs permission")).toBeInTheDocument()
   })
 
   it("uses the History muted dot for Under target", () => {

@@ -63,12 +63,14 @@ const baseSettings: Settings = {
   },
   performance: { adaptiveMemory: true, memoryCeilingMb: 2048 },
   history: { retentionDays: 90 },
+  consent: { allowDestructive: false, heicToJpg: true },
 }
 
 const resetDefaults: Settings = {
   ...baseSettings,
   outputFolder: "/defaults/Compressed",
   history: { retentionDays: 30 },
+  consent: { allowDestructive: false, heicToJpg: true },
 }
 
 const saveCalls = () =>
@@ -241,6 +243,7 @@ describe("SettingsDialog", () => {
     expect(savedSettings()).toEqual({
       ...baseSettings,
       history: { retentionDays: 30 },
+      consent: { allowDestructive: false, heicToJpg: true },
     })
 
     await act(async () => {
@@ -289,6 +292,7 @@ describe("SettingsDialog", () => {
     expect(savedSettings()).toEqual({
       ...baseSettings,
       history: { retentionDays: 30 },
+      consent: { allowDestructive: false, heicToJpg: true },
     })
     expect(onOpenChange).toHaveBeenCalledWith(false)
 
@@ -345,6 +349,7 @@ describe("SettingsDialog", () => {
     expect(savedSettings(1)).toEqual({
       ...baseSettings,
       history: { retentionDays: 30 },
+      consent: { allowDestructive: false, heicToJpg: true },
     })
     expect(toast.dismiss).toHaveBeenCalledWith("settings-save")
     expect(onOpenChange).toHaveBeenCalledWith(false)

@@ -23,6 +23,7 @@ use crate::engine::{
     JobContext, Ladder, SidecarName, run_sidecar, strict_exit,
 };
 use crate::models::Category;
+use crate::policy::Change;
 
 pub struct ImageProcessor;
 
@@ -158,6 +159,22 @@ fn dimension_ladder(long_edge: u32, min_long_edge: u32) -> Vec<u32> {
         edge = next;
     }
     rungs
+}
+
+fn attempt_changes(input: &Path, width: u32) -> Vec<Change> {
+    let mut changes = vec![Change::LossyEncode, Change::MetadataStrip];
+    let input_ext = input
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_lowercase)
+        .unwrap_or_default();
+    if input_ext != crate::registry::output_extension(input.to_string_lossy().as_ref()) {
+        changes.push(Change::FormatChange);
+    }
+    if width != NO_DOWNSCALE_WIDTH {
+        changes.push(Change::Downscale);
+    }
+    changes
 }
 
 /// shortcut: a JPEG whose SOF marker sits past the 1 MiB header window falls
@@ -312,6 +329,15 @@ impl CompressionProcessor for ImageProcessor {
         crate::registry::extensions_for(Category::Image)
     }
 
+    fn declared_changes(&self) -> &'static [Change] {
+        &[
+            Change::LossyEncode,
+            Change::Downscale,
+            Change::FormatChange,
+            Change::MetadataStrip,
+        ]
+    }
+
     fn compress(&self, ctx: &JobContext<'_>) -> Result<CompressionResult, CompressionError> {
         let input_size = std::fs::metadata(ctx.input)
             .map(|m| m.len())
@@ -410,6 +436,8 @@ impl CompressionProcessor for ImageProcessor {
                     advance(attempt_n);
                     attempt_n += 1;
                     if size > ctx.target_bytes {
+                        let changes = attempt_changes(ctx.input, NO_DOWNSCALE_WIDTH);
+                        let consent = ctx.consent_for(&changes);
                         ladder.record(
                             ctx,
                             AttemptOutcome::Produced {
@@ -417,6 +445,8 @@ impl CompressionProcessor for ImageProcessor {
                                 size,
                                 quality: q,
                                 strategy: format!("quality={}", q),
+                                changes,
+                                consent,
                             },
                         );
                     }
@@ -435,6 +465,8 @@ impl CompressionProcessor for ImageProcessor {
         };
 
         if let Some((quality, size, path)) = quality_search {
+            let changes = attempt_changes(ctx.input, NO_DOWNSCALE_WIDTH);
+            let consent = ctx.consent_for(&changes);
             let decision = ladder.record(
                 ctx,
                 AttemptOutcome::Produced {
@@ -442,6 +474,8 @@ impl CompressionProcessor for ImageProcessor {
                     size,
                     quality,
                     strategy: format!("quality={}", quality),
+                    changes,
+                    consent,
                 },
             );
             return match decision {
@@ -476,6 +510,8 @@ impl CompressionProcessor for ImageProcessor {
             } else {
                 format!("quality={},dims={}px", save_quality, width)
             };
+            let changes = attempt_changes(ctx.input, width);
+            let consent = ctx.consent_for(&changes);
             let decision = ladder.record(
                 ctx,
                 AttemptOutcome::Produced {
@@ -483,6 +519,8 @@ impl CompressionProcessor for ImageProcessor {
                     size,
                     quality: save_quality,
                     strategy,
+                    changes,
+                    consent,
                 },
             );
             if let AttemptDecision::Stop(result) = decision {

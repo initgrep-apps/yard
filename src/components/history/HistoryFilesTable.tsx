@@ -379,13 +379,15 @@ export function HistoryFilesTable({
   const renderFileRow = (row: HistoryRow) => {
     const file = row.original
     const failed = file.status === "failed"
+    const needsPermission = file.status === "needs_permission"
     return (
       <TableRow
         key={`row-${row.id}`}
         data-testid="history-file-row"
         className={cn(
           "h-[43px] border-b border-border/60 hover:bg-muted/40 has-aria-expanded:bg-muted/20",
-          failed && "bg-destructive/5 hover:bg-destructive/10"
+          failed && "bg-destructive/5 hover:bg-destructive/10",
+          needsPermission && "bg-amber-500/5 hover:bg-amber-500/10"
         )}
       >
         {row.getAllCells().map((cell) => (

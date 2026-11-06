@@ -83,4 +83,5 @@ export const STATUS_TONES: Record<FileStatus, Tone> = {
   cancelled: MUTED,
   unsupported: MUTED,
   already_under_target: PRIMARY,
+  needs_permission: AMBER,
 }

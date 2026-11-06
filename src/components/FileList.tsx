@@ -47,6 +47,7 @@ function StatusBadge({ status }: { status: FileStatus }) {
     cancelled: 'Cancelled',
     unsupported: 'Unsupported',
     already_under_target: 'Already under target',
+    needs_permission: 'Needs permission',
   }
   const tone = STATUS_TONES[status]
   return (
@@ -117,7 +118,7 @@ export function FileList({ files, onRemove, onReveal, removeDisabled }: FileList
                 <TableCell>
                   <div className="flex flex-col gap-1.5">
                     <StatusBadge status={file.status} />
-                    {file.status === 'failed' && file.error && (
+                    {(file.status === 'failed' || file.status === 'needs_permission') && file.error && (
                       <div className="text-xs text-destructive max-w-[180px] truncate" title={file.error}>
                         {file.error}
                       </div>

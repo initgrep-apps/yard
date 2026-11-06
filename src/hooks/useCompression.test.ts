@@ -146,6 +146,28 @@ describe('useCompression event handling', () => {
     })
   })
 
+  it('needs_permission keeps no output and surfaces the reason', async () => {
+    const { result } = setup([entry()])
+    await flush()
+    emit('file:progress', { fileId: 'f1', percent: 40 })
+    emit('file:complete', {
+      fileId: 'f1',
+      outputPath: '',
+      originalSize: 1024,
+      compressedSize: 0,
+      status: 'needs_permission',
+      metTarget: false,
+      reason: 'Needs permission: downscale',
+    })
+    expect(result.current.comp.progressByFile['f1']).toBeUndefined()
+    expect(result.current.files[0]).toMatchObject({
+      status: 'needs_permission',
+      compressedSize: null,
+      outputPath: null,
+      error: 'Needs permission: downscale',
+    })
+  })
+
   it('file:error sets failed with message and resets stale strategy fields', async () => {
     const { result } = setup([entry({ strategyUsed: 'stale=old', qualityUsed: 7 })])
     await flush()

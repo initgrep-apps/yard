@@ -43,6 +43,7 @@ const STATUS_BUCKETS: Record<FileStatus, StatusBucket> = {
   cancelled: 'processedOnly',
   unsupported: 'unsupported',
   already_under_target: 'belowTarget',
+  needs_permission: 'processedOnly',
 }
 
 const WARNED = new Set<string>()

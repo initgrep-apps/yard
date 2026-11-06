@@ -194,6 +194,7 @@ describe("outcome filters and counts", () => {
 
   it("groups needs-attention outcomes", () => {
     expect(needsAttention(withStatus("failed"))).toBe(true)
+    expect(needsAttention(withStatus("needs_permission"))).toBe(true)
     expect(needsAttention(withStatus("best_effort"))).toBe(true)
     expect(needsAttention(withStatus("cancelled"))).toBe(true)
     expect(needsAttention(withStatus("unsupported"))).toBe(true)
@@ -220,6 +221,7 @@ describe("outcome filters and counts", () => {
       underTarget: 1,
       bestEffort: 1,
       failed: 1,
+      needsPermission: 0,
       other: 2,
     })
   })

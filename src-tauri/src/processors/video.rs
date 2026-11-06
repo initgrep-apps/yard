@@ -26,6 +26,7 @@ use crate::engine::{
     JobContext, Ladder, ProgressSender, SidecarName, StderrTail, stderr_tail,
 };
 use crate::models::Category;
+use crate::policy::Change;
 use crate::sidecar::suppress_console_window;
 
 pub struct VideoProcessor;
@@ -202,6 +203,24 @@ impl VideoProcessor {
             Some(w) => vec!["-vf".to_string(), format!("scale=min(iw\\,{w}):-2")],
             None => Vec::new(),
         }
+    }
+
+    fn attempt_changes(input: &Path, scale_width: Option<u32>) -> Vec<Change> {
+        let mut changes = vec![Change::LossyEncode];
+        let input_ext = input
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(str::to_lowercase)
+            .unwrap_or_default();
+        if input_ext != crate::registry::output_extension(input.to_string_lossy().as_ref()) {
+            changes.push(Change::FormatChange);
+        }
+        // shortcut: a scale cap on an already-small input still reports
+        // Downscale; add an input-width probe if false consent prompts matter.
+        if scale_width.is_some() {
+            changes.push(Change::Downscale);
+        }
+        changes
     }
 
     fn stream_map_args() -> Vec<&'static str> {
@@ -793,6 +812,10 @@ impl CompressionProcessor for VideoProcessor {
         crate::registry::extensions_for(Category::Video)
     }
 
+    fn declared_changes(&self) -> &'static [Change] {
+        &[Change::LossyEncode, Change::Downscale, Change::FormatChange]
+    }
+
     fn compress(&self, ctx: &JobContext<'_>) -> Result<CompressionResult, CompressionError> {
         let input_size = std::fs::metadata(ctx.input)
             .map(|m| m.len())
@@ -954,12 +977,22 @@ impl CompressionProcessor for VideoProcessor {
             progress.send_progress(base);
 
             let outcome = match run_attempt(attempt, &temp_output, base) {
-                Ok(size) => AttemptOutcome::Produced {
-                    path: temp_output,
-                    size,
-                    quality: attempt.quality(bitrate_k),
-                    strategy: attempt.strategy(bitrate_k),
-                },
+                Ok(size) => {
+                    let scale_width = match attempt {
+                        VideoAttempt::TwoPass { scale_width, .. }
+                        | VideoAttempt::Crf { scale_width, .. } => *scale_width,
+                    };
+                    let changes = Self::attempt_changes(ctx.input, scale_width);
+                    let consent = ctx.consent_for(&changes);
+                    AttemptOutcome::Produced {
+                        path: temp_output,
+                        size,
+                        quality: attempt.quality(bitrate_k),
+                        strategy: attempt.strategy(bitrate_k),
+                        changes,
+                        consent,
+                    }
+                }
                 Err(error) => {
                     if !ctx.cancel.is_cancelled() {
                         eprintln!("warn: video attempt failed, trying next: {error}");

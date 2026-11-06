@@ -64,6 +64,8 @@ function chipFor(file: FileEntry): { label: string; tone: ChipTone } | null {
       return { label: '≤ target', tone: 'muted' }
     case 'failed':
       return { label: 'Failed', tone: 'fail' }
+    case 'needs_permission':
+      return { label: 'Permission', tone: 'amber' }
     case 'cancelled':
       return { label: 'Cancelled', tone: 'muted' }
     case 'pending':
@@ -82,6 +84,8 @@ function sizesFor(file: FileEntry): string {
     case 'already_under_target':
       return formatSize(file.originalSize)
     case 'failed':
+      return ''
+    case 'needs_permission':
       return ''
     default:
       return file.compressedSize === null
@@ -122,6 +126,7 @@ export function RunCard({
       size="sm"
       className={cn(
         status === 'failed' && 'border-destructive/25 bg-destructive/5',
+        status === 'needs_permission' && 'border-amber-500/25 bg-amber-500/5',
         status === 'pending' && 'border-dashed',
         status === 'cancelled' && 'opacity-60',
         isOverlay && 'ring-primary/20 rotate-1 ring-2'
@@ -205,11 +210,11 @@ export function RunCard({
           )}
           {status !== 'compressing' && (
             <span className="font-mono text-xs tabular-nums text-muted-foreground">
-              {status === 'failed' ? '—' : sizes}
+              {status === 'failed' || status === 'needs_permission' ? '—' : sizes}
             </span>
           )}
         </div>
-        {(status === 'failed' || status === 'best_effort') && error && (
+        {(status === 'failed' || status === 'best_effort' || status === 'needs_permission') && error && (
           <p className="line-clamp-2 text-xs text-destructive" title={error}>
             {error}
           </p>

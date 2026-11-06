@@ -16,6 +16,8 @@
 
 use std::path::PathBuf;
 
+use crate::policy::{Change, ConsentSource};
+
 pub const STRATEGY_ALREADY_UNDER_TARGET: &str = "already-under-target";
 
 #[derive(Debug)]
@@ -25,6 +27,8 @@ pub struct CompressionResult {
     pub quality_used: u32,
     pub met_target: bool,
     pub strategy_used: String,
+    pub changes: Vec<Change>,
+    pub consent: ConsentSource,
 }
 
 impl CompressionResult {

@@ -98,6 +98,7 @@ const settings: Settings = {
   },
   performance: { adaptiveMemory: true, memoryCeilingMb: 2048 },
   history: { retentionDays: 90 },
+  consent: { allowDestructive: false, heicToJpg: true },
 }
 
 const emptyHistory: HistoryResponse = {
@@ -143,6 +144,7 @@ function makeSession(startedAt: number, sessionId = "s1"): HistorySession {
       cancelled: 0,
       unsupported: 0,
       alreadyUnderTarget: 0,
+      needsPermission: 0,
     },
     totalSavedBytes: 1_024,
     cancelled: false,

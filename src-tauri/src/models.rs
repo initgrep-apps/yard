@@ -37,6 +37,7 @@ pub enum FileStatus {
     Cancelled,
     Unsupported,
     AlreadyUnderTarget,
+    NeedsPermission,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,6 +102,7 @@ fn exhaustive_status(status: FileStatus) -> FileStatus {
         FileStatus::Cancelled => FileStatus::Cancelled,
         FileStatus::Unsupported => FileStatus::Unsupported,
         FileStatus::AlreadyUnderTarget => FileStatus::AlreadyUnderTarget,
+        FileStatus::NeedsPermission => FileStatus::NeedsPermission,
     }
 }
 
@@ -300,31 +302,52 @@ mod tests {
     }
 
     #[test]
-    fn file_status_serde_matches_typescript_union() {
-        let serialized: [String; 8] = [
-            serde_json::to_string(&exhaustive_status(FileStatus::Pending)).unwrap(),
-            serde_json::to_string(&exhaustive_status(FileStatus::Compressing)).unwrap(),
-            serde_json::to_string(&exhaustive_status(FileStatus::Done)).unwrap(),
-            serde_json::to_string(&exhaustive_status(FileStatus::BestEffort)).unwrap(),
-            serde_json::to_string(&exhaustive_status(FileStatus::Failed)).unwrap(),
-            serde_json::to_string(&exhaustive_status(FileStatus::Cancelled)).unwrap(),
-            serde_json::to_string(&exhaustive_status(FileStatus::Unsupported)).unwrap(),
-            serde_json::to_string(&exhaustive_status(FileStatus::AlreadyUnderTarget)).unwrap(),
+    fn status_union_matches_typescript() {
+        let serialized = [
+            serde_json::to_value(exhaustive_status(FileStatus::Pending)).unwrap(),
+            serde_json::to_value(exhaustive_status(FileStatus::Compressing)).unwrap(),
+            serde_json::to_value(exhaustive_status(FileStatus::Done)).unwrap(),
+            serde_json::to_value(exhaustive_status(FileStatus::BestEffort)).unwrap(),
+            serde_json::to_value(exhaustive_status(FileStatus::Failed)).unwrap(),
+            serde_json::to_value(exhaustive_status(FileStatus::Cancelled)).unwrap(),
+            serde_json::to_value(exhaustive_status(FileStatus::Unsupported)).unwrap(),
+            serde_json::to_value(exhaustive_status(FileStatus::AlreadyUnderTarget)).unwrap(),
+            serde_json::to_value(exhaustive_status(FileStatus::NeedsPermission)).unwrap(),
         ];
-        let expected: [&str; 8] = [
-            "\"pending\"",
-            "\"compressing\"",
-            "\"done\"",
-            "\"best_effort\"",
-            "\"failed\"",
-            "\"cancelled\"",
-            "\"unsupported\"",
-            "\"already_under_target\"",
-        ];
-        for (got, want) in serialized.iter().zip(expected.iter()) {
-            assert_eq!(
-                got, want,
-                "FileStatus enum drift from src/types.ts FileStatus union — update both in lockstep"
+        let mut rust: Vec<String> = serialized
+            .iter()
+            .map(|value| value.as_str().unwrap().to_string())
+            .collect();
+        rust.sort();
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/types.ts");
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        let start = source
+            .find("export type FileStatus =")
+            .expect("src/types.ts must declare `export type FileStatus =`");
+        let block = &source[start..];
+        let end = block.find("\n\nexport").unwrap_or(block.len());
+        let mut typescript: Vec<String> = block[..end]
+            .split('\'')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_string)
+            .collect();
+        typescript.sort();
+        typescript.dedup();
+
+        assert!(!typescript.is_empty(), "no FileStatus literals parsed from src/types.ts");
+        for status in &rust {
+            assert!(
+                typescript.contains(status),
+                "FileStatus `{status}` is missing from src/types.ts"
+            );
+        }
+        for status in &typescript {
+            assert!(
+                rust.contains(status),
+                "src/types.ts declares `{status}` but the Rust FileStatus enum does not"
             );
         }
     }

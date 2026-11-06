@@ -60,6 +60,7 @@ function makeSession(startedAt: number): HistorySession {
       cancelled: 0,
       unsupported: 0,
       alreadyUnderTarget: 0,
+      needsPermission: 0,
     },
     totalSavedBytes: 1_024,
     cancelled: false,

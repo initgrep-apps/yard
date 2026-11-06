@@ -34,6 +34,7 @@ interface CompletePayload {
   metTarget: boolean
   strategyUsed?: string | null
   qualityUsed?: number | null
+  reason?: string | null
 }
 
 interface ErrorPayload {
@@ -174,15 +175,25 @@ export function useCompression(
         status,
         strategyUsed = null,
         qualityUsed = null,
+        reason = null,
       } = e.payload
       if (filesRef.current.some((f) => f.id === fileId)) {
         processedCountRef.current += 1
       }
       dropProgress(fileId)
+      const denied = status === 'needs_permission'
       setFiles((prev) =>
         prev.map((f) =>
           f.id === fileId
-            ? { ...f, status, compressedSize, outputPath, strategyUsed, qualityUsed }
+            ? {
+                ...f,
+                status,
+                compressedSize: denied ? null : compressedSize,
+                outputPath: denied ? null : outputPath,
+                strategyUsed,
+                qualityUsed,
+                error: denied ? reason : f.error,
+              }
             : f
         )
       )

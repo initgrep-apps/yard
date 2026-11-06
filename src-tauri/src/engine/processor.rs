@@ -17,6 +17,7 @@
 use crate::engine::progress::ProgressSender;
 use crate::engine::result::{CompressionError, CompressionResult};
 use crate::models::Category;
+use crate::policy::{Change, ConsentSource};
 use crate::sidecar::{
     GsResources, prepend_engine_dir_to_path, resolve_engine_candidate, resolve_gs_resources,
     resolve_sidecar_candidate, suppress_console_window,
@@ -130,6 +131,8 @@ pub struct BestAttempt {
     pub path: PathBuf,
     pub strategy: String,
     pub quality: u32,
+    pub changes: Vec<Change>,
+    pub consent: ConsentSource,
 }
 
 impl BestAttempt {
@@ -172,6 +175,8 @@ pub fn deliver_output(
             quality_used,
             met_target,
             strategy_used,
+            changes: Vec::new(),
+            consent: ConsentSource::Default,
         });
     }
 
@@ -226,6 +231,8 @@ pub fn deliver_output(
         quality_used,
         met_target,
         strategy_used,
+        changes: Vec::new(),
+        consent: ConsentSource::Default,
     })
 }
 
@@ -516,6 +523,9 @@ fn capture_bounded_stdout(mut pipe: impl Read, label: &str) -> Vec<u8> {
 pub trait CompressionProcessor: Send + Sync {
     fn category(&self) -> Category;
     fn supported_extensions(&self) -> &[&str];
+    fn declared_changes(&self) -> &'static [Change] {
+        &[]
+    }
     fn compress(
         &self,
         ctx: &crate::engine::context::JobContext<'_>,
@@ -755,6 +765,8 @@ mod tests {
                 path: PathBuf::from("a"),
                 strategy: "qpdf-lossless".to_string(),
                 quality: 100,
+                changes: Vec::new(),
+                consent: ConsentSource::Default,
             },
         ));
         let first = best.as_ref().unwrap();
@@ -768,6 +780,8 @@ mod tests {
                 path: PathBuf::from("tie"),
                 strategy: "tie".to_string(),
                 quality: 1,
+                changes: Vec::new(),
+                consent: ConsentSource::Default,
             },
         ));
         assert_eq!(best.as_ref().unwrap().path, PathBuf::from("a"));
@@ -779,6 +793,8 @@ mod tests {
                 path: PathBuf::from("b"),
                 strategy: "gs dpi=72,jpegq=40".to_string(),
                 quality: 40,
+                changes: Vec::new(),
+                consent: ConsentSource::Default,
             },
         ));
         let winner: &BestAttempt = best.as_ref().unwrap();

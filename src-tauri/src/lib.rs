@@ -21,6 +21,7 @@ mod history;
 mod memory;
 mod models;
 mod output;
+mod policy;
 mod processors;
 mod queue;
 mod registry;

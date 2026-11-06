@@ -63,6 +63,7 @@ function session(sessionId: string, fileName: string, startedAt: number): Histor
       cancelled: 0,
       unsupported: 0,
       alreadyUnderTarget: 0,
+      needsPermission: 0,
     },
     totalSavedBytes: 100,
     cancelled: false,

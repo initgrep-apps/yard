@@ -36,6 +36,7 @@ use crate::engine::{
     JobContext, Ladder, SidecarName, run_sidecar, strict_exit,
 };
 use crate::models::Category;
+use crate::policy::Change;
 
 pub struct DocumentProcessor;
 
@@ -491,6 +492,10 @@ impl CompressionProcessor for DocumentProcessor {
         crate::registry::extensions_for(Category::Document)
     }
 
+    fn declared_changes(&self) -> &'static [Change] {
+        &[Change::LossyEncode]
+    }
+
     fn compress(&self, ctx: &JobContext<'_>) -> Result<CompressionResult, CompressionError> {
         let input_size = std::fs::metadata(ctx.input)
             .map(|m| m.len())
@@ -553,6 +558,8 @@ impl CompressionProcessor for DocumentProcessor {
         };
 
         let record = |ladder: &mut Ladder, quality: u32, path: PathBuf, size: u64| {
+            let changes = vec![Change::LossyEncode];
+            let consent = ctx.consent_for(&changes);
             ladder.record(
                 ctx,
                 AttemptOutcome::Produced {
@@ -560,6 +567,8 @@ impl CompressionProcessor for DocumentProcessor {
                     size,
                     quality,
                     strategy: format!("quality={quality}"),
+                    changes,
+                    consent,
                 },
             )
         };
@@ -587,6 +596,8 @@ impl CompressionProcessor for DocumentProcessor {
                     size,
                     quality: 100,
                     strategy: "rezip-deflate9".to_string(),
+                    changes: Vec::new(),
+                    consent: ctx.consent_for(&[]),
                 },
             );
             remove_all(&temp_paths.borrow());

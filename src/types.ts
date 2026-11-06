@@ -29,6 +29,18 @@ export type FileStatus =
   | 'cancelled'
   | 'unsupported'
   | 'already_under_target'
+  | 'needs_permission'
+
+export type Change =
+  | 'lossy_encode'
+  | 'downscale'
+  | 'drop_stream'
+  | 'format_change'
+  | 'metadata_strip'
+  | 'rasterize'
+  | 'page_drop'
+
+export type ConsentSource = 'default' | 'global' | 'category' | 'batch' | 'once'
 
 export interface FileEntry {
   id: string
@@ -66,12 +78,18 @@ export interface HistorySettings {
   retentionDays: number
 }
 
+export interface ConsentSettings {
+  allowDestructive: boolean
+  heicToJpg: boolean
+}
+
 export interface Settings {
   outputFolder: string
   categoryTargets: Record<string, CategoryTarget>
   qualityFloors: QualityFloors
   performance: PerformanceSettings
   history: HistorySettings
+  consent: ConsentSettings
 }
 
 export interface HistoryFile {
@@ -97,6 +115,7 @@ export interface SessionOutcome {
   cancelled: number
   unsupported: number
   alreadyUnderTarget: number
+  needsPermission: number
 }
 
 export interface HistorySession {

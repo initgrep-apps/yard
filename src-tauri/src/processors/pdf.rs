@@ -26,6 +26,7 @@ use crate::engine::{
     strict_exit,
 };
 use crate::models::Category;
+use crate::policy::Change;
 use crate::settings::QualityFloors;
 
 pub struct PdfProcessor;
@@ -64,6 +65,13 @@ struct PassSpec {
 impl PdfProcessor {
     pub fn new() -> Self {
         PdfProcessor
+    }
+
+    fn pass_changes(pass: &PdfPass) -> Vec<Change> {
+        match pass {
+            PdfPass::QpdfLossless => Vec::new(),
+            PdfPass::QpdfImageOpt | PdfPass::GsLadder { .. } => vec![Change::LossyEncode],
+        }
     }
 
     fn qpdf_lossless_args(input: &Path, output: &Path) -> Vec<String> {
@@ -251,6 +259,10 @@ impl CompressionProcessor for PdfProcessor {
         crate::registry::extensions_for(Category::Pdf)
     }
 
+    fn declared_changes(&self) -> &'static [Change] {
+        &[Change::LossyEncode, Change::Rasterize]
+    }
+
     fn compress(&self, ctx: &JobContext<'_>) -> Result<CompressionResult, CompressionError> {
         let input_size = std::fs::metadata(ctx.input)
             .map(|m| m.len())
@@ -301,6 +313,8 @@ impl CompressionProcessor for PdfProcessor {
 
             match attempt {
                 Ok(size) => {
+                    let changes = Self::pass_changes(pass);
+                    let consent = ctx.consent_for(&changes);
                     let decision = ladder.record(
                         ctx,
                         AttemptOutcome::Produced {
@@ -308,6 +322,8 @@ impl CompressionProcessor for PdfProcessor {
                             size,
                             quality: spec.quality,
                             strategy: spec.strategy,
+                            changes,
+                            consent,
                         },
                     );
                     if let AttemptDecision::Stop(result) = decision {

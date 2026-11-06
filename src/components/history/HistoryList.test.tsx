@@ -99,6 +99,7 @@ function makeSession({
       cancelled: 0,
       unsupported: 0,
       alreadyUnderTarget: 0,
+      needsPermission: 0,
     },
     totalSavedBytes,
     cancelled,

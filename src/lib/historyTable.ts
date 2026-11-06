@@ -28,17 +28,19 @@ export const HISTORY_STATUS_LABELS: Record<FileStatus, string> = {
   cancelled: "Cancelled",
   unsupported: "Unsupported",
   already_under_target: "Under target",
+  needs_permission: "Needs permission",
 }
 
 export const HISTORY_STATUS_ORDER: Record<FileStatus, number> = {
   failed: 0,
-  best_effort: 1,
-  unsupported: 2,
-  cancelled: 3,
-  done: 4,
-  already_under_target: 5,
-  pending: 6,
-  compressing: 7,
+  needs_permission: 1,
+  best_effort: 2,
+  unsupported: 3,
+  cancelled: 4,
+  done: 5,
+  already_under_target: 6,
+  pending: 7,
+  compressing: 8,
 }
 
 type Tone = (typeof STATUS_TONES)[FileStatus]
@@ -90,7 +92,8 @@ export function isNoOutputFile(file: HistoryFile): boolean {
   return (
     file.status === "failed" ||
     file.status === "unsupported" ||
-    file.status === "cancelled"
+    file.status === "cancelled" ||
+    file.status === "needs_permission"
   )
 }
 
@@ -118,6 +121,7 @@ export function historyMethodLabel(file: HistoryFile): string {
 export function needsAttention(file: HistoryFile): boolean {
   return (
     file.status === "failed" ||
+    file.status === "needs_permission" ||
     file.status === "best_effort" ||
     file.status === "unsupported" ||
     file.status === "cancelled"
@@ -183,6 +187,7 @@ export function outcomePillCounts(files: HistoryFile[]): {
   underTarget: number
   bestEffort: number
   failed: number
+  needsPermission: number
   other: number
 } {
   return files.reduce(
@@ -200,12 +205,15 @@ export function outcomePillCounts(files: HistoryFile[]): {
         case "failed":
           counts.failed += 1
           break
+        case "needs_permission":
+          counts.needsPermission += 1
+          break
         default:
           counts.other += 1
       }
       return counts
     },
-    { done: 0, underTarget: 0, bestEffort: 0, failed: 0, other: 0 }
+    { done: 0, underTarget: 0, bestEffort: 0, failed: 0, needsPermission: 0, other: 0 }
   )
 }
 

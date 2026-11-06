@@ -20,6 +20,7 @@ use crate::engine::context::JobContext;
 use crate::engine::processor::{BestAttempt, deliver_output};
 use crate::engine::progress::ProgressSender;
 use crate::engine::result::{CompressionError, CompressionResult, STRATEGY_ALREADY_UNDER_TARGET};
+use crate::policy::{Change, ConsentSource};
 
 /// The single pre-delivery progress scale. Attempts report their own 0..=100
 /// position; the ladder maps that once into this ceiling and the terminal 100
@@ -33,6 +34,8 @@ pub enum AttemptOutcome {
         size: u64,
         quality: u32,
         strategy: String,
+        changes: Vec<Change>,
+        consent: ConsentSource,
     },
     Failed(CompressionError),
 }
@@ -125,12 +128,21 @@ impl Ladder {
                 size,
                 quality,
                 strategy,
+                changes,
+                consent,
             } => {
+                if let Err(error) = Self::check_declared(ctx.declared, &changes) {
+                    self.remove_attempt(&path);
+                    self.last_error = Some(CompressionError::Unknown(error));
+                    return AttemptDecision::Continue;
+                }
                 let attempt = BestAttempt {
                     size,
                     path,
                     strategy,
                     quality,
+                    changes,
+                    consent,
                 };
                 if size > ctx.target_bytes {
                     BestAttempt::keep_smaller_in(&mut self.best, attempt);
@@ -151,7 +163,9 @@ impl Ladder {
                     &ctx.cancel,
                 );
                 match result {
-                    Ok(result) => {
+                    Ok(mut result) => {
+                        result.changes = attempt.changes;
+                        result.consent = attempt.consent;
                         self.best = None;
                         self.cleanup_attempts();
                         AttemptDecision::Stop(result)
@@ -176,6 +190,19 @@ impl Ladder {
                 }
                 AttemptDecision::Continue
             }
+        }
+    }
+
+    pub fn check_declared(declared: &[Change], changes: &[Change]) -> Result<(), String> {
+        match changes
+            .iter()
+            .find(|change| !declared.contains(change))
+        {
+            Some(change) => Err(format!(
+                "undeclared change: {} was not declared by this rung",
+                change.as_str()
+            )),
+            None => Ok(()),
         }
     }
 
@@ -204,11 +231,22 @@ impl Ladder {
             &ctx.cancel,
         );
         self.cleanup_attempts();
-        result
+        result.map(|mut result| {
+            result.changes = best.changes;
+            result.consent = best.consent;
+            result
+        })
     }
 
     pub fn abandon(mut self) {
         self.cleanup_attempts();
+    }
+
+    fn remove_attempt(&mut self, path: &Path) {
+        if let Some(position) = self.attempts.iter().position(|attempt| attempt == path) {
+            remove_file(path);
+            self.attempts.remove(position);
+        }
     }
 
     fn remove_last_attempt(&mut self) {
@@ -331,6 +369,8 @@ mod tests {
                         size,
                         quality: 50,
                         strategy: strategy.to_string(),
+                        changes: Vec::new(),
+                        consent: ConsentSource::Default,
                     }
                 ),
                 AttemptDecision::Continue
@@ -368,6 +408,8 @@ mod tests {
                 size: 200,
                 quality: 40,
                 strategy: "cancelled".to_string(),
+                changes: Vec::new(),
+                consent: ConsentSource::Default,
             },
         );
         assert!(matches!(decision, AttemptDecision::Continue));
@@ -521,6 +563,8 @@ mod tests {
                 size: 200,
                 quality: 40,
                 strategy: "over".to_string(),
+                changes: Vec::new(),
+                consent: ConsentSource::Default,
             },
         );
         ladder.finish(&ctx).unwrap();

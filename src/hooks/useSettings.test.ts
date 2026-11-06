@@ -43,6 +43,7 @@ const mockSettings: Settings = {
   },
   performance: { adaptiveMemory: true, memoryCeilingMb: 2048 },
   history: { retentionDays: 90 },
+  consent: { allowDestructive: false, heicToJpg: true },
 }
 
 beforeEach(() => vi.clearAllMocks())

@@ -77,6 +77,8 @@ pub struct Counts {
     pub cancelled: u32,
     pub unsupported: u32,
     pub already_under_target: u32,
+    #[serde(default)]
+    pub needs_permission: u32,
 }
 
 #[derive(Serialize)]
@@ -232,6 +234,7 @@ fn outcome_from_files(session_id: &str, files: &[HistoryFile]) -> Counts {
             "cancelled" => counts.cancelled += 1,
             "unsupported" => counts.unsupported += 1,
             "already_under_target" => counts.already_under_target += 1,
+            "needs_permission" => counts.needs_permission += 1,
             other => eprintln!(
                 "warn: history fold session {session_id} file {} has unknown status: {other}",
                 file.path
@@ -966,6 +969,7 @@ mod tests {
                     cancelled: 1,
                     unsupported: 0,
                     already_under_target: 0,
+                    needs_permission: 0,
                 },
                 cancelled: true,
             })
@@ -1164,6 +1168,7 @@ mod tests {
                 cancelled: 0,
                 unsupported: 0,
                 already_under_target: 3,
+                needs_permission: 0,
             },
             cancelled: true,
         };
@@ -1452,6 +1457,7 @@ mod tests {
                 "cancelled",
                 "done",
                 "failed",
+                "needsPermission",
                 "unsupported",
             ]
         );
