@@ -146,14 +146,22 @@ describe("SettingsDialog", () => {
     )
   })
 
-  it("keeps General to the output folder with an icon-only picker", async () => {
+  it("keeps General to the destination directory with an icon-only picker", async () => {
     render(<SettingsDialog open onOpenChange={vi.fn()} />)
     await screen.findByRole("tab", { name: "General" })
 
     expect(screen.queryByText("Category targets")).toBeNull()
+    expect(screen.getByLabelText("Destination directory")).toHaveValue(
+      "/Users/test/Documents/Compressed",
+    )
+    expect(
+      screen.getByText(
+        "Choose the folder where compressed copies are saved.",
+      ),
+    ).toBeInTheDocument()
 
     const picker = screen.getByRole("button", {
-      name: "Choose output folder",
+      name: "Choose destination directory",
     })
     expect(picker).toHaveTextContent("")
     expect(picker.querySelector("svg")).not.toBeNull()
@@ -526,7 +534,7 @@ describe("SettingsDialog", () => {
     await screen.findByRole("tab", { name: "General" })
     vi.useFakeTimers()
 
-    fireEvent.click(screen.getByRole("button", { name: "Choose output folder" }))
+    fireEvent.click(screen.getByRole("button", { name: "Choose destination directory" }))
     await act(async () => {})
     await act(async () => {
       vi.advanceTimersByTime(400)
@@ -825,7 +833,7 @@ describe("SettingsDialog", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Reset defaults" }))
     await act(async () => {})
-    fireEvent.click(screen.getByRole("button", { name: "Choose output folder" }))
+    fireEvent.click(screen.getByRole("button", { name: "Choose destination directory" }))
     await act(async () => {})
     fireEvent.click(screen.getByRole("button", { name: "Done" }))
     await act(async () => {})
@@ -976,7 +984,7 @@ describe("SettingsDialog", () => {
     )
 
     fireEvent.click(screen.getByRole("tab", { name: "General" }))
-    expect(screen.getByLabelText("Output folder")).toHaveValue(
+    expect(screen.getByLabelText("Destination directory")).toHaveValue(
       "/defaults/Compressed",
     )
   })

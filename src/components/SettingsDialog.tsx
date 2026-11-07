@@ -120,10 +120,15 @@ function GeneralSection({
       <FieldLegend className="mb-4">General</FieldLegend>
       <FieldGroup>
         <Field>
-          <FieldLabel htmlFor="output-folder">Output folder</FieldLabel>
+          <FieldLabel htmlFor="destination-directory">
+            Destination directory
+          </FieldLabel>
+          <FieldDescription>
+            Choose the folder where compressed copies are saved.
+          </FieldDescription>
           <div className="flex items-center gap-2">
             <Input
-              id="output-folder"
+              id="destination-directory"
               readOnly
               value={draft.outputFolder}
               className="flex-1"
@@ -131,7 +136,7 @@ function GeneralSection({
             <Button
               variant="outline"
               size="icon"
-              aria-label="Choose output folder"
+              aria-label="Choose destination directory"
               title="Choose folder"
               onClick={onChoose}
             >
@@ -772,15 +777,15 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
           >
             <div className="w-[184px] shrink-0 border-r border-border p-2">
               <TabsList
-                variant="line"
+                variant="sidebar"
                 aria-label="Settings sections"
-                className="h-fit w-full flex-col items-stretch gap-0.5 bg-transparent p-0"
+                className="h-fit w-full flex-col items-stretch"
               >
                 {SECTIONS.map(({ value, label, icon: Icon }) => (
                   <TabsTrigger
                     key={value}
                     value={value}
-                    className="justify-start gap-2 px-3"
+                    className="justify-start gap-2 px-2 py-1.5"
                   >
                     <Icon data-icon className="size-4" aria-hidden="true" />
                     {label}
