@@ -196,7 +196,7 @@ jobs:
         run: yarn build && yarn test && cd src-tauri && cargo test
         shell: bash
       - name: build app + upload assets to the gated draft (tauri-action a6e90dd)
-        uses: tauri-apps/tauri-action@a6e90ddc4ba4721f294e52b856d3d50e645edc07
+        uses: tauri-apps/tauri-action@47f975c5a8b758c5e9ef77a7f7c5fe2d7229a469
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
