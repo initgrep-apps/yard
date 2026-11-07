@@ -26,6 +26,7 @@ interface NumberStepperProps {
   ariaLabel: string
   id?: string
   className?: string
+  disabled?: boolean
 }
 
 export function NumberStepper({
@@ -36,9 +37,11 @@ export function NumberStepper({
   ariaLabel,
   id,
   className,
+  disabled,
 }: NumberStepperProps) {
   return (
     <NumberField.Root
+      disabled={disabled}
       value={value}
       onValueChange={(next) => {
         if (next === null || !Number.isFinite(next)) return
