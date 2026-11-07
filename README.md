@@ -113,7 +113,7 @@ conversion, image orientation and colour normalization only run when compression
 Per-file RAM is bounded: Office documents stream archive entries instead of loading the
 whole archive, and images hold one image at a time. Parallel jobs are admitted against a
 batch memory budget of `clamp(total RAM / 8, 300 MiB, 2 GiB)` — about 512 MiB on a 4 GB
-machine and 2 GiB on 16 GB or more. The budget is overridable in **Settings → Performance**.
+machine and 2 GiB on 16 GB or more. The budget is overridable in **Settings → Resource usage**.
 
 A large document no longer needs RAM proportional to its archive size, but it still needs
 temporary disk space: extracted media and every attempt stay on disk until its job ends. A

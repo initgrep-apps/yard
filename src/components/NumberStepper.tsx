@@ -50,7 +50,7 @@ export function NumberStepper({
       min={min}
       max={max}
       step={1}
-      className={cn('w-32', className)}
+      className={cn('w-32 data-[disabled]:opacity-50', className)}
     >
       <NumberField.Group className="flex h-9 items-center overflow-hidden rounded-md border border-input bg-background/50 shadow-xs outline-none transition-[color,box-shadow] focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/50">
         <NumberField.Decrement

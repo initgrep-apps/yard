@@ -83,8 +83,8 @@ const SECTIONS = [
   { value: "general", label: "General", icon: SettingsIcon },
   { value: "targets", label: "Targets", icon: SlidersHorizontal },
   { value: "consent", label: "Consent", icon: ShieldAlert },
-  { value: "floors", label: "Minimum quality", icon: ShieldCheck },
-  { value: "performance", label: "Performance", icon: Zap },
+  { value: "floors", label: "Quality limits", icon: ShieldCheck },
+  { value: "performance", label: "Resource usage", icon: Zap },
   { value: "history", label: "History", icon: Clock },
 ] as const
 
@@ -117,13 +117,10 @@ function GeneralSection({
 }: Pick<SectionProps, "draft"> & { onChoose: () => void }) {
   return (
     <FieldSet>
-      <FieldLegend>General</FieldLegend>
+      <FieldLegend className="mb-4">General</FieldLegend>
       <FieldGroup>
         <Field>
           <FieldLabel htmlFor="output-folder">Output folder</FieldLabel>
-          <FieldDescription>
-            Compressed copies are written here. Originals are never modified.
-          </FieldDescription>
           <div className="flex items-center gap-2">
             <Input
               id="output-folder"
@@ -161,7 +158,7 @@ function TargetsSection({ draft, onChange }: SectionProps) {
 
   return (
     <FieldSet>
-      <FieldLegend>Targets</FieldLegend>
+      <FieldLegend className="mb-4">Targets</FieldLegend>
       <FieldGroup>
         {CATEGORIES.map((category) => {
           const target = targetFor(draft, category.key)
@@ -215,14 +212,11 @@ function FloorsSection({ draft, onChange }: SectionProps) {
 
   return (
     <FieldSet>
-      <FieldLegend>Quality floors</FieldLegend>
-      <FieldDescription>
-        The engine stops compressing below these values and reports best effort.
-      </FieldDescription>
+      <FieldLegend className="mb-4">Quality limits</FieldLegend>
       <FieldGroup>
         <Field orientation="horizontal">
           <FieldLabel htmlFor="image-min-quality">
-            Images minimum quality
+            Lowest image quality
           </FieldLabel>
           <div className="flex shrink-0 items-center gap-1.5">
             <NumberStepper
@@ -236,16 +230,21 @@ function FloorsSection({ draft, onChange }: SectionProps) {
               }
               min={0}
               max={100}
-              ariaLabel="Images minimum quality"
+              ariaLabel="Lowest image quality"
               className="w-32"
             />
             <span className="w-4 text-xs text-muted-foreground">%</span>
           </div>
         </Field>
         <Field orientation="horizontal">
-          <FieldLabel htmlFor="image-min-long-edge">
-            Images minimum long edge
-          </FieldLabel>
+          <FieldContent>
+            <FieldLabel htmlFor="image-min-long-edge">
+              Minimum longest side
+            </FieldLabel>
+            <FieldDescription>
+              The longest edge of the image, in pixels.
+            </FieldDescription>
+          </FieldContent>
           <div className="flex shrink-0 items-center gap-1.5">
             <NumberStepper
               id="image-min-long-edge"
@@ -258,14 +257,19 @@ function FloorsSection({ draft, onChange }: SectionProps) {
               }
               min={1}
               max={10000}
-              ariaLabel="Images minimum long edge"
+              ariaLabel="Minimum longest side"
               className="w-32"
             />
             <span className="w-6 text-xs text-muted-foreground">px</span>
           </div>
         </Field>
         <Field orientation="horizontal">
-          <FieldLabel htmlFor="video-min-crf">Videos minimum CRF</FieldLabel>
+          <FieldContent>
+            <FieldLabel htmlFor="video-min-crf">Lowest video quality</FieldLabel>
+            <FieldDescription>
+              Higher numbers make smaller, lower-quality video (CRF 0–51).
+            </FieldDescription>
+          </FieldContent>
           <NumberStepper
             id="video-min-crf"
             value={floors.video.minCrf}
@@ -274,12 +278,12 @@ function FloorsSection({ draft, onChange }: SectionProps) {
             }
             min={0}
             max={51}
-            ariaLabel="Videos minimum CRF"
+            ariaLabel="Lowest video quality"
             className="w-32"
           />
         </Field>
         <Field orientation="horizontal">
-          <FieldLabel>Videos minimum resolution</FieldLabel>
+          <FieldLabel>Lowest video resolution</FieldLabel>
           <Select
             value={floors.video.minResolution}
             onValueChange={(minResolution) => {
@@ -292,7 +296,7 @@ function FloorsSection({ draft, onChange }: SectionProps) {
             }}
           >
             <SelectTrigger
-              aria-label="Videos minimum resolution"
+              aria-label="Lowest video resolution"
               className="w-24"
             >
               <SelectValue />
@@ -305,7 +309,14 @@ function FloorsSection({ draft, onChange }: SectionProps) {
           </Select>
         </Field>
         <Field orientation="horizontal">
-          <FieldLabel htmlFor="pdf-min-dpi">PDF minimum DPI</FieldLabel>
+          <FieldContent>
+            <FieldLabel htmlFor="pdf-min-dpi">
+              Lowest PDF image resolution
+            </FieldLabel>
+            <FieldDescription>
+              Images inside PDFs are not reduced below this resolution.
+            </FieldDescription>
+          </FieldContent>
           <div className="flex shrink-0 items-center gap-1.5">
             <NumberStepper
               id="pdf-min-dpi"
@@ -315,7 +326,7 @@ function FloorsSection({ draft, onChange }: SectionProps) {
               }
               min={0}
               max={600}
-              ariaLabel="PDF minimum DPI"
+              ariaLabel="Lowest PDF image resolution"
               className="w-32"
             />
             <span className="w-6 text-xs text-muted-foreground">dpi</span>
@@ -323,7 +334,7 @@ function FloorsSection({ draft, onChange }: SectionProps) {
         </Field>
         <Field orientation="horizontal">
           <FieldLabel htmlFor="pdf-min-jpeg-quality">
-            PDF minimum JPEG quality
+            Lowest PDF image quality
           </FieldLabel>
           <div className="flex shrink-0 items-center gap-1.5">
             <NumberStepper
@@ -337,7 +348,7 @@ function FloorsSection({ draft, onChange }: SectionProps) {
               }
               min={0}
               max={100}
-              ariaLabel="PDF minimum JPEG quality"
+              ariaLabel="Lowest PDF image quality"
               className="w-32"
             />
             <span className="w-4 text-xs text-muted-foreground">%</span>
@@ -345,7 +356,7 @@ function FloorsSection({ draft, onChange }: SectionProps) {
         </Field>
         <Field orientation="horizontal">
           <FieldLabel htmlFor="document-min-media-quality">
-            Documents media quality
+            Lowest document image quality
           </FieldLabel>
           <div className="flex shrink-0 items-center gap-1.5">
             <NumberStepper
@@ -359,7 +370,7 @@ function FloorsSection({ draft, onChange }: SectionProps) {
               }
               min={0}
               max={100}
-              ariaLabel="Documents media quality"
+              ariaLabel="Lowest document image quality"
               className="w-32"
             />
             <span className="w-4 text-xs text-muted-foreground">%</span>
@@ -376,19 +387,14 @@ function ConsentSection({ draft, onChange }: SectionProps) {
 
   return (
     <FieldSet>
-      <FieldLegend>Consent</FieldLegend>
-      <FieldDescription>
-        Choose what Yard may do without asking. Anything you leave off is
-        confirmed before a batch starts.
-      </FieldDescription>
+      <FieldLegend className="mb-4">Consent</FieldLegend>
       <FieldGroup>
         <Field orientation="horizontal">
           <FieldContent>
-            <FieldLabel>Allow quality-reducing changes</FieldLabel>
+            <FieldLabel>Allow changes that lower quality</FieldLabel>
             <FieldDescription>
-              Lets Yard make images smaller than their original size, drop
-              extra audio or subtitle tracks, or change a file's format without
-              asking first.
+              Files may be resized or saved in a different format, audio and
+              subtitle tracks may be removed, and PDF pages may become images.
             </FieldDescription>
           </FieldContent>
           <Toggle
@@ -397,7 +403,7 @@ function ConsentSection({ draft, onChange }: SectionProps) {
             onPressedChange={(allowDestructive) =>
               setConsent({ allowDestructive })
             }
-            aria-label="Allow quality-reducing changes"
+            aria-label="Allow changes that lower quality"
           >
             {draft.consent.allowDestructive ? "On" : "Off"}
           </Toggle>
@@ -406,8 +412,7 @@ function ConsentSection({ draft, onChange }: SectionProps) {
           <FieldContent>
             <FieldLabel>Convert HEIC photos to JPEG</FieldLabel>
             <FieldDescription>
-              HEIC photos are converted so they open in more apps. Turn this
-              off to confirm the conversion before each batch.
+              HEIC photos are saved as JPEG in the output folder.
             </FieldDescription>
           </FieldContent>
           <Toggle
@@ -434,21 +439,18 @@ function PerformanceSection({ draft, onChange }: SectionProps) {
 
   return (
     <FieldSet>
-      <FieldLegend>Performance</FieldLegend>
-      <FieldDescription>
-        Yard limits its memory use so the rest of your Mac stays responsive.
-        Smaller limits mean fewer files compress at the same time.
-      </FieldDescription>
+      <FieldLegend className="mb-4">Resource usage</FieldLegend>
       <FieldGroup>
         <Field orientation="horizontal">
           <FieldContent>
-            <FieldLabel>Memory limit</FieldLabel>
+            <FieldLabel>Memory mode</FieldLabel>
             <FieldDescription>
-              Adaptive picks a safe limit from your Mac's memory. Manual lets
-              you choose the limit.
+              Adaptive sets a safe limit from total system memory. Manual lets
+              you set the limit yourself.
             </FieldDescription>
           </FieldContent>
           <Select
+            items={{ adaptive: "Adaptive", manual: "Manual" }}
             value={draft.performance.adaptiveMemory ? 'adaptive' : 'manual'}
             onValueChange={(mode) => {
               if (mode !== null) {
@@ -456,7 +458,7 @@ function PerformanceSection({ draft, onChange }: SectionProps) {
               }
             }}
           >
-            <SelectTrigger aria-label="Memory limit" className="w-32">
+            <SelectTrigger aria-label="Memory mode" className="w-32">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -467,9 +469,9 @@ function PerformanceSection({ draft, onChange }: SectionProps) {
         </Field>
         <Field orientation="horizontal">
           <FieldContent>
-            <FieldLabel htmlFor="memory-ceiling">Maximum memory</FieldLabel>
+            <FieldLabel htmlFor="memory-ceiling">Memory limit</FieldLabel>
             <FieldDescription>
-              Only used in Manual mode. Choose between 300 MB and 2 GB.
+              Applies only in Manual mode. Between 300 MB and 2 GB.
             </FieldDescription>
           </FieldContent>
           <NumberStepper
@@ -480,8 +482,8 @@ function PerformanceSection({ draft, onChange }: SectionProps) {
             }
             min={300}
             max={2048}
-            ariaLabel="Maximum memory in megabytes"
-            className="w-32 disabled:opacity-50"
+            ariaLabel="Memory limit in megabytes"
+            className="w-32"
             disabled={draft.performance.adaptiveMemory}
           />
         </Field>
@@ -489,19 +491,19 @@ function PerformanceSection({ draft, onChange }: SectionProps) {
       {stats && (
         <div className="mt-4 grid grid-cols-3 gap-2">
           <div className="rounded-[14px] bg-muted/40 p-[13px_14px]">
-            <div className="text-[10.5px] text-muted-foreground">Your Mac's memory</div>
+            <div className="text-[10.5px] text-muted-foreground">System memory</div>
             <div className="mt-1 text-lg font-[650] tracking-[-0.02em]">
               {formatSize(stats.totalRamBytes)}
             </div>
           </div>
           <div className="rounded-[14px] bg-muted/40 p-[13px_14px]">
-            <div className="text-[10.5px] text-muted-foreground">Yard's memory limit</div>
+            <div className="text-[10.5px] text-muted-foreground">Memory limit</div>
             <div className="mt-1 text-lg font-[650] tracking-[-0.02em]">
               {formatSize(batchUsage?.budgetBytes ?? stats.budgetBytes)}
             </div>
           </div>
           <div className="rounded-[14px] bg-muted/40 p-[13px_14px]">
-            <div className="text-[10.5px] text-muted-foreground">Yard is using</div>
+            <div className="text-[10.5px] text-muted-foreground">Memory used</div>
             <div className="mt-1 text-lg font-[650] tracking-[-0.02em]">
               {formatSize(batchUsage?.processRssBytes ?? stats.processRssBytes)}
             </div>
@@ -515,32 +517,29 @@ function PerformanceSection({ draft, onChange }: SectionProps) {
 function HistorySection({ draft, onChange, clearHistory }: SectionProps & { clearHistory: () => Promise<void> }) {
   return (
     <FieldSet>
-      <FieldLegend>History</FieldLegend>
-      <FieldDescription>
-        Sessions older than this are removed automatically. Files on disk are
-        never deleted.
-      </FieldDescription>
+      <FieldLegend className="mb-4">History</FieldLegend>
       <FieldGroup>
         <Field orientation="horizontal">
-          <FieldLabel htmlFor="history-retention-days">
-            History retention (days)
-          </FieldLabel>
-          <NumberStepper
-            id="history-retention-days"
-            value={draft.history.retentionDays}
-            onValueChange={(retentionDays) =>
-              onChange({ ...draft, history: { retentionDays } })
-            }
-            min={1}
-            max={3650}
-            ariaLabel="History retention (days)"
-            className="w-32"
-          />
+          <FieldLabel htmlFor="history-retention-days">Retention</FieldLabel>
+          <div className="flex shrink-0 items-center gap-1.5">
+            <NumberStepper
+              id="history-retention-days"
+              value={draft.history.retentionDays}
+              onValueChange={(retentionDays) =>
+                onChange({ ...draft, history: { retentionDays } })
+              }
+              min={1}
+              max={3650}
+              ariaLabel="Retention in days"
+              className="w-32"
+            />
+            <span className="text-xs text-muted-foreground">days</span>
+          </div>
         </Field>
         <Field orientation="horizontal">
           <FieldContent>
             <FieldLabel>Clear history</FieldLabel>
-            <FieldDescription>Permanently deletes all compression history. Files on disk are not affected.</FieldDescription>
+            <FieldDescription>Permanently deletes all compression history. The files compressed are not affected.</FieldDescription>
           </FieldContent>
           <AlertDialog>
             <AlertDialogTrigger render={<Button variant="destructive" size="sm" />}>Clear history</AlertDialogTrigger>
@@ -548,7 +547,7 @@ function HistorySection({ draft, onChange, clearHistory }: SectionProps & { clea
               <AlertDialogHeader>
                 <AlertDialogTitle>Clear history?</AlertDialogTitle>
                 <AlertDialogDescription>
-                  Permanently deletes all compression history. Files on disk are not affected.
+                  Permanently deletes all compression history. The files compressed are not affected.
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>
