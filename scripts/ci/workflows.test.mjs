@@ -225,6 +225,7 @@ describe("release-please.yml changelog automation", () => {
     expect(pkg["release-type"]).toBe("node");
     expect(pkg["include-component-in-tag"]).toBe(false);
     expect(pkg.prerelease).toBeUndefined();
+    expect(pkg.draft, "release-please must create a draft GitHub release so release.yml can reuse it").toBe(true);
     expect(pkg["draft-pull-request"]).toBe(true);
     expect(pkg["extra-files"]).toEqual([
       {
@@ -916,7 +917,7 @@ describe("release.yml release workflow", () => {
     expect(preflight.shell).toBe("bash");
   });
 
-  it("gate pre-creates the draft release fail-closed and exports job outputs", async () => {
+  it("gate reuses a draft release, creates one when absent, and exports job outputs", async () => {
     const { doc } = await loadWorkflow(FILENAME);
     const gate = jobsOf(doc).gate;
     expect(gate.outputs).toEqual({
@@ -932,10 +933,13 @@ describe("release.yml release workflow", () => {
     const run = draft.run;
 
     expect(run).toContain("set -euo pipefail");
-    expect(run, "leftover drafts or published releases must fail the gate loudly").toContain(
-      "::error::release $RELEASE_TAG already exists — recovery: run 'gh release delete $RELEASE_TAG --cleanup-tag --yes', then re-run the release",
+    expect(run, "an existing draft must be reused").toContain("gate: reusing existing draft release $RELEASE_TAG");
+    expect(run).toContain('existing="$(gh release view "$RELEASE_TAG" --json databaseId,isDraft 2>&1)" || rc=$?');
+    expect(run).toContain(`is_draft="$(printf '%s' "$existing" | jq -r '.isDraft')"`);
+    expect(run, "published releases must fail closed").toContain(
+      "::error::release $RELEASE_TAG already exists and is published — convert it to a draft (gh release edit $RELEASE_TAG --draft) or delete it, then re-run the release",
     );
-    expect(run).toContain('err="$(gh release view "$RELEASE_TAG" 2>&1 >/dev/null)" || rc=$?');
+    expect(run).toContain("gh release edit $RELEASE_TAG --draft");
     expect(run, "stderr must be captured and classified (fail-closed)").toMatch(/not found\|no release/i);
 
     expect(run).toContain('gh release create "$RELEASE_TAG" "${draft_flags[@]}" >/dev/null');

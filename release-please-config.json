@@ -4,6 +4,7 @@
     ".": {
       "release-type": "node",
       "include-component-in-tag": false,
+      "draft": true,
       "draft-pull-request": true,
       "extra-files": [
         {
