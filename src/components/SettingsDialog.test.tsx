@@ -105,7 +105,7 @@ async function openHistoryTab() {
   render(<SettingsDialog open onOpenChange={vi.fn()} />)
   await screen.findByRole("tab", { name: "General" })
   fireEvent.click(screen.getByRole("tab", { name: "History" }))
-  return screen.getByLabelText("History retention (days)")
+  return screen.getByLabelText("Retention in days")
 }
 
 beforeEach(() => {
@@ -137,8 +137,8 @@ describe("SettingsDialog", () => {
       "General",
       "Targets",
       "Consent",
-      "Minimum quality",
-      "Performance",
+      "Quality limits",
+      "Resource usage",
       "History",
     ])
     expect(screen.getByRole("tablist")).toHaveAccessibleName(
@@ -211,7 +211,7 @@ describe("SettingsDialog", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Consent" }))
 
     const destructive = screen.getByRole("button", {
-      name: "Allow quality-reducing changes",
+      name: "Allow changes that lower quality",
     })
     const heic = screen.getByRole("button", {
       name: "Convert HEIC photos to JPEG",
@@ -236,8 +236,8 @@ describe("SettingsDialog", () => {
   it("saves the image long-edge floor without dropping the quality floor", async () => {
     render(<SettingsDialog open onOpenChange={vi.fn()} />)
     await screen.findByRole("tab", { name: "General" })
-    fireEvent.click(screen.getByRole("tab", { name: "Minimum quality" }))
-    const input = screen.getByLabelText("Images minimum long edge")
+    fireEvent.click(screen.getByRole("tab", { name: "Quality limits" }))
+    const input = screen.getByLabelText("Minimum longest side")
     expect(input).toHaveDisplayValue("1,280")
 
     vi.useFakeTimers()
@@ -310,7 +310,7 @@ describe("SettingsDialog", () => {
     fireEvent.click(screen.getByRole("tab", { name: "History" }))
     vi.useFakeTimers()
 
-    fireEvent.change(screen.getByLabelText("History retention (days)"), {
+    fireEvent.change(screen.getByLabelText("Retention in days"), {
       target: { value: "30" },
     })
     fireEvent.click(screen.getByRole("button", { name: "Done" }))
@@ -351,7 +351,7 @@ describe("SettingsDialog", () => {
     fireEvent.click(screen.getByRole("tab", { name: "History" }))
     vi.useFakeTimers()
 
-    fireEvent.change(screen.getByLabelText("History retention (days)"), {
+    fireEvent.change(screen.getByLabelText("Retention in days"), {
       target: { value: "30" },
     })
     fireEvent.click(screen.getByRole("button", { name: "Done" }))
@@ -404,7 +404,7 @@ describe("SettingsDialog", () => {
     fireEvent.click(screen.getByRole("tab", { name: "History" }))
     vi.useFakeTimers()
 
-    fireEvent.change(screen.getByLabelText("History retention (days)"), {
+    fireEvent.change(screen.getByLabelText("Retention in days"), {
       target: { value: "30" },
     })
     await act(async () => {
@@ -443,7 +443,7 @@ describe("SettingsDialog", () => {
     fireEvent.click(screen.getByRole("tab", { name: "History" }))
     vi.useFakeTimers()
 
-    fireEvent.change(screen.getByLabelText("History retention (days)"), {
+    fireEvent.change(screen.getByLabelText("Retention in days"), {
       target: { value: "30" },
     })
     await act(async () => {
@@ -494,7 +494,7 @@ describe("SettingsDialog", () => {
     await screen.findByRole("tab", { name: "General" })
     fireEvent.click(screen.getByRole("tab", { name: "History" }))
     vi.useFakeTimers()
-    const input = screen.getByLabelText("History retention (days)")
+    const input = screen.getByLabelText("Retention in days")
 
     fireEvent.change(input, { target: { value: "30" } })
     await act(async () => {
@@ -545,10 +545,10 @@ describe("SettingsDialog", () => {
     render(<ForceCloseDialog />)
     await screen.findByRole("tab", { name: "General" })
     fireEvent.click(screen.getByRole("tab", { name: "History" }))
-    fireEvent.change(screen.getByLabelText("History retention (days)"), {
+    fireEvent.change(screen.getByLabelText("Retention in days"), {
       target: { value: "30" },
     })
-    fireEvent.blur(screen.getByLabelText("History retention (days)"))
+    fireEvent.blur(screen.getByLabelText("Retention in days"))
 
     fireEvent.click(screen.getByText("Force close"))
     await act(async () => {})
@@ -556,7 +556,7 @@ describe("SettingsDialog", () => {
 
     fireEvent.click(screen.getByText("Force open"))
     await act(async () => {})
-    expect(screen.getByLabelText("History retention (days)")).toHaveDisplayValue(
+    expect(screen.getByLabelText("Retention in days")).toHaveDisplayValue(
       "90",
     )
 
@@ -586,7 +586,7 @@ describe("SettingsDialog", () => {
     render(<ForceCloseDialog />)
     await screen.findByRole("tab", { name: "General" })
     fireEvent.click(screen.getByRole("tab", { name: "History" }))
-    fireEvent.change(screen.getByLabelText("History retention (days)"), {
+    fireEvent.change(screen.getByLabelText("Retention in days"), {
       target: { value: "30" },
     })
 
@@ -601,7 +601,7 @@ describe("SettingsDialog", () => {
     })
     await act(async () => {})
 
-    expect(screen.getByLabelText("History retention (days)")).toHaveDisplayValue(
+    expect(screen.getByLabelText("Retention in days")).toHaveDisplayValue(
       "30",
     )
 
@@ -651,7 +651,7 @@ describe("SettingsDialog", () => {
     await screen.findByRole("tab", { name: "General" })
     fireEvent.click(screen.getByRole("tab", { name: "History" }))
     vi.useFakeTimers()
-    const input = screen.getByLabelText("History retention (days)")
+    const input = screen.getByLabelText("Retention in days")
 
     fireEvent.change(input, { target: { value: "30" } })
     fireEvent.click(screen.getByRole("button", { name: "Reset defaults" }))
@@ -692,7 +692,7 @@ describe("SettingsDialog", () => {
     await screen.findByRole("tab", { name: "General" })
     fireEvent.click(screen.getByRole("tab", { name: "History" }))
     vi.useFakeTimers()
-    const input = screen.getByLabelText("History retention (days)")
+    const input = screen.getByLabelText("Retention in days")
 
     fireEvent.change(input, { target: { value: "30" } })
     await act(async () => {
@@ -752,7 +752,7 @@ describe("SettingsDialog", () => {
     fireEvent.click(screen.getByRole("tab", { name: "History" }))
     vi.useFakeTimers()
 
-    fireEvent.change(screen.getByLabelText("History retention (days)"), {
+    fireEvent.change(screen.getByLabelText("Retention in days"), {
       target: { value: "31" },
     })
     await act(async () => {
@@ -789,7 +789,7 @@ describe("SettingsDialog", () => {
     await screen.findByRole("tab", { name: "General" })
     fireEvent.click(screen.getByRole("tab", { name: "History" }))
     vi.useFakeTimers()
-    const input = screen.getByLabelText("History retention (days)")
+    const input = screen.getByLabelText("Retention in days")
 
     fireEvent.change(input, { target: { value: "30" } })
     fireEvent.click(screen.getByRole("button", { name: "Reset defaults" }))
@@ -859,7 +859,7 @@ describe("SettingsDialog", () => {
     await screen.findByRole("tab", { name: "General" })
     fireEvent.click(screen.getByRole("tab", { name: "History" }))
     vi.useFakeTimers()
-    const input = screen.getByLabelText("History retention (days)")
+    const input = screen.getByLabelText("Retention in days")
 
     fireEvent.change(input, { target: { value: "30" } })
     fireEvent.click(screen.getByRole("button", { name: "Done" }))
@@ -899,7 +899,7 @@ describe("SettingsDialog", () => {
     const view = render(<SettingsDialog open onOpenChange={vi.fn()} />)
     await screen.findByRole("tab", { name: "General" })
     fireEvent.click(screen.getByRole("tab", { name: "History" }))
-    fireEvent.change(screen.getByLabelText("History retention (days)"), {
+    fireEvent.change(screen.getByLabelText("Retention in days"), {
       target: { value: "30" },
     })
 
@@ -930,7 +930,7 @@ describe("SettingsDialog", () => {
     await screen.findByRole("tab", { name: "General" })
     fireEvent.click(screen.getByRole("tab", { name: "History" }))
     vi.useFakeTimers()
-    const input = screen.getByLabelText("History retention (days)")
+    const input = screen.getByLabelText("Retention in days")
 
     fireEvent.change(input, { target: { value: "30" } })
     await act(async () => {
@@ -961,7 +961,7 @@ describe("SettingsDialog", () => {
     render(<SettingsDialog open onOpenChange={vi.fn()} />)
     await screen.findByRole("tab", { name: "General" })
     fireEvent.click(screen.getByRole("tab", { name: "History" }))
-    expect(screen.getByLabelText("History retention (days)")).toHaveDisplayValue(
+    expect(screen.getByLabelText("Retention in days")).toHaveDisplayValue(
       "90",
     )
 
@@ -971,7 +971,7 @@ describe("SettingsDialog", () => {
     expect(invoke).toHaveBeenCalledWith("reset_settings")
     expect(toast.dismiss).toHaveBeenCalledWith("settings-save")
     expect(toast.dismiss).toHaveBeenCalledWith("settings-reset")
-    expect(screen.getByLabelText("History retention (days)")).toHaveDisplayValue(
+    expect(screen.getByLabelText("Retention in days")).toHaveDisplayValue(
       "30",
     )
 
@@ -1001,7 +1001,7 @@ describe("SettingsDialog", () => {
     expect(clearHistory).not.toHaveBeenCalled()
   })
 
-  it("shows memory stats and the configured ceiling in Performance", async () => {
+  it("shows memory stats and the configured ceiling in Resource usage", async () => {
     vi.mocked(invoke).mockImplementation((command: string) => {
       if (command === "get_settings") {
         return Promise.resolve({
@@ -1020,11 +1020,14 @@ describe("SettingsDialog", () => {
     })
     render(<SettingsDialog open onOpenChange={vi.fn()} />)
     await screen.findByRole("tab", { name: "General" })
-    fireEvent.click(screen.getByRole("tab", { name: "Performance" }))
+    fireEvent.click(screen.getByRole("tab", { name: "Resource usage" }))
 
-    expect(await screen.findByText("Your Mac's memory")).toBeInTheDocument()
+    expect(await screen.findByText("System memory")).toBeInTheDocument()
     expect(
-      screen.getByLabelText("Maximum memory in megabytes"),
+      screen.getByRole("combobox", { name: "Memory mode" }),
+    ).toHaveTextContent("Manual")
+    expect(
+      screen.getByLabelText("Memory limit in megabytes"),
     ).toHaveDisplayValue("512")
     expect(screen.getByText("16.00 GB")).toBeInTheDocument()
     expect(screen.getByText("512.0 MB")).toBeInTheDocument()
@@ -1050,15 +1053,15 @@ describe("SettingsDialog", () => {
     })
     render(<SettingsDialog open onOpenChange={vi.fn()} />)
     await screen.findByRole("tab", { name: "General" })
-    fireEvent.click(screen.getByRole("tab", { name: "Performance" }))
+    fireEvent.click(screen.getByRole("tab", { name: "Resource usage" }))
 
-    const ceiling = screen.getByLabelText("Maximum memory in megabytes")
+    const ceiling = screen.getByLabelText("Memory limit in megabytes")
     expect(ceiling).not.toBeDisabled()
 
     vi.useFakeTimers()
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Increase Maximum memory in megabytes",
+        name: "Increase Memory limit in megabytes",
       }),
     )
     await act(async () => {
@@ -1072,24 +1075,37 @@ describe("SettingsDialog", () => {
   it("disables the ceiling while memory is adaptive", async () => {
     render(<SettingsDialog open onOpenChange={vi.fn()} />)
     await screen.findByRole("tab", { name: "General" })
-    fireEvent.click(screen.getByRole("tab", { name: "Performance" }))
+    fireEvent.click(screen.getByRole("tab", { name: "Resource usage" }))
 
     expect(
-      screen.getByLabelText("Maximum memory in megabytes"),
+      screen.getByLabelText("Memory limit in megabytes"),
     ).toBeDisabled()
   })
 
   it("enables the ceiling after switching to manual", async () => {
     const user = userEvent.setup()
     render(<SettingsDialog open onOpenChange={vi.fn()} />)
-    await user.click(await screen.findByRole("tab", { name: "Performance" }))
+    await user.click(await screen.findByRole("tab", { name: "Resource usage" }))
 
-    const ceiling = screen.getByLabelText("Maximum memory in megabytes")
+    const ceiling = screen.getByLabelText("Memory limit in megabytes")
     expect(ceiling).toBeDisabled()
 
-    await user.click(screen.getByRole("combobox", { name: "Memory limit" }))
+    await user.click(screen.getByRole("combobox", { name: "Memory mode" }))
     await user.click(await screen.findByRole("option", { name: "Manual" }))
 
     expect(ceiling).not.toBeDisabled()
+
+    const increase = screen.getByRole("button", {
+      name: "Increase Memory limit in megabytes",
+    })
+    expect(increase).toBeDisabled()
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "Decrease Memory limit in megabytes",
+      }),
+    )
+
+    expect(increase).not.toBeDisabled()
   })
 })
