@@ -89,21 +89,27 @@ jobs:
         run: |-
           set -euo pipefail
           rc=0
-          err="$(gh release view "$RELEASE_TAG" 2>&1 >/dev/null)" || rc=$?
+          existing="$(gh release view "$RELEASE_TAG" --json databaseId,isDraft 2>&1)" || rc=$?
           if [ "$rc" -eq 0 ]; then
-            echo "::error::release $RELEASE_TAG already exists — recovery: run 'gh release delete $RELEASE_TAG --cleanup-tag --yes', then re-run the release"
-            exit 1
+            is_draft="$(printf '%s' "$existing" | jq -r '.isDraft')"
+            release_id="$(printf '%s' "$existing" | jq -r '.databaseId')"
+            if [ "$is_draft" != "true" ]; then
+              echo "::error::release $RELEASE_TAG already exists and is published — convert it to a draft (gh release edit $RELEASE_TAG --draft) or delete it, then re-run the release"
+              exit 1
+            fi
+            echo "gate: reusing existing draft release $RELEASE_TAG (id $release_id)"
+          else
+            if ! echo "$existing" | grep -qiE 'not found|no release'; then
+              echo "::error::draft pre-creation could not verify tag absence (auth/scopes/rate limit/network): $existing"
+              exit 1
+            fi
+            draft_flags=(--draft --target "$GITHUB_SHA" --title "Yard $RELEASE_TAG")
+            if [ "$PRERELEASE" = "true" ]; then
+              draft_flags+=(--prerelease)
+            fi
+            gh release create "$RELEASE_TAG" "${draft_flags[@]}" >/dev/null
+            release_id="$(gh release view "$RELEASE_TAG" --json databaseId --jq '.databaseId')"
           fi
-          if ! echo "$err" | grep -qiE 'not found|no release'; then
-            echo "::error::draft pre-creation could not verify tag absence (auth/scopes/rate limit/network): $err"
-            exit 1
-          fi
-          draft_flags=(--draft --target "$GITHUB_SHA" --title "Yard $RELEASE_TAG")
-          if [ "$PRERELEASE" = "true" ]; then
-            draft_flags+=(--prerelease)
-          fi
-          gh release create "$RELEASE_TAG" "${draft_flags[@]}" >/dev/null
-          release_id="$(gh release view "$RELEASE_TAG" --json databaseId --jq '.databaseId')"
           case "$release_id" in
             ''|*[!0-9]*)
               echo "::error::gate resolved a non-numeric release id ('$release_id') — tauri-action needs the numeric REST id (databaseId); re-run the release"
@@ -116,7 +122,7 @@ jobs:
             echo "app_version=$APP_VERSION"
             echo "prerelease=$PRERELEASE"
           } >> "$GITHUB_OUTPUT"
-          echo "gate: draft release $RELEASE_TAG (id $release_id, prerelease=$PRERELEASE) created"
+          echo "gate: draft release $RELEASE_TAG (id $release_id, prerelease=$PRERELEASE) ready"
         shell: bash
 
   release:
