@@ -785,12 +785,12 @@
     "@tanstack/react-store" "^0.11.2"
     "@tanstack/table-core" "9.3.1"
 
-"@tanstack/react-virtual@^3.14.24":
-  version "3.14.24"
-  resolved "https://registry.yarnpkg.com/@tanstack/react-virtual/-/react-virtual-3.14.24.tgz#cec5ccdf118449b357d0cd956dc6737756e88f6c"
-  integrity sha512-JoNsByXR68fNlB2NZuT3bSk8uYBxuOWl6YNJ7djTrw7IMwBWuaOtffxj/TcuMa80WmL6byb+80i1NEM/8Qmocw==
+"@tanstack/react-virtual@^3.14.25":
+  version "3.14.25"
+  resolved "https://registry.yarnpkg.com/@tanstack/react-virtual/-/react-virtual-3.14.25.tgz#69ea3617c2878d403827e4a220a3abc9b380db17"
+  integrity sha512-LYNLaogi8NZUqjPgJ0byKQrXprkDJsZLd94u0i1UpYtXz2fgvbP4KrHygM4MSgSAvEaqykQofYdJ1Vuf7XIz/Q==
   dependencies:
-    "@tanstack/virtual-core" "3.19.9"
+    "@tanstack/virtual-core" "3.19.10"
 
 "@tanstack/store@0.11.2", "@tanstack/store@^0.11.2":
   version "0.11.2"
@@ -804,10 +804,10 @@
   dependencies:
     "@tanstack/store" "^0.11.2"
 
-"@tanstack/virtual-core@3.19.9":
-  version "3.19.9"
-  resolved "https://registry.yarnpkg.com/@tanstack/virtual-core/-/virtual-core-3.19.9.tgz#12ab5f5b2561ec2c44510bd72f190c5225dcda8f"
-  integrity sha512-Syiaf3w69dFyYv4o2mqJ1/2VtBJTNq5Hu5cVXfnzOuJKFpUojukQR13ZW+5NvdMJM7GFHeNPmveMNhoIubiFyA==
+"@tanstack/virtual-core@3.19.10":
+  version "3.19.10"
+  resolved "https://registry.yarnpkg.com/@tanstack/virtual-core/-/virtual-core-3.19.10.tgz#2bf07e43d0d57f73aef1f9ee05f568cfde402879"
+  integrity sha512-/ltpH0qUCs5XQYE7fIhgA+aqgC5NzSfLTDQkC+N1wOOdvIYx1FH/kz2LGfSeanNbekqy3WBu6mNIbqXhxE/pew==
 
 "@tauri-apps/api@2.12.x", "@tauri-apps/api@^2.12.0":
   version "2.12.4"
