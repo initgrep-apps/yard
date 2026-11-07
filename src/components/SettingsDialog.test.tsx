@@ -136,8 +136,8 @@ describe("SettingsDialog", () => {
     expect(tabs.map((tab) => tab.textContent)).toEqual([
       "General",
       "Targets",
-      "Quality floors",
       "Consent",
+      "Minimum quality",
       "Performance",
       "History",
     ])
@@ -211,10 +211,10 @@ describe("SettingsDialog", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Consent" }))
 
     const destructive = screen.getByRole("button", {
-      name: "Allow destructive changes",
+      name: "Allow quality-reducing changes",
     })
     const heic = screen.getByRole("button", {
-      name: "Convert HEIC/HEIF to JPEG",
+      name: "Convert HEIC photos to JPEG",
     })
     expect(destructive).toHaveAttribute("aria-pressed", "false")
     expect(heic).toHaveAttribute("aria-pressed", "true")
@@ -236,7 +236,7 @@ describe("SettingsDialog", () => {
   it("saves the image long-edge floor without dropping the quality floor", async () => {
     render(<SettingsDialog open onOpenChange={vi.fn()} />)
     await screen.findByRole("tab", { name: "General" })
-    fireEvent.click(screen.getByRole("tab", { name: "Quality floors" }))
+    fireEvent.click(screen.getByRole("tab", { name: "Minimum quality" }))
     const input = screen.getByLabelText("Images minimum long edge")
     expect(input).toHaveDisplayValue("1,280")
 
@@ -1022,12 +1022,74 @@ describe("SettingsDialog", () => {
     await screen.findByRole("tab", { name: "General" })
     fireEvent.click(screen.getByRole("tab", { name: "Performance" }))
 
-    expect(await screen.findByText("Total RAM")).toBeInTheDocument()
+    expect(await screen.findByText("Your Mac's memory")).toBeInTheDocument()
     expect(
-      screen.getByLabelText("Memory ceiling in megabytes"),
+      screen.getByLabelText("Maximum memory in megabytes"),
     ).toHaveDisplayValue("512")
     expect(screen.getByText("16.00 GB")).toBeInTheDocument()
     expect(screen.getByText("512.0 MB")).toBeInTheDocument()
     expect(screen.getByText("—")).toBeInTheDocument()
+  })
+
+  it("lets manual mode change the memory ceiling", async () => {
+    vi.mocked(invoke).mockImplementation((command: string) => {
+      if (command === "get_settings") {
+        return Promise.resolve({
+          ...structuredClone(baseSettings),
+          performance: { adaptiveMemory: false, memoryCeilingMb: 512 },
+        })
+      }
+      if (command === "memory_stats") {
+        return Promise.resolve({
+          totalRamBytes: 16 * 1024 * 1024 * 1024,
+          budgetBytes: 512 * 1024 * 1024,
+          processRssBytes: 0,
+        })
+      }
+      return Promise.resolve(undefined)
+    })
+    render(<SettingsDialog open onOpenChange={vi.fn()} />)
+    await screen.findByRole("tab", { name: "General" })
+    fireEvent.click(screen.getByRole("tab", { name: "Performance" }))
+
+    const ceiling = screen.getByLabelText("Maximum memory in megabytes")
+    expect(ceiling).not.toBeDisabled()
+
+    vi.useFakeTimers()
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Increase Maximum memory in megabytes",
+      }),
+    )
+    await act(async () => {
+      vi.advanceTimersByTime(400)
+    })
+
+    expect(savedSettings().performance.memoryCeilingMb).toBe(513)
+    vi.useRealTimers()
+  })
+
+  it("disables the ceiling while memory is adaptive", async () => {
+    render(<SettingsDialog open onOpenChange={vi.fn()} />)
+    await screen.findByRole("tab", { name: "General" })
+    fireEvent.click(screen.getByRole("tab", { name: "Performance" }))
+
+    expect(
+      screen.getByLabelText("Maximum memory in megabytes"),
+    ).toBeDisabled()
+  })
+
+  it("enables the ceiling after switching to manual", async () => {
+    const user = userEvent.setup()
+    render(<SettingsDialog open onOpenChange={vi.fn()} />)
+    await user.click(await screen.findByRole("tab", { name: "Performance" }))
+
+    const ceiling = screen.getByLabelText("Maximum memory in megabytes")
+    expect(ceiling).toBeDisabled()
+
+    await user.click(screen.getByRole("combobox", { name: "Memory limit" }))
+    await user.click(await screen.findByRole("option", { name: "Manual" }))
+
+    expect(ceiling).not.toBeDisabled()
   })
 })

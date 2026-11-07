@@ -82,8 +82,8 @@ type PersistResult = "saved" | "failed" | "pending"
 const SECTIONS = [
   { value: "general", label: "General", icon: SettingsIcon },
   { value: "targets", label: "Targets", icon: SlidersHorizontal },
-  { value: "floors", label: "Quality floors", icon: ShieldCheck },
   { value: "consent", label: "Consent", icon: ShieldAlert },
+  { value: "floors", label: "Minimum quality", icon: ShieldCheck },
   { value: "performance", label: "Performance", icon: Zap },
   { value: "history", label: "History", icon: Clock },
 ] as const
@@ -378,16 +378,17 @@ function ConsentSection({ draft, onChange }: SectionProps) {
     <FieldSet>
       <FieldLegend>Consent</FieldLegend>
       <FieldDescription>
-        These grants apply to every batch. Anything not granted here is asked
-        for in the batch pre-flight.
+        Choose what Yard may do without asking. Anything you leave off is
+        confirmed before a batch starts.
       </FieldDescription>
       <FieldGroup>
         <Field orientation="horizontal">
           <FieldContent>
-            <FieldLabel>Allow destructive changes</FieldLabel>
+            <FieldLabel>Allow quality-reducing changes</FieldLabel>
             <FieldDescription>
-              Fewer pixels, dropped streams or pages, format changes, and
-              rasterisation.
+              Lets Yard make images smaller than their original size, drop
+              extra audio or subtitle tracks, or change a file's format without
+              asking first.
             </FieldDescription>
           </FieldContent>
           <Toggle
@@ -396,24 +397,24 @@ function ConsentSection({ draft, onChange }: SectionProps) {
             onPressedChange={(allowDestructive) =>
               setConsent({ allowDestructive })
             }
-            aria-label="Allow destructive changes"
+            aria-label="Allow quality-reducing changes"
           >
             {draft.consent.allowDestructive ? "On" : "Off"}
           </Toggle>
         </Field>
         <Field orientation="horizontal">
           <FieldContent>
-            <FieldLabel>Convert HEIC/HEIF to JPEG</FieldLabel>
+            <FieldLabel>Convert HEIC photos to JPEG</FieldLabel>
             <FieldDescription>
-              On by default. Turn it off and the batch pre-flight asks before
-              converting.
+              HEIC photos are converted so they open in more apps. Turn this
+              off to confirm the conversion before each batch.
             </FieldDescription>
           </FieldContent>
           <Toggle
             variant="outline"
             pressed={draft.consent.heicToJpg}
             onPressedChange={(heicToJpg) => setConsent({ heicToJpg })}
-            aria-label="Convert HEIC/HEIF to JPEG"
+            aria-label="Convert HEIC photos to JPEG"
           >
             {draft.consent.heicToJpg ? "On" : "Off"}
           </Toggle>
@@ -435,11 +436,18 @@ function PerformanceSection({ draft, onChange }: SectionProps) {
     <FieldSet>
       <FieldLegend>Performance</FieldLegend>
       <FieldDescription>
-        Memory budget controls how many files compress at once.
+        Yard limits its memory use so the rest of your Mac stays responsive.
+        Smaller limits mean fewer files compress at the same time.
       </FieldDescription>
       <FieldGroup>
         <Field orientation="horizontal">
-          <FieldLabel>Memory mode</FieldLabel>
+          <FieldContent>
+            <FieldLabel>Memory limit</FieldLabel>
+            <FieldDescription>
+              Adaptive picks a safe limit from your Mac's memory. Manual lets
+              you choose the limit.
+            </FieldDescription>
+          </FieldContent>
           <Select
             value={draft.performance.adaptiveMemory ? 'adaptive' : 'manual'}
             onValueChange={(mode) => {
@@ -448,7 +456,7 @@ function PerformanceSection({ draft, onChange }: SectionProps) {
               }
             }}
           >
-            <SelectTrigger aria-label="Memory mode" className="w-32">
+            <SelectTrigger aria-label="Memory limit" className="w-32">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -458,7 +466,12 @@ function PerformanceSection({ draft, onChange }: SectionProps) {
           </Select>
         </Field>
         <Field orientation="horizontal">
-          <FieldLabel htmlFor="memory-ceiling">Memory ceiling</FieldLabel>
+          <FieldContent>
+            <FieldLabel htmlFor="memory-ceiling">Maximum memory</FieldLabel>
+            <FieldDescription>
+              Only used in Manual mode. Choose between 300 MB and 2 GB.
+            </FieldDescription>
+          </FieldContent>
           <NumberStepper
             id="memory-ceiling"
             value={draft.performance.memoryCeilingMb}
@@ -467,35 +480,32 @@ function PerformanceSection({ draft, onChange }: SectionProps) {
             }
             min={300}
             max={2048}
-            ariaLabel="Memory ceiling in megabytes"
-            className="w-32"
+            ariaLabel="Maximum memory in megabytes"
+            className="w-32 disabled:opacity-50"
+            disabled={draft.performance.adaptiveMemory}
           />
         </Field>
       </FieldGroup>
       {stats && (
-        <div className={`mt-4 grid gap-2 text-sm ${batchUsage ? 'grid-cols-4' : 'grid-cols-3'}`}>
-          <div>
-            <div className="text-muted-foreground">Total RAM</div>
-            <div className="font-medium">{formatSize(stats.totalRamBytes)}</div>
+        <div className="mt-4 grid grid-cols-3 gap-2">
+          <div className="rounded-[14px] bg-muted/40 p-[13px_14px]">
+            <div className="text-[10.5px] text-muted-foreground">Your Mac's memory</div>
+            <div className="mt-1 text-lg font-[650] tracking-[-0.02em]">
+              {formatSize(stats.totalRamBytes)}
+            </div>
           </div>
-          <div>
-            <div className="text-muted-foreground">Budget</div>
-            <div className="font-medium">
+          <div className="rounded-[14px] bg-muted/40 p-[13px_14px]">
+            <div className="text-[10.5px] text-muted-foreground">Yard's memory limit</div>
+            <div className="mt-1 text-lg font-[650] tracking-[-0.02em]">
               {formatSize(batchUsage?.budgetBytes ?? stats.budgetBytes)}
             </div>
           </div>
-          <div>
-            <div className="text-muted-foreground">App RSS</div>
-            <div className="font-medium">
+          <div className="rounded-[14px] bg-muted/40 p-[13px_14px]">
+            <div className="text-[10.5px] text-muted-foreground">Yard is using</div>
+            <div className="mt-1 text-lg font-[650] tracking-[-0.02em]">
               {formatSize(batchUsage?.processRssBytes ?? stats.processRssBytes)}
             </div>
           </div>
-          {batchUsage && (
-            <div>
-              <div className="text-muted-foreground">Batch used</div>
-              <div className="font-medium">{formatSize(batchUsage.usedBytes)}</div>
-            </div>
-          )}
         </div>
       )}
     </FieldSet>

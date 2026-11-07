@@ -341,12 +341,30 @@ pub fn stderr_tail(tail: &StderrTail) -> String {
             stderr
         }
     };
-    let detail = tail.trim_end();
+    let detail = strip_macos_glib_warning(tail.trim_end());
     if detail.is_empty() {
         "<no stderr>".to_string()
     } else {
-        detail.to_string()
+        detail
     }
+}
+
+/// The staged macOS glib and the Homebrew glib can both load, printing a
+/// multi-line duplicate-class warning on every engine start. It is harmless
+/// and buries the real engine error, so drop it from user-facing messages.
+fn strip_macos_glib_warning(stderr: &str) -> String {
+    stderr
+        .lines()
+        .filter(|line| {
+            !line.contains("Class GNotificationCenterDelegate is implemented in both")
+                && !(line.contains("libgio-2.0.0.dylib (0x") && line.trim_start().starts_with('/'))
+                && !line.contains("This may cause spurious casting failures")
+                && !line.contains("One of the duplicates must be removed")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
 }
 
 /// A sidecar exit code that, for this engine, still counts as pass success
@@ -1018,6 +1036,17 @@ mod tests {
         assert!(pdf.iter().all(|b| *b == b'p'), "pdf lane must keep pdf bytes");
         assert!(!temp_path_for(&jpg_out).exists(), "jpg temp must be gone");
         assert!(!temp_path_for(&pdf_out).exists(), "pdf temp must be gone");
+    }
+
+    #[test]
+    fn stderr_tail_drops_the_macos_glib_duplicate_class_warning() {
+        let mut tail = StderrTail::new();
+        tail.push(
+            b"objc[1]: Class GNotificationCenterDelegate is implemented in both /a/libgio-2.0.0.dylib (0x1) and /b/libgio-2.0.0.dylib (0x2). This may cause spurious casting failures and mysterious crashes. One of the duplicates must be removed or renamed.\nVipsForeignLoad: \"x\" is not a known file format\n",
+        );
+        let text = stderr_tail(&tail);
+        assert!(text.contains("not a known file format"), "{text}");
+        assert!(!text.contains("GNotificationCenterDelegate"), "{text}");
     }
 
     #[test]

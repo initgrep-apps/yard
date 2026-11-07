@@ -76,13 +76,13 @@ describe('RunBoard', () => {
     ]
     const { rerender } = render(boardFor(mixed))
     expect(laneLabels()).toEqual(['image', 'video', 'pdf', 'document', 'other'])
-    expect(screen.getByTestId('kanban-board').className).toContain('overflow-x-auto')
+    expect(screen.getByTestId('kanban-board').className).toContain('overflow-y-auto')
     const grid = document.querySelector('[data-slot="kanban-board"]') as HTMLElement
-    expect(grid.style.gridTemplateColumns).toBe('repeat(5, 16rem)')
+    expect(grid.style.gridTemplateColumns).toBe('repeat(auto-fit, minmax(13rem, 1fr))')
 
     rerender(boardFor([makeFile({ name: 'Photo.png', category: 'image' })]))
     expect(laneLabels()).toEqual(['image'])
-    expect((document.querySelector('[data-slot="kanban-board"]') as HTMLElement).style.gridTemplateColumns).toBe('repeat(1, 16rem)')
+    expect((document.querySelector('[data-slot="kanban-board"]') as HTMLElement).style.gridTemplateColumns).toBe('repeat(auto-fit, minmax(13rem, 1fr))')
   })
 
   it('failed filter renders only lanes containing failed rows', () => {

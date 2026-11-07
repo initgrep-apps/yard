@@ -236,7 +236,7 @@ export function RunBoard({
         <div
           ref={boardRef}
           data-testid="kanban-board"
-          className="h-full overflow-x-auto select-none pb-3 pr-6"
+          className="h-full overflow-y-auto select-none pb-3 pr-6"
           onWheel={(event) => {
             if ((event.target as HTMLElement).closest('[data-lane-scroll]')) return
             if (Math.abs(event.deltaY) > Math.abs(event.deltaX)) {
@@ -245,8 +245,8 @@ export function RunBoard({
           }}
         >
           <KanbanBoard
-            className="h-full gap-3 w-max min-w-full"
-            style={{ gridTemplateColumns: `repeat(${columnsList.length}, 16rem)` }}
+            className="h-full min-w-full gap-3 auto-rows-fr"
+            style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(13rem, 1fr))' }}
           >
             {columnsList.map((column) => (
               <LaneView
