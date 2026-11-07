@@ -49,6 +49,20 @@
 - A processor panic no longer kills the app in a release build.
 - Sidecar stderr and stdout drains are bounded and joined.
 
+## [1.1.0](https://github.com/initgrep-apps/yard/compare/v1.0.0...v1.1.0) (2026-11-07)
+
+
+### Features
+
+* bounded memory, consent-gated fidelity, and backend remediation ([#224](https://github.com/initgrep-apps/yard/issues/224)) ([602c283](https://github.com/initgrep-apps/yard/commit/602c2831176f2df78d3f344ff11cff905f4618f1))
+
+
+### Bug Fixes
+
+* **settings:** plain-language labels and section copy ([#227](https://github.com/initgrep-apps/yard/issues/227)) ([087679a](https://github.com/initgrep-apps/yard/commit/087679a2ab1704dd12c7089dc6d496fdac4ac03e))
+* **settings:** sidebar-style tabs and destination directory ([#228](https://github.com/initgrep-apps/yard/issues/228)) ([2a6d279](https://github.com/initgrep-apps/yard/commit/2a6d279aff52984700f6eb41071aaeb9edb96e43))
+* **ui:** plain-language settings, editable manual ceiling, responsive board ([#226](https://github.com/initgrep-apps/yard/issues/226)) ([3a26ad5](https://github.com/initgrep-apps/yard/commit/3a26ad5f12513ada496522e3a16b76f4360de5e3))
+
 ## 1.0.0 (2026-11-04)
 
 First stable release. Yard compresses images, video, PDF, and Office documents
