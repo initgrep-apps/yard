@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="docs/assets/yard-icon.png" width="96" alt="Yard icon">
-</p>
-
 <h1 align="center">Yard</h1>
 
 <p align="center">
@@ -16,8 +12,6 @@
   <a href="LICENSE"><img src="https://img.shields.io/github/license/initgrep-apps/yard" alt="License: GPL-3.0"></a>
   <a href="#download"><img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Windows-lightgrey" alt="Platforms: macOS and Windows"></a>
 </p>
-
-![Yard compress screen](docs/assets/screenshots/compress.png)
 
 Yard takes a batch of files, gives each one a size limit based on its type, and
 compresses it as close to that limit as quality allows. Everything runs on your
@@ -91,16 +85,6 @@ means an under-target HEIC keeps HEIC bytes in a `.jpg` file, an under-target MO
 MOV bytes in a `.mp4` file, and an under-target image is not re-encoded to sRGB. Format
 conversion, image orientation and colour normalization only run when compression does.
 
-## Screenshots
-
-### History
-
-![Yard history screen](docs/assets/screenshots/history.png)
-
-### Targets
-
-![Yard targets settings](docs/assets/screenshots/targets.png)
-
 ## System requirements
 
 | | Minimum | Recommended |
@@ -158,16 +142,17 @@ src/                  Frontend — UI only, no compression logic
 src-tauri/src/        Rust core — commands, queue, scheduler, processors, history
 scripts/binaries/     Sidecar supply chain (manifest → lock → fetch → prep → audit)
 scripts/ci/           Freeze/unfreeze, package gate, workflow tests
-docs/                 Architecture, features, ADRs, CI runbook, known gaps
+docs/                 Architecture, features, ADRs, CI, release acceptance, bugs
 ```
 
 ### Documentation
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — components, IPC, algorithms, limits
-- [`docs/FEATURES.md`](docs/FEATURES.md) — shipped slices and research backlog
+- [`docs/FEATURES.md`](docs/FEATURES.md) — shipped capabilities
 - [`docs/adr/`](docs/adr/) — decisions and rejected alternatives
-- [`docs/ci-process.md`](docs/ci-process.md) — CI model, release runbook, failure table
-- [`docs/bugs.md`](docs/bugs.md) — open bugs and known gaps
+- [`docs/ci-process.md`](docs/ci-process.md) — CI model and release runbook
+- [`docs/distribution-acceptance.md`](docs/distribution-acceptance.md) — manual release checklist
+- [`docs/bugs.md`](docs/bugs.md) — open bugs
 - [`GLOSSARY.md`](GLOSSARY.md) — project vocabulary
 
 ## License

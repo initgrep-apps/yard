@@ -90,7 +90,7 @@ See [`docs/ci-process.md`](docs/ci-process.md) for the full runbook.
 
 - Update `docs/FEATURES.md` when a slice ships.
 - Record decisions that pass the ADR three-test filter in `docs/adr/`.
-- Track known gaps in `docs/bugs.md`.
+- Track confirmed bugs in `docs/bugs.md`; CI work in `docs/ci-process.md`.
 - Superpowers specs and plans are working files; delete them when the slice
   merges.
 
@@ -101,5 +101,5 @@ src/                  Frontend — UI only
 src-tauri/src/        Rust core — commands, queue, scheduler, processors, history
 scripts/binaries/     Sidecar manifest, lock, fetch, prep, audit
 scripts/ci/           Freeze/unfreeze, package gate, workflow tests
-docs/                 Architecture, features, ADRs, CI runbook, known gaps
+docs/                 Architecture, features, ADRs, CI, release acceptance, bugs
 ```

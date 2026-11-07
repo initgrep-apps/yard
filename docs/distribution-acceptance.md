@@ -1,12 +1,10 @@
-# Distribution acceptance checklist
+# Manual release acceptance
 
-The automated half — `node scripts/ci/package-gate.mjs --triple <triple>` — proves the built package carries every engine where the app looks, that each engine starts, reports the manifest version, and completes a real operation, and that the app's own resolver finds all five. It does **not** exercise the UI layer: drag & drop, progress, output folder, history, error messaging. That layer is what this checklist covers.
+`node scripts/ci/package-gate.mjs --triple <triple>` proves the built package carries every engine where the app looks, that each engine starts, reports the manifest version, completes a real operation, and that the app's own resolver finds all five. It does not exercise the UI layer or every installer. Run this checklist against tagged release artifacts on real machines.
 
-Run it against the artifacts from a tagged release, on real machines.
+## Install
 
-## Install on macOS
-
-macOS builds are ad-hoc signed and not notarized (ADR 0002), so Gatekeeper quarantines the download. The DMG mounts read-only and the mounted files carry no per-file quarantine mark; the mark lands on the copy, including the helper programs inside the bundle. Copy first, then strip it recursively from the installed app:
+**macOS.** Builds are ad-hoc signed and not notarized (ADR 0002), so Gatekeeper quarantines the download. Copy first, then strip the mark recursively:
 
 ```bash
 hdiutil attach ~/Downloads/*.dmg
@@ -15,39 +13,54 @@ hdiutil detach /Volumes/<volume-name>
 xattr -dr com.apple.quarantine /Applications/<app-name>.app
 ```
 
-The alternative is **System Settings → Privacy & Security → Open Anyway** after the first launch attempt. On macOS 15+ that is the only route when the command is not used.
+The alternative is **System Settings → Privacy & Security → Open Anyway** after the first launch attempt.
 
-## Install on Windows
+**Windows.** Run the installer. When SmartScreen warns, choose **More info → Run anyway**. Builds are unsigned.
 
-Run the installer. When SmartScreen warns, choose **More info** → **Run anyway**. Windows builds are unsigned.
+## UI checks
+
+- Add files through the picker and drag & drop; remove one; clear the list.
+- Change settings, close, reopen: values persist. Reset restores defaults.
+- Compress a PNG, MP4, PDF and DOCX to their targets. Watch progress, cancel one file, then cancel a batch.
+- Create and reveal the output folder. Confirm no original was modified.
+- Open History: session and file records, filters, sort, pagination, detail changes/consent source, clear history.
+- Trigger an error with an unsupported or corrupt file and confirm the message is actionable.
+- Kanban: horizontal wheel/trackpad panning, thin scrollbar, drag ghost (item and lane), lane grip visibility, pinned-card focus, live compressing re-pin.
+- Window: drag surface, minimize/maximize/close, theme toggle, single-instance focus, window-state restore.
+- History table: trackpad scroll feel, sticky header, reveal actions.
+
+The Windows WebView2 checks above need a real Windows machine. macOS trackpad and drag-overlay checks need a human pass; jsdom and WebKit synthesis cannot cover them.
 
 ## Acceptance matrix
 
-One row per platform × file type. Record the artifact version, the date, and the machine.
+One row per artifact. Record the version, date and machine.
 
-| platform | PNG | MP4 | PDF | DOCX |
-|---|---|---|---|---|
-| macOS arm64 | | | | |
-| macOS x64 | | | | |
-| Windows x64 (NSIS) | | | | |
-| Windows x64 (MSI) | | | | |
-| Windows arm64 | | | | |
+| Platform | Artifact | PNG | MP4 | PDF | DOCX |
+|---|---|---|---|---|---|
+| macOS arm64 | DMG | | | | |
+| macOS x64 | DMG | | | | |
+| Windows x64 | NSIS | | | | |
+| Windows x64 | MSI | | | | |
+| Windows arm64 | NSIS | | | | |
 
-Mark every row explicitly. The CI package gate only opens the **NSIS** installer; the **MSI** payload is built from the same Tauri resource map but is not CI-gated, so the MSI row is a real gap if it is not run. A platform with no available hardware is recorded as "not run — no hardware", not left blank and not assumed green.
+Mark every row explicitly. Use **not run — no hardware** rather than leaving a cell blank or assuming green. The CI package gate opens the `.app` and the NSIS installer only; the MSI payload and the mounted DMG are manual checks.
 
-Use a real input for each type, not a synthetic zero-byte file: a PNG with metadata, an MP4 with audio, a text-bearing PDF, and a DOCX with an embedded image.
+Use real inputs: a PNG with metadata, an MP4 with audio, a text-bearing PDF, and a DOCX with an embedded image.
 
-## What to record on failure
+## Record failures
 
-- the platform and the exact artifact version;
-- the file type and the input file;
-- the **exact error text** the app showed;
-- whether the helper produced any output file (size, and whether it opens).
+- Platform and exact artifact version.
+- File type and input file.
+- Exact error text the app showed.
+- Whether the engine produced an output file; record its size and whether it opens.
+- A screenshot is enough if it contains the error text.
 
-A screenshot of the app's error is enough if it contains the text. Add the row to `docs/bugs.md` with the date.
+Add confirmed defects to `docs/bugs.md` with the date. Do not record manual-check gaps as bugs; update this checklist instead.
 
-## Where the automated half lives
+## Automated half
 
-`node scripts/ci/package-gate.mjs --triple <triple>` (also run by every release row in `.github/workflows/release.yml`). Pass `--bundle-dir <path>` to point it at a specific package — the `.app` path on macOS or the `-setup.exe` file on Windows — when the package is not in the default `src-tauri/target/<triple>/release/bundle/` location.
+```bash
+node scripts/ci/package-gate.mjs --triple <triple>
+```
 
-What the gate opens: the built `.app` on macOS and the NSIS installer payload on Windows. It does not open the `.dmg`, the `.app.tar.gz`, or the MSI — `hdiutil attach` plus the documented install is the manual check for the macOS download, and the MSI row above is the manual check for that installer.
+Every release row runs it. Pass `--bundle-dir <path>` to point at a package outside `src-tauri/target/<triple>/release/bundle/`. It opens the macOS `.app` and the Windows NSIS installer payload; it does not open the `.dmg`, the `.app.tar.gz`, or the MSI.
