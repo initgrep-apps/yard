@@ -39,7 +39,7 @@ yarn build && yarn test && (cd src-tauri && cargo test)
 Run it locally before pushing. A PR with a red gate is not reviewed.
 
 Windows-target changes also need the cross-compile check documented in
-[`docs/ci-process.md`](docs/ci-process.md).
+[`docs/cicd-process.md`](docs/cicd-process.md).
 
 ## Making a change
 
@@ -84,13 +84,13 @@ Releases are automated with `release-please`:
 - `release.yml` builds four native installers into a draft. An operator verifies
   and publishes the draft.
 
-See [`docs/ci-process.md`](docs/ci-process.md) for the full runbook.
+See [`docs/cicd-process.md`](docs/cicd-process.md) for the full runbook.
 
 ## Documentation
 
 - Update `docs/FEATURES.md` when a slice ships.
 - Record decisions that pass the ADR three-test filter in `docs/adr/`.
-- Track known gaps in `docs/bugs.md`.
+- Track confirmed bugs in `docs/bugs.md`; CI/CD work in `docs/cicd-process.md`.
 - Superpowers specs and plans are working files; delete them when the slice
   merges.
 
@@ -101,5 +101,5 @@ src/                  Frontend — UI only
 src-tauri/src/        Rust core — commands, queue, scheduler, processors, history
 scripts/binaries/     Sidecar manifest, lock, fetch, prep, audit
 scripts/ci/           Freeze/unfreeze, package gate, workflow tests
-docs/                 Architecture, features, ADRs, CI runbook, known gaps
+docs/                 Architecture, features, ADRs, CI, release acceptance, bugs
 ```
