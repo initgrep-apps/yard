@@ -85,8 +85,7 @@ local gate, and PR rules are in [`CONTRIBUTING.md`](CONTRIBUTING.md).
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — components, IPC, limits
 - [`docs/FEATURES.md`](docs/FEATURES.md) — shipped capabilities
 - [`docs/adr/`](docs/adr/) — decisions and rejected alternatives
-- [`docs/ci-process.md`](docs/ci-process.md) — CI model and release runbook
-- [`docs/distribution-acceptance.md`](docs/distribution-acceptance.md) — manual release checklist
+- [`docs/cicd-process.md`](docs/cicd-process.md) — CI/CD model, release runbook, manual acceptance
 - [`docs/bugs.md`](docs/bugs.md) — open bugs
 - [`GLOSSARY.md`](GLOSSARY.md) — project vocabulary
 

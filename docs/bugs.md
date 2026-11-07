@@ -1,6 +1,6 @@
 # Open bugs
 
-Confirmed defects only. Accepted limitations live in `docs/adr/` and `docs/ARCHITECTURE.md`; manual release checks in `docs/distribution-acceptance.md`; CI work in `docs/ci-process.md`.
+Confirmed defects only. Accepted limitations live in `docs/adr/` and `docs/ARCHITECTURE.md`; manual release checks and CI work in `docs/cicd-process.md`.
 
 | Bug | Impact | Next step |
 |---|---|---|

@@ -25,6 +25,6 @@ The entitlement is verified at two levels: a Rust test parses the plist and asse
 
 ## Consequences
 
-- Until a membership exists, Gatekeeper does not trust the download and macOS installs need a documented quarantine removal after copying the app (see `docs/distribution-acceptance.md`).
+- Until a membership exists, Gatekeeper does not trust the download and macOS installs need a documented quarantine removal after copying the app (see `docs/cicd-process.md` §5).
 - The entitlement is a mild security relaxation: the app may load libraries signed by another team. The app loads no pluggable code and only the 71 dylibs it ships plus Apple's system frameworks.
 - Windows builds are unaffected by this ADR; they remain unsigned and show the SmartScreen "More info → Run anyway" flow.

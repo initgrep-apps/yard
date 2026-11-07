@@ -6,7 +6,7 @@ Yard is an offline desktop app that compresses batches of files toward per-categ
 
 - Platforms: macOS (arm64, Intel) and Windows (x64, arm64). Linux builds from source but is not packaged; its chrome is unverified.
 - License: GPLv3. Engines keep their own licenses: FFmpeg GPLv2+, Ghostscript AGPLv3, libvips LGPLv3, qpdf Apache-2.0.
-- Scope: the code as it exists today. Decisions live in `docs/adr/`; shipped capabilities in `docs/FEATURES.md`; open bugs in `docs/bugs.md`; CI and release in `docs/ci-process.md`.
+- Scope: the code as it exists today. Decisions live in `docs/adr/`; shipped capabilities in `docs/FEATURES.md`; open bugs in `docs/bugs.md`; CI/CD and release in `docs/cicd-process.md`.
 
 ## 2. Stack
 
@@ -201,7 +201,7 @@ History queries parse the whole retained file per call (ADR 0005); a session is 
 - **Freeze once, consume everywhere (ADR 0001).** `freeze.yml` stages all four triples and publishes `sidecars-<date>` (8 assets). Every consumer unfreezes its triple and verifies the bundle sha; nothing brews outside the freeze run.
 - **Packages.** macOS: five `externalBin` engines flat in `Contents/MacOS/`, 71 framework dylibs, `gs-resources`, ad-hoc signed with one entitlement (ADR 0002). Windows: ffmpeg/ffprobe flat beside the exe; vips/gs/qpdf under `resources/engines/<name>/` with their DLLs.
 - **Release guard.** Every release row runs `package-gate.mjs`, which opens the built package and runs each engine once. The gate exists because alpha.1 shipped engines that could not start.
-- **Workflows.** `ci.yml` (2-row PR gate), `freeze.yml`, `release.yml` (4 native rows), `release-please.yml`. Runbooks and failure handling: `docs/ci-process.md`.
+- **Workflows.** `ci.yml` (2-row PR gate), `freeze.yml`, `release.yml` (4 native rows), `release-please.yml`. Runbooks and failure handling: `docs/cicd-process.md`.
 - Measured macOS arm64 package: ~214 MiB with engines and dylibs.
 
-**Related docs:** `README.md`, `docs/FEATURES.md`, `docs/adr/`, `docs/ci-process.md`, `docs/distribution-acceptance.md`, `docs/bugs.md`, `GLOSSARY.md`.
+**Related docs:** `README.md`, `docs/FEATURES.md`, `docs/adr/`, `docs/cicd-process.md`, `docs/bugs.md`, `GLOSSARY.md`.

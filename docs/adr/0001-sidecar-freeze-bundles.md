@@ -21,7 +21,7 @@ The local machine is development only. Each triple builds natively on its matchi
 
 Mac freeze rows install vips and ghostscript from `homebrew-core` at the commit recorded for their triple in `scripts/ci/homebrew-core-pins.json`; no CI step runs `brew update`, so the formula set is fixed by the pins. A pin must satisfy: formula versions equal that triple's manifest `expectVersion`, and bottles exist for the runner's tier (brew's fallback reaches newer macOS from older bottles only). Bumping a pin is a deliberate act tied to an `expectVersion` change — never a drift fix. Arm and Intel pins move independently.
 
-Intel is frozen at vips 8.18.6 / gs 10.07.1: homebrew-core stopped publishing x86_64 (sonoma) bottles between 2026-09-10 and 09-11, and vips 8.18.7 arrived 16 days later, so no commit can ever supply 8.18.7 Intel bottles. Never bump Intel engines without a human re-verifying the whole closure's sonoma bottles. Operator steps: `docs/ci-process.md` §3.
+Intel is frozen at vips 8.18.6 / gs 10.07.1: homebrew-core stopped publishing x86_64 (sonoma) bottles between 2026-09-10 and 09-11, and vips 8.18.7 arrived 16 days later, so no commit can ever supply 8.18.7 Intel bottles. Never bump Intel engines without a human re-verifying the whole closure's sonoma bottles. Operator steps: `docs/cicd-process.md` §4.
 
 ## Consequences
 

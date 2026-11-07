@@ -17,13 +17,13 @@ What shipped, in the order the slices were built. Decisions live in `docs/adr/`.
 | 11 | History audit trail | Append-only JSONL, session + file records, sidebar batch list, filter dialog, pagination, 90-day trim | ADR 0005; sort is `newest` / `oldest` only |
 | 12 | Compress run view | Staging list ⇄ run board, per-category lanes, live cards, batch footer, "New batch" clears staging | Boards scroll horizontally |
 | 13 | UI overhaul | Chip filters, status tones, lane-aware cards, reduced-motion-safe shimmer, compact bar | Design tokens live in `src/lib/tokens.ts` |
-| 14 | Release workflows | PR gate, freeze, release with four native rows, release-please changelog | `docs/ci-process.md` |
+| 14 | Release workflows | PR gate, freeze, release with four native rows, release-please changelog | `docs/cicd-process.md` |
 | 15 | Snapshot pipelines | Freeze all four triples into `sidecars-<date>`; every consumer unfreezes and verifies | ADR 0001 |
 | 16 | Release integrity | Package-content gate per release row, macOS library-validation entitlement, Windows engine-path fixes, no console windows | ADRs 0001, 0002; `scripts/ci/package-gate.mjs` |
 | 17 | Yard rename | Product, package, crate, identifier and temp folder are all `yard` | Repo slug is `initgrep-apps/yard` |
 | 18 | App shell redesign | Native window chrome (macOS overlay, frameless Windows), stock shadcn sidebar with history batch list, filter dialog, settings/About dialogs, pre-paint theme | ADR 0007 |
 | 19 | Lucide icons | Every icon from `lucide-react`; `@remixicon/react` dropped, `components.json` declares `iconLibrary: lucide` | ADR 0008; sonner keeps shadcn's `OctagonX`/`TriangleAlert` |
-| 20 | History batch dashboard | Summary cards, batch header, sortable table, search/type/outcome filters, expandable row detail with reveal actions; virtualizes above 200 rows; kanban board with drag/reorder/pin, wheel panning, auto-fit lanes | Under-target uses the History muted tone; summary reflows to 2×2 at ≤860px; Windows UI checks in `docs/distribution-acceptance.md` |
+| 20 | History batch dashboard | Summary cards, batch header, sortable table, search/type/outcome filters, expandable row detail with reveal actions; virtualizes above 200 rows; kanban board with drag/reorder/pin, wheel panning, auto-fit lanes | Under-target uses the History muted tone; summary reflows to 2×2 at ≤860px; Windows UI checks in `docs/cicd-process.md` |
 | 21 | Neutral preset | shadcn preset `b0`: `nova` component shapes, neutral oklch palette, Inter, default radius, next-themes-backed sonner | ADR 0009 |
 | 22 | Bounded memory | Documents stream archive entries; adaptive batch budget (`clamp(total/8, 300 MiB, 2 GiB)`), disk preflight before history, `memory_stats` and `memory:usage` | ADR 0010; admission uses conservative estimates, RSS is display-only |
 | 23 | Image fidelity | Every attempt is `vips thumbnail` with EXIF autorotation, sRGB output and `keep=icc`; dimension ladder is 0.9× steps floored at `minLongEdge` (default 1280 px) | ADR 0011; under-target files bypass attempts; real-vips fixtures are `#[ignore]` |
