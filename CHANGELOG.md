@@ -49,6 +49,13 @@
 - A processor panic no longer kills the app in a release build.
 - Sidecar stderr and stdout drains are bounded and joined.
 
+## [1.3.2](https://github.com/initgrep-apps/yard/compare/v1.3.1...v1.3.2) (2026-11-08)
+
+
+### Bug Fixes
+
+* **kanban:** keep the sidebar inset shrinkable ([#246](https://github.com/initgrep-apps/yard/issues/246)) ([34a3b4a](https://github.com/initgrep-apps/yard/commit/34a3b4a27d87aaf65e688453c3d55a72942688ce))
+
 ## [1.3.1](https://github.com/initgrep-apps/yard/compare/v1.3.0...v1.3.1) (2026-11-08)
 
 
