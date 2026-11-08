@@ -207,8 +207,8 @@ The package gate proves engines start and run from the built package. It does no
 - Create and reveal the output folder. Confirm no original was modified.
 - Open History: session and file records, filters, sort, pagination, detail changes/consent source, clear history.
 - Trigger an error with an unsupported or corrupt file and confirm the message is actionable.
-- Kanban: horizontal wheel/trackpad panning, thin scrollbar, drag ghost (item and lane), lane grip visibility, pinned-card focus, live compressing re-pin.
-- Window: drag surface, minimize/maximize/close, theme toggle, single-instance focus, window-state restore.
+- Kanban: horizontal scrollbar/trackpad panning, thin scrollbar, drag ghost (item and lane), lane grip visibility, pinned-card focus, live compressing re-pin.
+- Window: drag surface, minimize/maximize/close, theme toggle, single-instance focus, logical window geometry restore.
 - History table: trackpad scroll feel, sticky header, reveal actions.
 
 **Update checks.** Use a published test patch — never the draft under acceptance, which installed apps cannot see — and update from the previous installed version.

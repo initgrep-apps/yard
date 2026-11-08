@@ -16,12 +16,10 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
-import { KeyboardSensor, PointerSensor, useSensor, useSensors } from '@dnd-kit/core'
 import { File, FileQuestion, FileText, Film, GripVerticalIcon, Image, type LucideIcon } from 'lucide-react'
 import { RunCard } from '@/components/run/RunCard'
 import { Button } from '@/components/ui/button'
 import { Kanban, KanbanBoard, KanbanColumn, KanbanColumnContent, KanbanColumnHandle, KanbanOverlay } from '@/components/ui/kanban'
-import { laneKeyboardCoordinates } from '@/lib/boardKeyboard'
 import { dragAxisModifiers } from '@/lib/boardModifiers'
 import { applyCardMove, applyLaneOrder, derivedColumns, initialBoardState, syncBoardState, type BoardState } from '@/lib/boardState'
 import { LANE_ORDER, laneDonePill, type StatusFilter } from '@/lib/grouping'
@@ -156,7 +154,6 @@ export function RunBoard({
   )
   const boardRef = useRef<HTMLDivElement | null>(null)
   const [laneHeight, setLaneHeight] = useState(0)
-  const columnKeysRef = useRef<string[]>([])
 
   useEffect(() => {
     const next = syncBoardState(stateRef.current, rosterRef.current)
@@ -167,21 +164,7 @@ export function RunBoard({
   const columns = useMemo(() => Object.fromEntries(columnsList.map((c) => [c.category, c.files])), [columnsList])
   const hasLanes = columnsList.length !== 0
 
-  columnKeysRef.current = columnsList.map((column) => column.category)
-
-  const laneCoordinateGetter = useMemo(
-    () =>
-      laneKeyboardCoordinates(
-        (id) => columnKeysRef.current.includes(String(id)),
-        () => columnKeysRef.current
-      ),
-    []
-  )
-  const modifiers = useMemo(() => dragAxisModifiers((id) => columnKeysRef.current.includes(String(id))), [])
-  const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 10 } }),
-    useSensor(KeyboardSensor, { coordinateGetter: laneCoordinateGetter })
-  )
+  const modifiers = useMemo(() => dragAxisModifiers((id) => columnsList.some((c) => c.category === id)), [columnsList])
 
   useEffect(() => {
     const wrapper = boardRef.current
@@ -197,7 +180,6 @@ export function RunBoard({
     <Kanban
       value={columns}
       className="h-full min-h-0"
-      sensors={sensors}
       modifiers={modifiers}
       onValueChange={(value) => setState((prev) => applyLaneOrder(prev, Object.keys(value)))}
       getItemValue={(file) => file.id}
@@ -236,17 +218,11 @@ export function RunBoard({
         <div
           ref={boardRef}
           data-testid="kanban-board"
-          className="h-full overflow-y-auto select-none pb-3 pr-6"
-          onWheel={(event) => {
-            if ((event.target as HTMLElement).closest('[data-lane-scroll]')) return
-            if (Math.abs(event.deltaY) > Math.abs(event.deltaX)) {
-              event.currentTarget.scrollLeft += event.deltaY
-            }
-          }}
+          className="h-full overflow-x-auto select-none pb-3 pr-6"
         >
           <KanbanBoard
-            className="h-full min-w-full gap-3 auto-rows-fr"
-            style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(13rem, 1fr))' }}
+            className="h-full w-max min-w-full gap-3 auto-rows-fr"
+            style={{ gridTemplateColumns: `repeat(${columnsList.length}, 16rem)` }}
           >
             {columnsList.map((column) => (
               <LaneView

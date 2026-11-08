@@ -30,8 +30,6 @@ import type {
   DragStartEvent,
   DropAnimation,
   Modifiers,
-  SensorDescriptor,
-  SensorOptions,
   UniqueIdentifier,
   DraggableAttributes,
   DraggableSyntheticListeners
@@ -40,7 +38,6 @@ import type {
 import {
   DndContext,
   DragOverlay,
-  KeyboardSensor,
   MeasuringStrategy,
   PointerSensor,
   useSensor,
@@ -53,7 +50,6 @@ import {
   defaultAnimateLayoutChanges,
   rectSortingStrategy,
   SortableContext,
-  sortableKeyboardCoordinates,
   useSortable,
   verticalListSortingStrategy,
   type AnimateLayoutChanges
@@ -141,7 +137,6 @@ export interface KanbanRootProps<T> extends Omit<useRender.ComponentProps<'div'>
   children: ReactNode
   onMove?: (event: KanbanMoveEvent) => void
   modifiers?: Modifiers
-  sensors?: SensorDescriptor<SensorOptions>[]
 }
 
 function Kanban<T>({
@@ -153,7 +148,6 @@ function Kanban<T>({
   render,
   onMove,
   modifiers,
-  sensors: externalSensors,
   ...props
 }: KanbanRootProps<T>) {
   const columns = value
@@ -175,12 +169,9 @@ function Kanban<T>({
   onMoveRef.current = onMove
 
   // Sensor config objects are stable module-level constants, so useSensors result is stable.
-  const internalSensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: pointerActivationConstraint }),
-    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: pointerActivationConstraint })
   )
-
-  const sensors = externalSensors ?? internalSensors
 
   const columnIds = useMemo(() => Object.keys(columns), [columns])
 

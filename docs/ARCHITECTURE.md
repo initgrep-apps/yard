@@ -141,7 +141,7 @@ flowchart TD
 
 `FileStatus` is `pending`, `compressing`, `done`, `best_effort`, `failed`, `cancelled`, `unsupported`, `already_under_target`, `needs_permission`. The TypeScript union in `src/types.ts` is checked against the Rust enum by a file-reading test. `HistoryFilters` carries `sort` (`newest` default, `oldest`); sorting happens before pagination.
 
-**Window and theme.** macOS overlay title bar; Windows frameless; Linux native but unpackaged. `window-state` restores size/position/maximize/visible/fullscreen; `single-instance` focuses the existing window (ADR 0007). Theme follows `localStorage["yard-theme"]`, then OS preference, and syncs the native theme.
+**Window and theme.** macOS overlay title bar; Windows frameless; Linux native but unpackaged. `window-state` restores maximize, visible and fullscreen; the app persists logical size and position in `window-geometry.json` because physical `window-state` values shrink or jump across mixed-DPI monitors. `single-instance` focuses the existing window (ADR 0007). Theme follows `localStorage["yard-theme"]`, then OS preference, and syncs the native theme.
 
 **Capabilities and CSP.** Plugin defaults, `os:default`, `updater:default`, `process:default`, `window-state:default`, and the window controls; custom commands need no entry. CSP: `script-src 'self'`, `style-src 'unsafe-inline'` for Tailwind.
 
