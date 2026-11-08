@@ -2,7 +2,7 @@
 
 ## 1. What it is
 
-Yard is an offline desktop app that compresses batches of files toward per-category size limits. The user stages files, presses Compress, and bundled command-line engines run over them. Originals are never modified; results are written as copies to a separate output folder. No network, accounts, or telemetry.
+Yard is an offline desktop app that compresses batches of files toward per-category size limits. The user stages files, presses Compress, and bundled command-line engines run over them. Originals are never modified; results are written as copies to a separate output folder. No accounts or telemetry; the only network requests are a user-initiated update check and download (ADR 0015).
 
 - Platforms: macOS (arm64, Intel) and Windows (x64, arm64). Linux builds from source but is not packaged; its chrome is unverified.
 - License: GPLv3. Engines keep their own licenses: FFmpeg GPLv2+, Ghostscript AGPLv3, libvips LGPLv3, qpdf Apache-2.0.
@@ -16,7 +16,7 @@ Yard is an offline desktop app that compresses batches of files toward per-categ
 | Frontend | React 19.3 + TypeScript 7.0 + Vite 8.3 (Rolldown) |
 | UI | shadcn/ui 4.23 on Base UI, Tailwind CSS 4.3, sonner |
 | Rust | Tokio, tokio-util, serde, uuid, dirs, sysinfo, `zip` 9 (deflate only) |
-| Tauri plugins | opener, dialog, store, os, window-state, single-instance |
+| Tauri plugins | opener, dialog, store, os, window-state, single-instance, updater (native-tls), process |
 | Engines | vips 8.18.7, ffmpeg/ffprobe 9.0.2, qpdf 12.4.2, gs 10.08.0. Intel macOS is pinned to vips 8.18.6 / gs 10.07.1 (ADR 0001) |
 
 Release profile: `lto`, `codegen-units=1`, `opt-level=3`, `panic=unwind`, `strip`.
@@ -31,8 +31,10 @@ flowchart TB
         HV["HistoryView"]
         CP["CompressionProvider"]
         HP["HistoryProvider"]
+        UP["UpdateProvider"]
         SHELL --> CV
         SHELL --> HV
+        SHELL --> UP
         CV --> CP
         HV --> HP
     end
@@ -47,6 +49,7 @@ flowchart TB
         PROC["processors/"]
         REG["registry.rs"]
         IO["output · temp · history · settings · sidecar"]
+        UPD["updater · process plugins"]
     end
 
     subgraph DISK["Disk"]
@@ -63,7 +66,13 @@ flowchart TB
         GS[gs]
     end
 
+    subgraph NET["Network — only when the user asks"]
+        GH["GitHub Releases<br/>latest.json + signed artifact"]
+    end
+
     FE -- "IPC invoke" --> CMD
+    UP -- "plugin IPC" --> UPD
+    UPD -- "HTTPS check/download" --> GH
     CMD --> Q
     Q --> SCH
     SCH --> ENG
@@ -109,7 +118,7 @@ flowchart TD
 
 ## 5. Frontend
 
-`PlatformProvider → CompressionProvider → QuitGuard / HistoryProvider → SidebarProvider → Sidebar + SidebarInset + dialogs`
+`PlatformProvider → CompressionProvider → QuitGuard / UpdateProvider → HistoryProvider → SidebarProvider → Sidebar + SidebarInset + dialogs`
 
 - **Shell.** `main.tsx` applies the stored or OS theme before the first render, detects the platform through `plugin-os`, then mounts `ErrorBoundary → PlatformProvider → App`. `Shell` owns `activeView` (`compress` | `history`) and dialog state. One view is mounted at a time; there is no router.
 - **Views.** Compress has two screens: staging (drop zone + file list + summary footer) and run (header + kanban board, one lane per category). History is a detail pane for the batch selected in the sidebar. Settings and About are dialogs. Settings auto-save after a 400 ms debounce and flush on close.
@@ -123,6 +132,7 @@ flowchart TD
 | history expanded, selected batch, filters/sort/page/search/data | `HistoryProvider` over `useHistory` |
 | `files`, list error | `useFileList` — every mutation calls Rust first |
 | run screen, batch number, roster, outcome, progress | `CompressionProvider` + `useCompression` |
+| update state, About surface open | `UpdateProvider` — survives dialog close |
 | platform; theme; settings draft | `PlatformProvider`; `useTheme`; `SettingsDialog` + `useSettings` |
 
 **IPC commands:** `add_files`, `remove_file`, `clear_list`, `get_settings`, `save_settings`, `reset_settings`, `compress_all`, `answer_consent`, `cancel_file`, `cancel_all`, `reveal_in_folder`, `get_history`, `clear_history`, `open_folder`, `memory_stats`, `quit`.
@@ -133,7 +143,7 @@ flowchart TD
 
 **Window and theme.** macOS overlay title bar; Windows frameless; Linux native but unpackaged. `window-state` restores size/position/maximize/visible/fullscreen; `single-instance` focuses the existing window (ADR 0007). Theme follows `localStorage["yard-theme"]`, then OS preference, and syncs the native theme.
 
-**Capabilities and CSP.** Plugin defaults, `os:default`, `window-state:default`, and the window controls; custom commands need no entry. CSP: `script-src 'self'`, `style-src 'unsafe-inline'` for Tailwind.
+**Capabilities and CSP.** Plugin defaults, `os:default`, `updater:default`, `process:default`, `window-state:default`, and the window controls; custom commands need no entry. CSP: `script-src 'self'`, `style-src 'unsafe-inline'` for Tailwind.
 
 ## 6. Rust core
 
@@ -203,5 +213,18 @@ History queries parse the whole retained file per call (ADR 0005); a session is 
 - **Release guard.** Every release row runs `package-gate.mjs`, which opens the built package and runs each engine once. The gate exists because alpha.1 shipped engines that could not start.
 - **Workflows.** `ci.yml` (2-row PR gate), `freeze.yml`, `release.yml` (4 native rows), `release-please.yml`. Runbooks and failure handling: `docs/cicd-process.md`.
 - Measured macOS arm64 package: ~214 MiB with engines and dylibs.
+
+## 12. Updates
+
+The app ships `tauri-plugin-updater` and `tauri-plugin-process`. There is no background check and no automatic download: `UpdateProvider` (`src/providers/UpdateProvider.tsx`) contacts GitHub only when the user presses **Check for updates** in About. Dev builds disable the button.
+
+- **Manifest.** `plugins.updater.endpoints` points at `https://github.com/initgrep-apps/yard/releases/latest/download/latest.json`, which only resolves for a published, non-prerelease release. `requireSignedVersion` is `true`, so a newer announced version cannot be paired with an older signed artifact. `bundle.createUpdaterArtifacts` makes the release pipeline build the signed artifact and `.sig`.
+- **Signature.** The artifact is signed with the operator's Tauri updater key; only the public key is committed (`plugins.updater.pubkey`). This signature is independent of OS code signing (ADR 0002): macOS stays ad-hoc signed and Windows unsigned. The private key and password are the recovery boundary — losing either stops updates for every existing install, and the key cannot be rotated without a manual reinstall.
+- **TLS.** The plugin builds with `native-tls` and the OS trust store instead of vendored OpenSSL, which keeps the `aarch64-pc-windows-msvc` cross-compile check free of an OpenSSL build.
+- **State.** `idle → checking → current | available | error`; `available → downloading → ready | installing`; an error retries the failed stage. State lives in the provider, so closing About does not cancel a download. Check times out at 15 s, download at 600 s.
+- **Surfaces.** About shows the version row, inline state and update card. A top-right toast mirrors downloading, ready, installing and error states only while About is closed; opening About dismisses it.
+- **Download and install are split.** A download may run during a batch. If it finishes while `isCompressing` is true, the state becomes `ready` and install waits; **Restart app** stays disabled until the batch ends. On macOS install is followed by `relaunch()`; on Windows `install()` exits and the installer restarts the app.
+- **Network boundary.** The only requests are the manifest fetch and the artifact download the user started. No file data, telemetry, or account information leaves the machine; compression never touches the network.
+- **Release visibility.** `latest.json` and its `.sig` assets are uploaded to a draft, so updates appear only after an operator publishes (ADR 0015). Existing 1.1.0 installs have no updater and need one manual install.
 
 **Related docs:** `README.md`, `docs/FEATURES.md`, `docs/adr/`, `docs/cicd-process.md`, `docs/bugs.md`, `GLOSSARY.md`.

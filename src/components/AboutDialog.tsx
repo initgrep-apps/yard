@@ -15,7 +15,6 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import { useEffect, useState } from "react"
-import { version } from "../../package.json"
 import thirdPartyNotices from "../../THIRD_PARTY_LICENSES.md?raw"
 import { Button } from "@/components/ui/button"
 import {
@@ -25,6 +24,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { Separator } from "@/components/ui/separator"
+import { UpdateSection } from "@/components/update/UpdateSection"
 
 const LICENSE_ROWS = [
   { name: "Yard", license: "GPL-3.0" },
@@ -62,8 +63,9 @@ export function AboutDialog({ open, onOpenChange }: AboutDialogProps) {
           <p className="text-muted-foreground text-sm">
             Offline file compression tool
           </p>
-          <p className="text-muted-foreground text-xs">{version}</p>
+          <UpdateSection />
         </div>
+        <Separator />
         <ul className="flex flex-col gap-2 text-sm">
           {LICENSE_ROWS.map((row) => (
             <li

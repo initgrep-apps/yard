@@ -1,8 +1,10 @@
 # Security policy
 
-Yard runs entirely offline and does not send file contents or telemetry anywhere.
-The main risks are in the bundled compression engines and the release supply chain,
-so reports about either are welcome.
+Yard processes files locally and sends no file contents or telemetry anywhere.
+The only network requests are the update check and download the user starts from
+**About**, over HTTPS to GitHub Releases. The main risks are in the bundled
+compression engines and the release supply chain, so reports about either are
+welcome.
 
 ## Supported versions
 
@@ -67,3 +69,23 @@ Release assets are built on native GitHub-hosted runners after the full test
 suite and package-content gate pass. Each installer has a SHA-256 checksum on
 the release page, alongside an SBOM and third-party notices. Builds are not
 code-signed or notarized yet; verify checksums before installing.
+
+In-app updates carry a second, independent check. Artifacts are signed with the
+project's Tauri updater key, and the `latest.json` manifest carries each
+artifact's signature. The app verifies the signature before installing and
+refuses an artifact whose announced version differs from the signed version
+(`requireSignedVersion`), which blocks a crafted response that pairs a newer
+version with an older signed build. This signature proves the artifact came from
+the release pipeline; it is separate from OS code signing, so it does not make
+Gatekeeper or SmartScreen trust the download.
+
+The updater private key and its password are operator-owned and backed up
+offline. Losing either permanently stops updates for every existing install,
+because the key cannot be rotated without a manual reinstall. A leaked key alone
+does not let an attacker install anything: release upload permission is also
+required.
+
+`latest.json` and the `.sig` assets are uploaded to a draft release. Drafts and
+prereleases are invisible to `releases/latest`, so an update becomes reachable
+only after an operator publishes. Existing 1.1.0 installs have no updater, so the
+first updater-enabled release must be installed manually.

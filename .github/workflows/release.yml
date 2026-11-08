@@ -46,6 +46,11 @@ jobs:
           set -euo pipefail
           node scripts/ci/release-version-check.mjs
         shell: bash
+      - name: updater signing preflight
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: node scripts/ci/updater-preflight.mjs --require-secret
+        shell: bash
       - name: sidecars-availability preflight
         env:
           GH_TOKEN: ${{ github.token }}
@@ -205,9 +210,13 @@ jobs:
         uses: tauri-apps/tauri-action@47f975c5a8b758c5e9ef77a7f7c5fe2d7229a469
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           releaseId: ${{ needs.gate.outputs.release_id }}
           releaseDraft: true
+          retryAttempts: 3
+          updaterJsonPreferNsis: true
           args: --target ${{ matrix.triple }}
       - name: upload stable download alias + checksum (${{ matrix.triple }})
         env:
@@ -313,4 +322,37 @@ jobs:
             exit 1
           fi
           echo "sbom upload verified: $n/2 sbom assets on $RELEASE_TAG"
+        shell: bash
+
+  verify-updater:
+    name: verify updater manifest
+    needs: [gate, release]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    timeout-minutes: 10
+    steps:
+      - name: checkout (v7.0.1)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: download draft manifest, signatures, and assets
+        env:
+          RELEASE_TAG: ${{ needs.gate.outputs.release_tag }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |-
+          set -euo pipefail
+          mkdir -p updater/sigs
+          gh release download "$RELEASE_TAG" --pattern latest.json --dir updater
+          gh release download "$RELEASE_TAG" --pattern '*.sig' --dir updater/sigs
+          gh release view "$RELEASE_TAG" --json assets > updater/assets.json
+        shell: bash
+      - name: verify manifest
+        env:
+          APP_VERSION: ${{ needs.gate.outputs.app_version }}
+        run: >-
+          node scripts/ci/verify-updater-manifest.mjs
+          --version "$APP_VERSION"
+          --manifest updater/latest.json
+          --assets updater/assets.json
+          --sigs-dir updater/sigs
         shell: bash

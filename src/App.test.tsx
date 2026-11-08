@@ -39,9 +39,17 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
   confirm: vi.fn(),
 }))
 vi.mock("sonner", () => ({
-  toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() },
+  toast: {
+    success: vi.fn(),
+    error: vi.fn(),
+    info: vi.fn(),
+    custom: vi.fn(),
+    dismiss: vi.fn(),
+  },
   Toaster: () => null,
 }))
+vi.mock("@tauri-apps/plugin-updater", () => ({ check: vi.fn() }))
+vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: vi.fn() }))
 vi.mock("@/providers/HistoryProvider", async (importOriginal) => {
   const actual =
     await importOriginal<typeof import("@/providers/HistoryProvider")>()
@@ -73,6 +81,7 @@ import { PlatformProvider } from "@/providers/PlatformProvider"
 import { batchLabel } from "@/lib/historyFormat"
 import { mockWindow } from "@/lib/test-tauri"
 import type { Platform } from "@/lib/platform"
+import { check } from "@tauri-apps/plugin-updater"
 import type {
   FileEntry,
   HistoryResponse,
@@ -737,6 +746,22 @@ describe("App shell", () => {
     expect(
       within(dialog).getByRole("heading", { name: "Yard" }),
     ).toBeInTheDocument()
+  })
+
+  it("shows the update check in About without checking on mount", async () => {
+    const user = userEvent.setup()
+    renderApp("darwin")
+
+    expect(vi.mocked(check)).not.toHaveBeenCalled()
+
+    await user.click(within(topBar()).getByRole("button", { name: "App menu" }))
+    await user.click(await screen.findByRole("menuitem", { name: "About" }))
+
+    const dialog = await screen.findByRole("dialog")
+    expect(
+      within(dialog).getByRole("button", { name: "Check for updates" }),
+    ).toBeInTheDocument()
+    expect(vi.mocked(check)).not.toHaveBeenCalled()
   })
 
   it("closes and reopens Settings with Escape", async () => {

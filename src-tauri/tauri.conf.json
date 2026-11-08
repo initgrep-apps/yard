@@ -34,6 +34,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "resources": {
       "gs-resources/": "gs-resources/"
     },
@@ -128,5 +129,17 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDRCQjcyOURFQ0QwQ0Y3RTEKUldUaDl3ek4zaW0zU3d3UUswL3V5cFNxVlhDZm9YSi9IdlFaT0dvck5NcHlhaHdXdE1VVW1TKzkK",
+      "endpoints": [
+        "https://github.com/initgrep-apps/yard/releases/latest/download/latest.json"
+      ],
+      "requireSignedVersion": true,
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }
