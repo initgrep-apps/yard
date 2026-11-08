@@ -35,6 +35,7 @@ import { QuitGuard } from "@/components/shell/QuitGuard"
 import { TopBar } from "@/components/shell/TopBar"
 import { CompressionProvider } from "@/providers/CompressionProvider"
 import { HistoryProvider, useHistoryContext } from "@/providers/HistoryProvider"
+import { UpdateProvider, useUpdate } from "@/providers/UpdateProvider"
 import { CompressView } from "@/views/CompressView"
 import { HistoryView } from "@/views/HistoryView"
 import type { ViewId } from "@/types"
@@ -61,9 +62,14 @@ function Shell() {
   const [dialog, setDialog] = useState<DialogId | null>(null)
   const [filterOpen, setFilterOpen] = useState(false)
   const { filters, setFilters } = useHistoryContext()
+  const { setSurfaceOpen } = useUpdate()
   const { isMobile, open, openMobile } = useSidebar()
   const visible = isMobile ? openMobile : open
   const View = VIEWS[activeView]
+
+  useEffect(() => {
+    setSurfaceOpen(dialog === "about")
+  }, [dialog, setSurfaceOpen])
 
   useEffect(() => {
     if (!visible) setFilterOpen(false)
@@ -110,7 +116,7 @@ function Shell() {
           <View />
         </div>
       </SidebarInset>
-      <Toaster />
+      <Toaster offset={{ top: 56, bottom: 16, left: 16, right: 16 }} />
       <SettingsDialog
         open={dialog === "settings"}
         onOpenChange={setDialogOpen("settings")}
@@ -142,7 +148,9 @@ function App() {
     <CompressionProvider>
       <QuitGuard />
       <HistoryProvider>
-        <ShellFrame />
+        <UpdateProvider>
+          <ShellFrame />
+        </UpdateProvider>
       </HistoryProvider>
     </CompressionProvider>
   )

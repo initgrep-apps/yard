@@ -14,13 +14,17 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-import { useState } from "react"
+import { useState, type ReactElement, type ReactNode } from "react"
 import { render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { version } from "../../package.json"
 import thirdPartyNotices from "../../THIRD_PARTY_LICENSES.md?raw"
 import { AboutDialog } from "@/components/AboutDialog"
+import {
+  UpdateContext,
+  type UpdateContextValue,
+} from "@/providers/UpdateProvider"
 
 const LICENSE_ROWS = [
   ["Yard", "GPL-3.0"],
@@ -33,6 +37,28 @@ const LICENSE_ROWS = [
 afterEach(() => {
   vi.restoreAllMocks()
 })
+
+const updateValue: UpdateContextValue = {
+  state: { status: "idle" },
+  canCheck: true,
+  isCompressing: false,
+  check: vi.fn(),
+  startDownload: vi.fn(),
+  install: vi.fn(),
+  decline: vi.fn(),
+  retry: vi.fn(),
+  setSurfaceOpen: vi.fn(),
+}
+
+function UpdateWrapper({ children }: { children: ReactNode }) {
+  return (
+    <UpdateContext.Provider value={updateValue}>{children}</UpdateContext.Provider>
+  )
+}
+
+function renderAbout(ui: ReactElement) {
+  return render(ui, { wrapper: UpdateWrapper })
+}
 
 function ControlledDialog() {
   const [open, setOpen] = useState(true)
@@ -47,21 +73,29 @@ function ControlledDialog() {
 
 describe("AboutDialog", () => {
   it("shows the app identity and the package version", () => {
-    render(<AboutDialog open onOpenChange={vi.fn()} />)
+    renderAbout(<AboutDialog open onOpenChange={vi.fn()} />)
 
     expect(screen.getByRole("heading", { name: "Yard" })).toBeInTheDocument()
     expect(screen.getByText("Offline file compression tool")).toBeInTheDocument()
-    expect(screen.getByText(version)).toBeInTheDocument()
+    expect(screen.getByText(`Version ${version}`)).toBeInTheDocument()
+  })
+
+  it("shows the update check in About", () => {
+    renderAbout(<AboutDialog open onOpenChange={vi.fn()} />)
+
+    expect(
+      screen.getByRole("button", { name: "Check for updates" }),
+    ).toBeInTheDocument()
   })
 
   it("shows the official app icon", () => {
-    render(<AboutDialog open onOpenChange={vi.fn()} />)
+    renderAbout(<AboutDialog open onOpenChange={vi.fn()} />)
 
     expect(screen.getByTestId("app-icon")).toHaveAttribute("src", "/favicon.png")
   })
 
   it("lists the five license rows as name and license pairs", () => {
-    render(<AboutDialog open onOpenChange={vi.fn()} />)
+    renderAbout(<AboutDialog open onOpenChange={vi.fn()} />)
 
     const dialog = screen.getByRole("dialog")
     const rows = within(dialog).getAllByRole("listitem")
@@ -75,7 +109,7 @@ describe("AboutDialog", () => {
 
   it("expands the bundled notices verbatim without a network request", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch")
-    render(<AboutDialog open onOpenChange={vi.fn()} />)
+    renderAbout(<AboutDialog open onOpenChange={vi.fn()} />)
     const user = userEvent.setup()
 
     expect(thirdPartyNotices.length).toBeGreaterThan(0)
@@ -90,7 +124,7 @@ describe("AboutDialog", () => {
   })
 
   it("keeps the expanded notices from stretching the dialog", async () => {
-    render(<AboutDialog open onOpenChange={vi.fn()} />)
+    renderAbout(<AboutDialog open onOpenChange={vi.fn()} />)
     const user = userEvent.setup()
 
     await user.click(screen.getByRole("button", { name: /Third-party notices/ }))
@@ -107,7 +141,7 @@ describe("AboutDialog", () => {
   })
 
   it("ties the rendered license rows to the generated notices", () => {
-    render(<AboutDialog open onOpenChange={vi.fn()} />)
+    renderAbout(<AboutDialog open onOpenChange={vi.fn()} />)
 
     const rows = within(screen.getByRole("dialog")).getAllByRole("listitem")
     const licenses = rows
@@ -130,7 +164,7 @@ describe("AboutDialog", () => {
   })
 
   it("collapses the notices when the toggle is clicked again", async () => {
-    render(<AboutDialog open onOpenChange={vi.fn()} />)
+    renderAbout(<AboutDialog open onOpenChange={vi.fn()} />)
     const user = userEvent.setup()
     const toggle = screen.getByRole("button", { name: /Third-party notices/ })
 
@@ -151,7 +185,7 @@ describe("AboutDialog", () => {
   })
 
   it("resets the notices when the parent closes and reopens the dialog", async () => {
-    const { rerender } = render(
+    const { rerender } = renderAbout(
       <AboutDialog open onOpenChange={vi.fn()} />,
     )
     const user = userEvent.setup()
@@ -167,7 +201,7 @@ describe("AboutDialog", () => {
 
   it("requests a close from the close button", async () => {
     const onOpenChange = vi.fn()
-    render(<AboutDialog open onOpenChange={onOpenChange} />)
+    renderAbout(<AboutDialog open onOpenChange={onOpenChange} />)
     const user = userEvent.setup()
 
     await user.click(screen.getByRole("button", { name: "Close" }))
@@ -178,7 +212,7 @@ describe("AboutDialog", () => {
 
   it("requests a close on Escape", async () => {
     const onOpenChange = vi.fn()
-    render(<AboutDialog open onOpenChange={onOpenChange} />)
+    renderAbout(<AboutDialog open onOpenChange={onOpenChange} />)
     const user = userEvent.setup()
 
     await user.keyboard("{Escape}")
@@ -188,7 +222,7 @@ describe("AboutDialog", () => {
   })
 
   it("renders no dialog while closed", () => {
-    render(<AboutDialog open={false} onOpenChange={vi.fn()} />)
+    renderAbout(<AboutDialog open={false} onOpenChange={vi.fn()} />)
 
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
     expect(
@@ -197,7 +231,7 @@ describe("AboutDialog", () => {
   })
 
   it("starts with the notices collapsed when reopened", async () => {
-    render(<ControlledDialog />)
+    renderAbout(<ControlledDialog />)
     const user = userEvent.setup()
 
     await user.click(screen.getByRole("button", { name: /Third-party notices/ }))
