@@ -18,6 +18,7 @@ import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -29,6 +30,8 @@ import {
   type Update,
 } from "@tauri-apps/plugin-updater"
 import { relaunch } from "@tauri-apps/plugin-process"
+import { toast } from "sonner"
+import { UpdateToast } from "@/components/update/UpdateToast"
 import { useCompressionContext } from "@/providers/CompressionProvider"
 import { usePlatform } from "@/providers/PlatformProvider"
 
@@ -39,6 +42,15 @@ const INSTALL_ERROR =
   "The update couldn't be installed. Try again, or download the latest installer from GitHub."
 const INSTALL_PATH_ERROR =
   "The app couldn't be replaced. Move it to Applications, then try again."
+
+const PROGRESS_TOAST_ID = "updater-progress"
+const ERROR_TOAST_ID = "updater-error"
+const TOAST_THROTTLE_MS = 250
+
+function downloadPercent(downloaded: number, total: number | null): number | null {
+  if (total === null || total <= 0) return null
+  return Math.min(100, Math.round((downloaded / total) * 100))
+}
 
 export type UpdateState =
   | { status: "idle" }
@@ -82,20 +94,24 @@ export function UpdateProvider({ children }: { children: ReactNode }) {
   const platform = usePlatform()
 
   const [state, setState] = useState<UpdateState>({ status: "idle" })
+  const [surfaceOpen, setSurfaceOpenState] = useState(false)
 
   const updateRef = useRef<Update | null>(null)
   const stateRef = useRef(state)
   stateRef.current = state
   const isCompressingRef = useRef(isCompressing)
   isCompressingRef.current = isCompressing
-  const surfaceOpenRef = useRef(false)
 
   const setSurfaceOpen = useCallback((open: boolean) => {
-    surfaceOpenRef.current = open
+    setSurfaceOpenState(open)
   }, [])
 
   const installUpdate = useCallback(
     async (update: Update) => {
+      if (isCompressingRef.current) {
+        setState({ status: "ready", update })
+        return
+      }
       setState({ status: "installing", update })
       try {
         await update.install()
@@ -134,11 +150,7 @@ export function UpdateProvider({ children }: { children: ReactNode }) {
           },
           { timeout: 600_000 },
         )
-        if (isCompressingRef.current) {
-          setState({ status: "ready", update })
-        } else {
-          await installUpdate(update)
-        }
+        await installUpdate(update)
       } catch {
         setState({ status: "error", stage: "download", message: DOWNLOAD_ERROR, update })
       }
@@ -183,7 +195,6 @@ export function UpdateProvider({ children }: { children: ReactNode }) {
   const install = useCallback(async () => {
     const s = stateRef.current
     if (s.status !== "ready") return
-    if (isCompressingRef.current) return
     await installUpdate(s.update)
   }, [installUpdate])
 
@@ -207,6 +218,73 @@ export function UpdateProvider({ children }: { children: ReactNode }) {
       await installUpdate(s.update)
     }
   }, [checkUpdate, downloadUpdate, installUpdate])
+
+  const lastToastStatusRef = useRef<UpdateState["status"] | null>(null)
+  const lastToastAtRef = useRef(0)
+  const throttleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    const renderProgress = () => {
+      const s = stateRef.current
+      if (s.status !== "downloading" && s.status !== "ready" && s.status !== "installing") {
+        return
+      }
+      toast.custom(
+        () => (
+          <UpdateToast
+            status={s.status}
+            version={s.update.version}
+            percent={s.status === "downloading" ? downloadPercent(s.downloaded, s.total) : null}
+            downloaded={s.status === "downloading" ? s.downloaded : 0}
+            total={s.status === "downloading" ? s.total : null}
+          />
+        ),
+        { id: PROGRESS_TOAST_ID, position: "top-right", duration: Infinity },
+      )
+    }
+
+    if (surfaceOpen) {
+      lastToastStatusRef.current = null
+      toast.dismiss(PROGRESS_TOAST_ID)
+      toast.dismiss(ERROR_TOAST_ID)
+    } else if (state.status === "error") {
+      lastToastStatusRef.current = state.status
+      toast.dismiss(PROGRESS_TOAST_ID)
+      toast.error("Update failed", {
+        id: ERROR_TOAST_ID,
+        description: state.message,
+        action: { label: "Retry", onClick: () => void retry() },
+      })
+    } else {
+      toast.dismiss(ERROR_TOAST_ID)
+
+      const status = state.status
+      if (status !== "downloading" && status !== "ready" && status !== "installing") {
+        lastToastStatusRef.current = status
+        toast.dismiss(PROGRESS_TOAST_ID)
+      } else {
+        const elapsed = Date.now() - lastToastAtRef.current
+        if (lastToastStatusRef.current !== status || elapsed >= TOAST_THROTTLE_MS) {
+          lastToastStatusRef.current = status
+          lastToastAtRef.current = Date.now()
+          renderProgress()
+        } else {
+          throttleTimerRef.current = setTimeout(() => {
+            throttleTimerRef.current = null
+            lastToastAtRef.current = Date.now()
+            renderProgress()
+          }, TOAST_THROTTLE_MS - elapsed)
+        }
+      }
+    }
+
+    return () => {
+      if (throttleTimerRef.current !== null) {
+        clearTimeout(throttleTimerRef.current)
+        throttleTimerRef.current = null
+      }
+    }
+  }, [state, surfaceOpen, retry])
 
   const value = useMemo<UpdateContextValue>(
     () => ({

@@ -24,10 +24,14 @@ vi.mock("@tauri-apps/plugin-updater", () => ({
 vi.mock("@tauri-apps/plugin-process", () => ({
   relaunch: vi.fn(),
 }))
+vi.mock("sonner", () => ({
+  toast: { custom: vi.fn(), dismiss: vi.fn(), error: vi.fn() },
+}))
 
 import { check } from "@tauri-apps/plugin-updater"
 import { relaunch } from "@tauri-apps/plugin-process"
 import type { Update, DownloadEvent } from "@tauri-apps/plugin-updater"
+import { toast } from "sonner"
 
 const checkMock = vi.mocked(check)
 const relaunchMock = vi.mocked(relaunch)
@@ -56,8 +60,23 @@ function fakeUpdate(version = "1.2.0"): Update {
   } as unknown as Update
 }
 
+function stalledUpdate(events: Array<"Started" | "Progress">): Update {
+  const update = fakeUpdate()
+  update.download = vi.fn(async (onEvent: (event: DownloadEvent) => void) => {
+    for (const event of events) {
+      if (event === "Started") {
+        onEvent({ event, data: { contentLength: 100 } })
+      } else {
+        onEvent({ event, data: { chunkLength: 40 } })
+      }
+    }
+    await new Promise<void>(() => {})
+  })
+  return update
+}
+
 function Probe() {
-  const { state, check, startDownload, install, decline, retry } = useUpdate()
+  const { state, check, startDownload, install, decline, retry, setSurfaceOpen } = useUpdate()
   const version = "update" in state && state.update ? state.update.version : null
   return (
     <div>
@@ -85,6 +104,12 @@ function Probe() {
       </button>
       <button type="button" onClick={retry}>
         retry
+      </button>
+      <button type="button" onClick={() => setSurfaceOpen(true)}>
+        open surface
+      </button>
+      <button type="button" onClick={() => setSurfaceOpen(false)}>
+        close surface
       </button>
     </div>
   )
@@ -294,5 +319,96 @@ describe("UpdateProvider", () => {
     await user.click(screen.getByRole("button", { name: "retry" }))
     await waitFor(() => expect(update.install).toHaveBeenCalledTimes(2))
     expect(relaunchMock).toHaveBeenCalled()
+  })
+
+  it("shows a background progress toast while downloading", async () => {
+    const user = userEvent.setup()
+    const update = stalledUpdate(["Started", "Progress"])
+    checkMock.mockResolvedValue(update)
+    render(<Harness />)
+    await user.click(screen.getByRole("button", { name: "check" }))
+    await user.click(await screen.findByRole("button", { name: "download" }))
+    expect(await screen.findByTestId("progress")).toHaveTextContent("40")
+    await waitFor(() =>
+      expect(toast.custom).toHaveBeenCalledWith(expect.any(Function), {
+        id: "updater-progress",
+        position: "top-right",
+        duration: Infinity,
+      }),
+    )
+  })
+
+  it("dismisses the progress toast when the update surface opens", async () => {
+    const user = userEvent.setup()
+    const update = stalledUpdate(["Started", "Progress"])
+    checkMock.mockResolvedValue(update)
+    render(<Harness />)
+    await user.click(screen.getByRole("button", { name: "check" }))
+    await user.click(await screen.findByRole("button", { name: "download" }))
+    expect(await screen.findByTestId("progress")).toHaveTextContent("40")
+    await user.click(screen.getByRole("button", { name: "open surface" }))
+    await waitFor(() => expect(toast.dismiss).toHaveBeenCalledWith("updater-progress"))
+  })
+
+  it("does not show a toast while the update surface is open", async () => {
+    const user = userEvent.setup()
+    const update = stalledUpdate(["Started", "Progress"])
+    checkMock.mockResolvedValue(update)
+    render(<Harness />)
+    await user.click(screen.getByRole("button", { name: "open surface" }))
+    await user.click(screen.getByRole("button", { name: "check" }))
+    await user.click(await screen.findByRole("button", { name: "download" }))
+    expect(await screen.findByTestId("progress")).toHaveTextContent("40")
+    expect(toast.custom).not.toHaveBeenCalled()
+  })
+
+  it("shows an error toast with a retry action", async () => {
+    const user = userEvent.setup()
+    checkMock.mockRejectedValue(new Error("offline"))
+    render(<Harness />)
+    await user.click(screen.getByRole("button", { name: "check" }))
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith("Update failed", {
+        id: "updater-error",
+        description: "Couldn't check for updates. Check your connection and try again.",
+        action: expect.objectContaining({ label: "Retry" }),
+      }),
+    )
+  })
+
+  it("throttles rapid download toast updates", async () => {
+    const user = userEvent.setup()
+    const update = fakeUpdate()
+    update.download = vi.fn(async (onEvent: (event: DownloadEvent) => void) => {
+      onEvent({ event: "Started", data: { contentLength: 100 } })
+      for (let index = 0; index < 10; index += 1) {
+        onEvent({ event: "Progress", data: { chunkLength: 10 } })
+      }
+      await new Promise<void>(() => {})
+    })
+    checkMock.mockResolvedValue(update)
+    render(<Harness />)
+    await user.click(screen.getByRole("button", { name: "check" }))
+    await user.click(await screen.findByRole("button", { name: "download" }))
+    expect(await screen.findByTestId("progress")).toHaveTextContent("100")
+    expect(vi.mocked(toast.custom).mock.calls.length).toBeLessThan(11)
+  })
+
+  it("keeps the update ready when retrying an install during a batch", async () => {
+    const user = userEvent.setup()
+    const update = fakeUpdate()
+    update.install = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("boom"))
+      .mockResolvedValueOnce(undefined)
+    checkMock.mockResolvedValue(update)
+    const view = render(<Harness />)
+    await user.click(screen.getByRole("button", { name: "check" }))
+    await user.click(await screen.findByRole("button", { name: "download" }))
+    expect(await screen.findByTestId("message")).toHaveTextContent("installed")
+    view.rerender(<Harness isCompressing />)
+    await user.click(screen.getByRole("button", { name: "retry" }))
+    expect(screen.getByTestId("status")).toHaveTextContent("ready")
+    expect(update.install).toHaveBeenCalledTimes(1)
   })
 })
