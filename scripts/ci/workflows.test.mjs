@@ -1128,6 +1128,58 @@ describe("release.yml release workflow", () => {
     expect(withBlock.args).toBe("--target ${{ matrix.triple }}");
   });
 
+  it("signs every row: the updater key reaches tauri-action and the manifest prefers NSIS, with bounded retries", async () => {
+    const { doc } = await loadWorkflow(FILENAME);
+    const action = stepsOf(jobsOf(doc).release).find((s) =>
+      stepUses(s).startsWith("tauri-apps/tauri-action@"),
+    );
+    expect(action.env?.TAURI_SIGNING_PRIVATE_KEY).toBe(
+      "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}",
+    );
+    expect(action.env?.TAURI_SIGNING_PRIVATE_KEY_PASSWORD).toBe(
+      "${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}",
+    );
+    expect(action.with?.retryAttempts).toBe(3);
+    expect(action.with?.updaterJsonPreferNsis).toBe(true);
+  });
+
+  it("gate fails closed on a missing updater signing key before building any row", async () => {
+    const { doc } = await loadWorkflow(FILENAME);
+    const gateSteps = stepsOf(jobsOf(doc).gate);
+    const preflightIdx = gateSteps.findIndex((s) =>
+      stepRuns(s).includes("scripts/ci/updater-preflight.mjs --require-secret"),
+    );
+    const sidecarsIdx = gateSteps.findIndex((s) => stepRuns(s).includes("sidecars-availability preflight"));
+    expect(preflightIdx, "the updater preflight must run in the gate").toBeGreaterThanOrEqual(0);
+    expect(preflightIdx, "the key check must precede the sidecars preflight").toBeLessThan(sidecarsIdx);
+    expect(gateSteps[preflightIdx].env?.TAURI_SIGNING_PRIVATE_KEY).toBe(
+      "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}",
+    );
+  });
+
+  it("verify-updater runs after all four release rows and checks the draft manifest against its signatures", async () => {
+    const { doc } = await loadWorkflow(FILENAME);
+    const verify = jobsOf(doc)["verify-updater"];
+    expect(verify, "the verify-updater job must exist").toBeDefined();
+    expect(verify.needs).toEqual(["gate", "release"]);
+    expect(verify["timeout-minutes"]).toBe(10);
+    expect(
+      verify.permissions,
+      "draft releases are readable only with push access — contents: write is required to download the draft",
+    ).toEqual({ contents: "write" });
+
+    const steps = stepsOf(verify);
+    const download = steps.find((s) => stepRuns(s).includes("gh release download"));
+    expect(download.env?.RELEASE_TAG).toBe("${{ needs.gate.outputs.release_tag }}");
+    expect(download.run).toContain("--pattern '*.sig' --dir updater/sigs");
+    expect(download.run).toContain('--json assets > updater/assets.json');
+
+    const verifyStep = steps.find((s) => stepRuns(s).includes("verify-updater-manifest.mjs"));
+    expect(verifyStep.env?.APP_VERSION).toBe("${{ needs.gate.outputs.app_version }}");
+    expect(verifyStep.run).toContain("--version \"$APP_VERSION\"");
+    expect(verifyStep.run).toContain("--sigs-dir updater/sigs");
+  });
+
   it("uploads the stable README download aliases plus SHA-256 checksums after tauri-action", async () => {
     const { doc } = await loadWorkflow(FILENAME);
     const steps = stepsOf(jobsOf(doc).release);
