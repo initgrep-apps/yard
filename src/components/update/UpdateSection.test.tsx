@@ -99,6 +99,55 @@ describe("UpdateSection", () => {
     expect(screen.queryByRole("button", { name: "Not now" })).not.toBeInTheDocument()
   })
 
+  it("does not repeat the current version or show an Available badge", () => {
+    renderSection({
+      state: { status: "available", update: fakeUpdate("1.2.0") },
+    })
+    expect(screen.queryByTestId("current-version")).not.toBeInTheDocument()
+    expect(screen.queryByText("Available")).not.toBeInTheDocument()
+  })
+
+  it("shows the installing label at 100 percent", () => {
+    renderSection({
+      state: {
+        status: "downloading",
+        update: fakeUpdate("1.2.0"),
+        downloaded: 100,
+        total: 100,
+      },
+    })
+    expect(screen.getByText("Installing update…")).toBeInTheDocument()
+    expect(screen.getByText("The app will restart.")).toBeInTheDocument()
+  })
+
+  it("shows a failure card without the current version row", () => {
+    renderSection({
+      state: {
+        status: "error",
+        stage: "download",
+        message:
+          "The update couldn't be downloaded. Check your connection and try again.",
+        update: fakeUpdate("1.2.0"),
+      },
+    })
+    expect(screen.getByText("Update failed")).toBeInTheDocument()
+    expect(screen.getByText("Version 1.2.0")).toBeInTheDocument()
+    expect(screen.queryByTestId("current-version")).not.toBeInTheDocument()
+  })
+
+  it("keeps the version row for a check failure", () => {
+    renderSection({
+      state: {
+        status: "error",
+        stage: "check",
+        message: "Couldn't check for updates. Check your connection and try again.",
+        update: null,
+      },
+    })
+    expect(screen.getByTestId("current-version")).toHaveTextContent(`Version ${version}`)
+    expect(screen.getByText("Couldn't check for updates. Check your connection and try again.")).toBeInTheDocument()
+  })
+
   it("disables Update now while a batch is compressing", () => {
     renderSection({
       state: { status: "available", update: fakeUpdate() },
@@ -130,7 +179,7 @@ describe("UpdateSection", () => {
     renderSection({
       state: { status: "available", update: fakeUpdate("1.2.0") },
     })
-    await user.click(screen.getByRole("button", { name: "What's new" }))
+    await user.click(screen.getByRole("button", { name: "What's new?" }))
     await waitFor(() => {
       expect(openUrlMock).toHaveBeenCalledWith(
         "https://github.com/initgrep-apps/yard/releases/tag/v1.2.0",

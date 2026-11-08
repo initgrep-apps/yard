@@ -114,6 +114,12 @@ export function UpdateProvider({ children }: { children: ReactNode }) {
 
   const installUpdate = useCallback(
     async (update: Update) => {
+      if (isCompressingRef.current) {
+        updateRef.current = null
+        await update.close().catch(() => {})
+        setState({ status: "idle", notice: PAUSED_NOTICE })
+        return
+      }
       try {
         await update.install()
       } catch (error) {
