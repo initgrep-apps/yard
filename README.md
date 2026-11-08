@@ -14,7 +14,8 @@
 
 Yard batch-compresses images, video, PDFs, and Office documents to per-category
 size targets. The engines are bundled and all processing stays on your machine:
-no telemetry, account, or network access. Originals are never modified, and
+files are never uploaded, and there is no telemetry or account. Yard contacts
+GitHub only when you check for updates. Originals are never modified, and
 destructive changes need your consent.
 
 ## Download
@@ -28,6 +29,13 @@ destructive changes need your consent.
 
 All installers, checksums, SBOM, and third-party notices are on the
 [Releases page](https://github.com/initgrep-apps/yard/releases/latest).
+
+Updates are manual. Open **About**, then **Check for updates**: the app reads the
+signed manifest from the latest published release, downloads with progress, and
+restarts into the new version. The artifact signature is verified before
+installing. A download may run during a batch; the restart waits until the batch
+finishes. Release and verification steps are in
+[`docs/cicd-process.md`](docs/cicd-process.md).
 
 macOS builds are ad-hoc signed and not notarized. Copy the app to
 `/Applications`, then run `xattr -dr com.apple.quarantine /Applications/yard.app`
@@ -69,8 +77,9 @@ adaptive budget. Large batches also need temp disk for attempts.
 
 ## Security
 
-Yard processes files locally and sends nothing over the network. Report
-vulnerabilities through
+Yard processes files locally: file contents never leave the machine, and there is
+no telemetry. The only network requests are the update check and download you
+start from **About**, over HTTPS to GitHub. Report vulnerabilities through
 [GitHub private vulnerability reporting](https://github.com/initgrep-apps/yard/security/advisories/new);
 see [`SECURITY.md`](SECURITY.md). Do not open a public issue.
 

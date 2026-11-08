@@ -108,17 +108,18 @@ flowchart TD
     subgraph GATE["release gate — 15 min"]
         G1["G1 checkout"] --> G2["G2 setup Node 22"]
         G2 --> G3["G3 version sync +<br/>prerelease resolution"]
-        G3 --> G4{"G4 sidecars release has<br/>all 8 bundle assets?"}
-        G4 -- no --> G5["G5 fail: run freeze.yml"]
-        G4 -- yes --> G6{"G6 release state?"}
-        G6 -- published --> G7["G7 fail: convert to draft<br/>or delete"]
-        G6 -- draft --> G8["G8 reuse draft"]
-        G6 -- absent --> G9["G9 create draft"]
-        G8 --> G10["G10 export release id,<br/>tag and version"]
-        G9 --> G10
+        G3 --> G4["G4 updater signing preflight<br/>pubkey · endpoint · secret"]
+        G4 --> G5{"G5 sidecars release has<br/>all 8 bundle assets?"}
+        G5 -- no --> G6["G6 fail: run freeze.yml"]
+        G5 -- yes --> G7{"G7 release state?"}
+        G7 -- published --> G8["G8 fail: convert to draft<br/>or delete"]
+        G7 -- draft --> G9["G9 reuse draft"]
+        G7 -- absent --> G10["G10 create draft"]
+        G9 --> G11["G11 export release id,<br/>tag and version"]
+        G10 --> G11
     end
 
-    G10 --> R1
+    G11 --> R1
 
     subgraph ROWS["release rows — 4 native triples · 90 min"]
         R1["R1 checkout"] --> R2["R2 version sync check"]
@@ -136,7 +137,7 @@ flowchart TD
         R10 -- Windows --> R13["R13 clean-room engine audit"]
         R12 --> R14["R14 gate: build + test<br/>+ cargo test"]
         R13 --> R14
-        R14 --> R15["R15 tauri-action build<br/>+ upload to draft"]
+        R14 --> R15["R15 tauri-action build<br/>+ sign + upload .sig<br/>+ generate latest.json"]
         R15 --> R16["R16 stable alias + SHA-256"]
         R16 --> R17{"R17 app asset present?"}
         R17 -- no --> R18["R18 row fail: draft stays"]
@@ -150,10 +151,12 @@ flowchart TD
 
     R22 --> R23{"R23 all 4 rows green?"}
     R23 -- no --> R24["R24 draft stays unpublished<br/>fix and re-run"]
-    R23 -- yes --> R25["R25 manual acceptance<br/>UI + installers + matrix"]
-    R25 --> R26{"R26 acceptance pass?"}
-    R26 -- no --> R27["R27 keep draft<br/>file bugs and fix"]
-    R26 -- yes --> R28["R28 publish draft release"]
+    R23 -- yes --> R25["R25 verify-updater job<br/>latest.json · platforms · .sig"]
+    R25 -- fail --> R24
+    R25 -- pass --> R26["R26 manual acceptance<br/>UI + installers + matrix"]
+    R26 --> R27{"R27 acceptance pass?"}
+    R27 -- no --> R28["R28 keep draft<br/>file bugs and fix"]
+    R27 -- yes --> R29["R29 publish draft release"]
 ```
 
 **Release rules.**
@@ -162,9 +165,13 @@ flowchart TD
 - release-please maintains a draft Release PR. Merging it creates the tag and a draft GitHub release; merging any other PR does not release. Close the Release PR if the build is unwanted.
 - Token chain: GitHub App (`RELEASE_PLEASE_APP_ID` + `RELEASE_PLEASE_APP_PRIVATE_KEY`) → `RELEASE_PLEASE_TOKEN` PAT → `GITHUB_TOKEN`. Events created with `GITHUB_TOKEN` do not trigger `ci.yml` or `release.yml`; with it, reopen the Release PR for gate rows and dispatch `release.yml` with the tag after merging.
 - `release.yml` reuses an existing **draft** release for the tag and fails closed if the release is already published. Convert a published release with `gh release edit <tag> --draft` before re-running.
+- The gate runs `node scripts/ci/updater-preflight.mjs --require-secret` before the sidecars-availability preflight, with `TAURI_SIGNING_PRIVATE_KEY` from secrets. It fails closed when `bundle.createUpdaterArtifacts` is not `true`, the public key is empty or still `REPLACE_WITH_UPDATER_PUBLIC_KEY`, the endpoint is not the expected `releases/latest/download/latest.json`, `requireSignedVersion` is not `true`, or the signing secret is absent. It never prints the secret; failing here costs seconds instead of four 90-minute rows.
 - Each row runs `node scripts/ci/package-gate.mjs --triple <triple>` after `tauri-action` populates the draft. The gate opens the built package, asserts every engine where the app resolves it, checks the manifest version, runs one real operation per engine, verifies the gs resource tree, and runs the app's own resolver. A failing row leaves the draft unpublished.
+- Each row passes `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` to `tauri-action` and sets `retryAttempts: 3` and `updaterJsonPreferNsis: true`. `tauri-action` signs both Windows install types and macOS app tarballs, uploads one `.sig` per updater artifact, and generates `latest.json` in the draft. The pinned action carries the May 2026 parallel-`latest.json` jitter fix; the retries are the second layer.
+- The `verify-updater` job runs on `ubuntu-24.04` after all four rows. It downloads `latest.json`, every `.sig`, and the asset inventory from the draft, then runs `scripts/ci/verify-updater-manifest.mjs`: the manifest version must equal the tag, all eight platform keys (`darwin-*`, `windows-*-nsis`, `windows-*-msi`, and the generic Windows keys) must carry a non-empty URL and signature, every URL must name an asset present in the draft, and the six `.sig` assets must exist and match the manifest signatures. It fails without publishing. It declares `contents: write` because a draft release is hidden from read-only tokens.
 - Each row uploads a stable alias plus checksum: `Yard-macOS-arm64.dmg`, `Yard-macOS-x64.dmg`, `Yard-Windows-x64-setup.exe`, `Yard-Windows-arm64-setup.exe`. README download links use `releases/latest/download/<alias>`.
 - The arm64 macOS row uploads `sbom.json` and `THIRD_PARTY_LICENSES.md`, then verifies both landed.
+- `releases/latest` and its `latest.json` resolve only for a published, non-prerelease release. Drafts and prereleases are invisible to that endpoint, so an installed app cannot see an update before the operator publishes the draft.
 - Squash-merge only. One PR = one changelog entry; write PR titles for humans.
 
 ## 4. Runbook
@@ -176,7 +183,7 @@ flowchart TD
 3. Run the local gate, commit, merge.
 4. Dispatch **Freeze sidecar engines**. Expect 4 green rows and `sidecars-<date>` with 8 assets.
 5. Merge the release-please PR, or tag `v<version>`. Dispatch **Release** with the tag if the tag push did not start it.
-6. Verify the draft, run manual acceptance (§5), then publish.
+6. Verify the draft and that `verify-updater` is green, run manual acceptance (§5), then publish.
 
 **Windows-target compile gate.** Run before any push touching `src-tauri/src/`:
 
@@ -190,7 +197,7 @@ One-time setup: `rustup target add aarch64-pc-windows-msvc` and `brew install ll
 
 ## 5. Manual acceptance
 
-The package gate proves engines start and run from the built package. It does not exercise the UI, the mounted DMG, or the MSI. Run this after all four release rows are green (R23) and before publishing (R28).
+The package gate proves engines start and run from the built package. It does not exercise the UI, the mounted DMG, or the MSI. Run this after all four release rows are green (R23), once `verify-updater` passes (R25), and before publishing (R29).
 
 **UI checks.**
 
@@ -203,6 +210,17 @@ The package gate proves engines start and run from the built package. It does no
 - Kanban: horizontal wheel/trackpad panning, thin scrollbar, drag ghost (item and lane), lane grip visibility, pinned-card focus, live compressing re-pin.
 - Window: drag surface, minimize/maximize/close, theme toggle, single-instance focus, window-state restore.
 - History table: trackpad scroll feel, sticky header, reveal actions.
+
+**Update checks.** Use a published test patch — never the draft under acceptance, which installed apps cannot see — and update from the previous installed version.
+
+- Check with no update available: the About row reads "You're on the latest version."
+- Check offline or with GitHub blocked: the error is actionable and the app stays usable.
+- Update from a previous install on each artifact: macOS arm64 DMG, macOS x64 DMG, Windows x64 NSIS, Windows x64 MSI, Windows arm64 NSIS, Windows arm64 MSI.
+- Start a batch during a download: the update reaches Ready and does not restart until the batch ends; **Restart app** stays disabled while compressing.
+- Close About during a download: the toast keeps updating; reopening About shows inline progress.
+- Tamper with the artifact or its `.sig` on a local test release: the install is rejected and the app stays on the old version.
+- After restart: history, settings and the output folder survive; staged files that had not run are cleared, as the card states.
+- An existing 1.1.0 install has no updater and needs one manual installer; only the next published release can self-update.
 
 The Windows WebView2 checks need a real Windows machine. macOS trackpad and drag-overlay checks need a human pass; jsdom and WebKit synthesis cannot cover them.
 

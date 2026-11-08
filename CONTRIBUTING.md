@@ -38,6 +38,20 @@ yarn build && yarn test && (cd src-tauri && cargo test)
 
 Run it locally before pushing. A PR with a red gate is not reviewed.
 
+The gate needs no updater key. Building an installer locally does, because
+`bundle.createUpdaterArtifacts` signs every update artifact:
+
+```bash
+export TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/yard-updater.key)"
+export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="..."
+yarn tauri build
+```
+
+The key is operator-owned; never commit it or paste it into an issue. Without it
+`yarn build && yarn test` still passes and only installer builds are unavailable,
+so contributors without the key can leave local installers to the release
+workflow.
+
 Windows-target changes also need the cross-compile check documented in
 [`docs/cicd-process.md`](docs/cicd-process.md).
 
