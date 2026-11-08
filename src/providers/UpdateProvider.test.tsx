@@ -15,7 +15,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import { describe, it, expect, vi, afterEach } from "vitest"
-import { render, screen, act, waitFor } from "@testing-library/react"
+import { render, screen, act, waitFor, fireEvent } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 
 vi.mock("@tauri-apps/plugin-updater", () => ({
@@ -138,6 +138,7 @@ function Harness({
 describe("UpdateProvider", () => {
   afterEach(() => {
     vi.restoreAllMocks()
+    vi.useRealTimers()
   })
 
   it("starts idle and does not check on mount", () => {
@@ -209,6 +210,28 @@ describe("UpdateProvider", () => {
     expect(update.install).toHaveBeenCalled()
   })
 
+  it("defers install when a batch starts during the download", async () => {
+    const user = userEvent.setup()
+    const update = fakeUpdate()
+    let finishDownload: () => void = () => {}
+    update.download = vi.fn(async (onEvent: (event: DownloadEvent) => void) => {
+      onEvent({ event: "Started", data: { contentLength: 100 } })
+      await new Promise<void>((resolve) => {
+        finishDownload = resolve
+      })
+      onEvent({ event: "Finished" })
+    })
+    checkMock.mockResolvedValue(update)
+    const view = render(<Harness />)
+    await user.click(screen.getByRole("button", { name: "check" }))
+    await user.click(await screen.findByRole("button", { name: "download" }))
+    view.rerender(<Harness isCompressing />)
+    await act(async () => finishDownload())
+    expect(await screen.findByTestId("status")).toHaveTextContent("ready")
+    expect(update.install).not.toHaveBeenCalled()
+    expect(relaunchMock).not.toHaveBeenCalled()
+  })
+
   it("does not relaunch on Windows", async () => {
     const user = userEvent.setup()
     const update = fakeUpdate()
@@ -244,6 +267,39 @@ describe("UpdateProvider", () => {
     expect(await screen.findByTestId("message")).toHaveTextContent(
       "The app couldn't be replaced. Move it to Applications, then try again.",
     )
+  })
+
+  it("shows the generic install error for a Windows permission failure", async () => {
+    const user = userEvent.setup()
+    const update = fakeUpdate()
+    update.install = vi.fn(async () => {
+      throw new Error("Access is denied")
+    })
+    checkMock.mockResolvedValue(update)
+    render(<Harness platform="win32" />)
+    await user.click(screen.getByRole("button", { name: "check" }))
+    await user.click(await screen.findByRole("button", { name: "download" }))
+    expect(await screen.findByTestId("message")).toHaveTextContent(
+      "The update couldn't be installed. Try again, or download the latest installer from GitHub.",
+    )
+  })
+
+  it("retries only relaunch after install succeeded and relaunch failed", async () => {
+    const user = userEvent.setup()
+    const update = fakeUpdate()
+    relaunchMock
+      .mockRejectedValueOnce(new Error("relaunch failed"))
+      .mockResolvedValueOnce(undefined)
+    checkMock.mockResolvedValue(update)
+    render(<Harness platform="darwin" />)
+    await user.click(screen.getByRole("button", { name: "check" }))
+    await user.click(await screen.findByRole("button", { name: "download" }))
+    expect(await screen.findByTestId("message")).toHaveTextContent(
+      "The update was installed. Restart the app to finish.",
+    )
+    await user.click(screen.getByRole("button", { name: "retry" }))
+    expect(update.install).toHaveBeenCalledTimes(1)
+    expect(relaunchMock).toHaveBeenCalledTimes(2)
   })
 
   it("moves downloading -> error when the download fails", async () => {
@@ -370,28 +426,45 @@ describe("UpdateProvider", () => {
     await waitFor(() =>
       expect(toast.error).toHaveBeenCalledWith("Update failed", {
         id: "updater-error",
+        position: "top-right",
         description: "Couldn't check for updates. Check your connection and try again.",
         action: expect.objectContaining({ label: "Retry" }),
       }),
     )
   })
 
-  it("throttles rapid download toast updates", async () => {
-    const user = userEvent.setup()
+  it("throttles download toast updates and delivers the trailing update", async () => {
+    vi.useFakeTimers()
     const update = fakeUpdate()
+    let emitProgress: () => void = () => {}
     update.download = vi.fn(async (onEvent: (event: DownloadEvent) => void) => {
       onEvent({ event: "Started", data: { contentLength: 100 } })
-      for (let index = 0; index < 10; index += 1) {
-        onEvent({ event: "Progress", data: { chunkLength: 10 } })
-      }
+      emitProgress = () => onEvent({ event: "Progress", data: { chunkLength: 20 } })
       await new Promise<void>(() => {})
     })
     checkMock.mockResolvedValue(update)
     render(<Harness />)
-    await user.click(screen.getByRole("button", { name: "check" }))
-    await user.click(await screen.findByRole("button", { name: "download" }))
-    expect(await screen.findByTestId("progress")).toHaveTextContent("100")
-    expect(vi.mocked(toast.custom).mock.calls.length).toBeLessThan(11)
+
+    fireEvent.click(screen.getByRole("button", { name: "check" }))
+    await act(async () => {})
+    fireEvent.click(screen.getByRole("button", { name: "download" }))
+    await act(async () => {})
+
+    expect(toast.custom).toHaveBeenCalledTimes(1)
+
+    for (let index = 0; index < 4; index += 1) {
+      act(() => emitProgress())
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(50)
+      })
+    }
+
+    expect(toast.custom).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(250)
+    })
+    expect(toast.custom).toHaveBeenCalledTimes(2)
   })
 
   it("keeps the update ready when retrying an install during a batch", async () => {

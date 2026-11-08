@@ -27,6 +27,7 @@ describe('UpdateToast', () => {
         percent={42}
         downloaded={13_002_342}
         total={100_873_011}
+        isCompressing={false}
       />,
     )
     expect(screen.getByText('Downloading update')).toBeInTheDocument()
@@ -36,16 +37,45 @@ describe('UpdateToast', () => {
 
   it('shows ready copy without the app name', () => {
     const { container } = render(
-      <UpdateToast status="ready" version="1.2.0" percent={100} downloaded={1} total={1} />,
+      <UpdateToast
+        status="ready"
+        version="1.2.0"
+        percent={100}
+        downloaded={1}
+        total={1}
+        isCompressing={false}
+      />,
     )
     expect(screen.getByText('Update ready')).toBeInTheDocument()
     expect(screen.getByText('Restart the app to finish.')).toBeInTheDocument()
     expect(container.textContent).not.toMatch(/Yard/)
   })
 
+  it('explains the batch when ready while compressing', () => {
+    render(
+      <UpdateToast
+        status="ready"
+        version="1.2.0"
+        percent={100}
+        downloaded={1}
+        total={1}
+        isCompressing
+      />,
+    )
+    expect(screen.getByText('Finish the current batch to restart.')).toBeInTheDocument()
+    expect(screen.queryByText('Restart the app to finish.')).not.toBeInTheDocument()
+  })
+
   it('shows installing copy', () => {
     render(
-      <UpdateToast status="installing" version="1.2.0" percent={100} downloaded={1} total={1} />,
+      <UpdateToast
+        status="installing"
+        version="1.2.0"
+        percent={100}
+        downloaded={1}
+        total={1}
+        isCompressing={false}
+      />,
     )
     expect(screen.getByText('Installing update')).toBeInTheDocument()
     expect(screen.getByText('The app will restart.')).toBeInTheDocument()
@@ -59,6 +89,7 @@ describe('UpdateToast', () => {
         percent={null}
         downloaded={13_002_342}
         total={null}
+        isCompressing={false}
       />,
     )
     expect(screen.getByText('Version 1.2.0')).toBeInTheDocument()

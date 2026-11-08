@@ -14,9 +14,6 @@ export const REQUIRED_PLATFORMS = [
 
 const USAGE =
   "usage: node scripts/ci/verify-updater-manifest.mjs --version <version> --manifest <latest.json> --assets <assets.json> --sigs-dir <dir>";
-const ASSET_ID_PATTERN = /\/releases\/assets\/(\d+)/;
-const DOWNLOAD_NAME_PATTERN = /\/releases\/download\/[^/]+\/(.+)$/;
-const ASSET_URL_FIELDS = ["apiUrl", "downloadUrl", "browser_download_url", "url"];
 
 export function verifyUpdaterManifest({
   manifest,
@@ -134,25 +131,11 @@ function normalizeAssets(assets) {
 }
 
 function findAsset(url, assets) {
-  const assetId = ASSET_ID_PATTERN.exec(url)?.[1];
-  const downloadName = decodeURIComponent(
-    DOWNLOAD_NAME_PATTERN.exec(url)?.[1] ?? "",
+  return assets.find(
+    (asset) =>
+      (typeof asset.apiUrl === "string" && asset.apiUrl.trim() === url) ||
+      (typeof asset.downloadUrl === "string" && asset.downloadUrl.trim() === url),
   );
-  return assets.find((asset) => {
-    if (assetUrls(asset).includes(url)) {
-      return true;
-    }
-    if (assetId !== undefined && String(asset.id ?? "") === assetId) {
-      return true;
-    }
-    return downloadName !== "" && asset.name === downloadName;
-  });
-}
-
-function assetUrls(asset) {
-  return ASSET_URL_FIELDS.map((field) => asset?.[field])
-    .filter((value) => typeof value === "string" && value.trim() !== "")
-    .map((value) => value.trim());
 }
 
 function readJson(path) {

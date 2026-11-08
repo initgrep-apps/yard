@@ -42,6 +42,7 @@ const INSTALL_ERROR =
   "The update couldn't be installed. Try again, or download the latest installer from GitHub."
 const INSTALL_PATH_ERROR =
   "The app couldn't be replaced. Move it to Applications, then try again."
+const RELAUNCH_ERROR = "The update was installed. Restart the app to finish."
 
 const PROGRESS_TOAST_ID = "updater-progress"
 const ERROR_TOAST_ID = "updater-error"
@@ -62,7 +63,7 @@ export type UpdateState =
   | { status: "installing"; update: Update }
   | {
       status: "error"
-      stage: "check" | "download" | "install"
+      stage: "check" | "download" | "install" | "relaunch"
       message: string
       update: Update | null
     }
@@ -106,6 +107,14 @@ export function UpdateProvider({ children }: { children: ReactNode }) {
     setSurfaceOpenState(open)
   }, [])
 
+  const relaunchNow = useCallback(async (update: Update) => {
+    try {
+      await relaunch()
+    } catch {
+      setState({ status: "error", stage: "relaunch", message: RELAUNCH_ERROR, update })
+    }
+  }, [])
+
   const installUpdate = useCallback(
     async (update: Update) => {
       if (isCompressingRef.current) {
@@ -115,17 +124,19 @@ export function UpdateProvider({ children }: { children: ReactNode }) {
       setState({ status: "installing", update })
       try {
         await update.install()
-        if (platform === "darwin") {
-          await relaunch()
-        }
       } catch (error) {
-        const message = /permission|denied|read-only/i.test(String(error))
-          ? INSTALL_PATH_ERROR
-          : INSTALL_ERROR
+        const message =
+          platform === "darwin" && /permission|denied|read-only/i.test(String(error))
+            ? INSTALL_PATH_ERROR
+            : INSTALL_ERROR
         setState({ status: "error", stage: "install", message, update })
+        return
+      }
+      if (platform === "darwin") {
+        await relaunchNow(update)
       }
     },
-    [platform],
+    [platform, relaunchNow],
   )
 
   const downloadUpdate = useCallback(
@@ -216,8 +227,10 @@ export function UpdateProvider({ children }: { children: ReactNode }) {
       await downloadUpdate(s.update)
     } else if (s.stage === "install" && s.update) {
       await installUpdate(s.update)
+    } else if (s.stage === "relaunch" && s.update) {
+      await relaunchNow(s.update)
     }
-  }, [checkUpdate, downloadUpdate, installUpdate])
+  }, [checkUpdate, downloadUpdate, installUpdate, relaunchNow])
 
   const lastToastStatusRef = useRef<UpdateState["status"] | null>(null)
   const lastToastAtRef = useRef(0)
@@ -237,6 +250,7 @@ export function UpdateProvider({ children }: { children: ReactNode }) {
             percent={s.status === "downloading" ? downloadPercent(s.downloaded, s.total) : null}
             downloaded={s.status === "downloading" ? s.downloaded : 0}
             total={s.status === "downloading" ? s.total : null}
+            isCompressing={isCompressing}
           />
         ),
         { id: PROGRESS_TOAST_ID, position: "top-right", duration: Infinity },
@@ -252,6 +266,7 @@ export function UpdateProvider({ children }: { children: ReactNode }) {
       toast.dismiss(PROGRESS_TOAST_ID)
       toast.error("Update failed", {
         id: ERROR_TOAST_ID,
+        position: "top-right",
         description: state.message,
         action: { label: "Retry", onClick: () => void retry() },
       })
@@ -284,7 +299,7 @@ export function UpdateProvider({ children }: { children: ReactNode }) {
         throttleTimerRef.current = null
       }
     }
-  }, [state, surfaceOpen, retry])
+  }, [state, surfaceOpen, retry, isCompressing])
 
   const value = useMemo<UpdateContextValue>(
     () => ({

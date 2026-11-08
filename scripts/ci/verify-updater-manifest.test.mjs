@@ -220,6 +220,40 @@ describe("verifyUpdaterManifest", () => {
       }),
     ).not.toThrow();
   });
+
+  it("rejects a hostile-origin URL whose filename matches a draft asset", () => {
+    const fixture = buildFixture({
+      mutateManifest: (manifest) => {
+        manifest.platforms["darwin-aarch64"].url =
+          `https://evil.example.com/releases/download/v${VERSION}/${ASSET_NAMES["darwin-aarch64"]}`;
+      },
+    });
+    expect(() =>
+      verifyUpdaterManifest({
+        manifest: fixture.manifest,
+        assets: fixture.assets,
+        sigsDir: fixture.sigsDir,
+        expectedVersion: VERSION,
+      }),
+    ).toThrow(/is not an asset in the release/);
+  });
+
+  it("rejects a wrong-repository URL with a matching filename", () => {
+    const fixture = buildFixture({
+      mutateManifest: (manifest) => {
+        manifest.platforms["darwin-aarch64"].url =
+          `https://github.com/other-org/other-repo/releases/download/v${VERSION}/${ASSET_NAMES["darwin-aarch64"]}`;
+      },
+    });
+    expect(() =>
+      verifyUpdaterManifest({
+        manifest: fixture.manifest,
+        assets: fixture.assets,
+        sigsDir: fixture.sigsDir,
+        expectedVersion: VERSION,
+      }),
+    ).toThrow(/is not an asset in the release/);
+  });
 });
 
 describe("verify-updater-manifest CLI", () => {

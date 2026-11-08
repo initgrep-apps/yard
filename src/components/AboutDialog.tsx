@@ -24,6 +24,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { Separator } from "@/components/ui/separator"
 import { UpdateSection } from "@/components/update/UpdateSection"
 
 const LICENSE_ROWS = [
@@ -64,6 +65,7 @@ export function AboutDialog({ open, onOpenChange }: AboutDialogProps) {
           </p>
           <UpdateSection />
         </div>
+        <Separator />
         <ul className="flex flex-col gap-2 text-sm">
           {LICENSE_ROWS.map((row) => (
             <li

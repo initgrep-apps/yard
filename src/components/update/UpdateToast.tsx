@@ -14,6 +14,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+import { Download, CircleCheck, RefreshCw } from 'lucide-react'
 import { Progress } from '@/components/ui/progress'
 import { formatSize } from '@/lib/sizeFormat'
 
@@ -23,18 +24,36 @@ export interface UpdateToastProps {
   percent: number | null
   downloaded: number
   total: number | null
+  isCompressing: boolean
 }
+
+const ICONS = {
+  downloading: Download,
+  ready: CircleCheck,
+  installing: RefreshCw,
+} as const
 
 const COPY = {
   downloading: { title: 'Downloading update' },
-  ready: { title: 'Update ready', detail: 'Restart the app to finish.' },
+  ready: { title: 'Update ready' },
   installing: { title: 'Installing update', detail: 'The app will restart.' },
 } as const
 
-export function UpdateToast({ status, version, percent, downloaded, total }: UpdateToastProps) {
+export function UpdateToast({
+  status,
+  version,
+  percent,
+  downloaded,
+  total,
+  isCompressing,
+}: UpdateToastProps) {
+  const Icon = ICONS[status]
   return (
     <div className="flex w-80 flex-col gap-2 rounded-lg bg-popover p-3 text-popover-foreground shadow-md ring-1 ring-foreground/10">
-      <p className="text-sm font-medium">{COPY[status].title}</p>
+      <div className="flex items-center gap-2">
+        <Icon data-icon="inline-start" className="size-4" aria-hidden="true" />
+        <p className="text-sm font-medium">{COPY[status].title}</p>
+      </div>
       {status === 'downloading' ? (
         <>
           <p className="text-xs text-muted-foreground">
@@ -48,7 +67,13 @@ export function UpdateToast({ status, version, percent, downloaded, total }: Upd
           <Progress value={percent} aria-label="Update download progress" />
         </>
       ) : (
-        <p className="text-xs text-muted-foreground">{COPY[status].detail}</p>
+        <p className="text-xs text-muted-foreground">
+          {status === 'ready'
+            ? isCompressing
+              ? 'Finish the current batch to restart.'
+              : 'Restart the app to finish.'
+            : COPY.installing.detail}
+        </p>
       )}
     </div>
   )
