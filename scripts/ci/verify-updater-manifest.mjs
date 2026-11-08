@@ -168,7 +168,7 @@ if (isMain(import.meta.url)) {
     main(process.argv.slice(2));
   } catch (error) {
     console.log(`::error::verify-updater-manifest: ${error.message}`);
-    process.exit(1);
+    process.exitCode = 1;
   }
 }
 

@@ -71,6 +71,19 @@ function buildFixture({ mutateManifest } = {}) {
 }
 
 describe("verifyUpdaterManifest", () => {
+  it("pins the required platform list", () => {
+    expect(REQUIRED_PLATFORMS).toEqual([
+      "darwin-aarch64",
+      "darwin-x86_64",
+      "windows-aarch64",
+      "windows-x86_64",
+      "windows-aarch64-nsis",
+      "windows-aarch64-msi",
+      "windows-x86_64-nsis",
+      "windows-x86_64-msi",
+    ]);
+  });
+
   it("accepts a complete manifest whose signatures match the sig files", () => {
     const fixture = buildFixture();
     expect(() =>
@@ -125,6 +138,22 @@ describe("verifyUpdaterManifest", () => {
         expectedVersion: VERSION,
       }),
     ).toThrow(/empty signature/);
+  });
+
+  it("rejects an empty url", () => {
+    const fixture = buildFixture({
+      mutateManifest: (manifest) => {
+        manifest.platforms["darwin-aarch64"].url = "";
+      },
+    });
+    expect(() =>
+      verifyUpdaterManifest({
+        manifest: fixture.manifest,
+        assets: fixture.assets,
+        sigsDir: fixture.sigsDir,
+        expectedVersion: VERSION,
+      }),
+    ).toThrow(/has no url/);
   });
 
   it("rejects a URL that does not match an asset", () => {
