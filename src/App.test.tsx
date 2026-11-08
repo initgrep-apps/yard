@@ -458,6 +458,10 @@ describe("App shell", () => {
     expect(wrapper!.classList.contains("h-svh")).toBe(true)
     expect(wrapper!.classList.contains("overflow-hidden")).toBe(true)
 
+    const inset = document.querySelector('[data-slot="sidebar-inset"]')
+    expect(inset).not.toBeNull()
+    expect(inset!.classList.contains("min-w-0")).toBe(true)
+
     const viewContainer = screen.getByTestId("view-container")
     expect(viewContainer.className).toContain("min-h-0")
     expect(viewContainer.className).toContain("overflow-hidden")
