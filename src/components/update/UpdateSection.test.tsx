@@ -17,6 +17,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
+import { version } from "../../../package.json"
 
 vi.mock("@tauri-apps/plugin-updater", () => ({
   check: vi.fn(),
@@ -80,7 +81,7 @@ function renderSection(overrides: Partial<UpdateContextValue> = {}) {
 describe("UpdateSection", () => {
   it("shows the version and check button", () => {
     renderSection({ state: { status: "idle" } })
-    expect(screen.getByText("Version 1.1.0")).toBeInTheDocument()
+    expect(screen.getByText(`Version ${version}`)).toBeInTheDocument()
     expect(screen.getByRole("button", { name: "Check for updates" })).toBeEnabled()
   })
 
