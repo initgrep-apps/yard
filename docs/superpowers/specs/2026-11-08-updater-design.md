@@ -99,7 +99,8 @@ Use the existing shadcn/base components:
 | Ready | “Update ready.” + **Restart app** | Top-right ready toast |
 | Ready, batch active | “Update ready.”, “Finish the current batch to restart.”, **Restart app** disabled | Top-right ready toast with the same explanation |
 | Installing | Progress at 100%, “Installing update…”, “The app will restart.” | Installing toast |
-| Error | `Alert` with the reason, **Try again**, **Download from GitHub** | Error toast with **Retry** |
+| Error | `Alert` with the reason, **Try again**, **Download from GitHub** | Error toast with **Retry**, top-right |
+| Installed, relaunch failed | “The update was installed. Restart the app to finish.” + **Try again** | Error toast with **Retry** |
 
 ### State machine
 
@@ -126,7 +127,8 @@ ready
 installing
   ├─ macOS: install() then relaunch()
   ├─ Windows: install() exits the app; the installer restarts it
-  └─ failure ──> error
+  ├─ install failure ──> error
+  └─ install success, relaunch failure ──> error (relaunch stage)
 
 error
   ├─ Try again ──> checking | downloading | ready (retry the failed stage)
@@ -161,7 +163,8 @@ All strings are generic and avoid the app name.
 | Check failure | `Couldn't check for updates. Check your connection and try again.` |
 | Download failure | `The update couldn't be downloaded. Check your connection and try again.` |
 | Install failure | `The update couldn't be installed. Try again, or download the latest installer from GitHub.` |
-| Install permission/path failure | `The app couldn't be replaced. Move it to Applications, then try again.` |
+| Install permission/path failure (macOS) | `The app couldn't be replaced. Move it to Applications, then try again.` |
+| Relaunch failure after install | `The update was installed. Restart the app to finish.` |
 | Retry action | `Try again` |
 | GitHub fallback | `Download from GitHub` |
 | Dev build | `Updates are disabled in development builds.` |
