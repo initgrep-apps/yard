@@ -58,8 +58,6 @@ function fakeContext(overrides: Partial<UpdateContextValue> = {}): UpdateContext
     isCompressing: false,
     check: vi.fn(async () => {}),
     startDownload: vi.fn(async () => {}),
-    install: vi.fn(async () => {}),
-    decline: vi.fn(async () => {}),
     retry: vi.fn(async () => {}),
     setSurfaceOpen: vi.fn(),
     ...overrides,
@@ -98,10 +96,70 @@ describe("UpdateSection", () => {
     expect(screen.getByText("Version 1.2.0 is available")).toBeInTheDocument()
     expect(screen.getByText("Released Nov 8, 2026.")).toBeInTheDocument()
     expect(screen.getByRole("button", { name: "Update now" })).toBeInTheDocument()
-    expect(screen.getByRole("button", { name: "Not now" })).toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "Not now" })).not.toBeInTheDocument()
   })
 
-  it("calls check, download, decline, and install", async () => {
+  it("does not repeat the current version or show an Available badge", () => {
+    renderSection({
+      state: { status: "available", update: fakeUpdate("1.2.0") },
+    })
+    expect(screen.queryByTestId("current-version")).not.toBeInTheDocument()
+    expect(screen.queryByText("Available")).not.toBeInTheDocument()
+  })
+
+  it("shows the installing label at 100 percent", () => {
+    renderSection({
+      state: {
+        status: "downloading",
+        update: fakeUpdate("1.2.0"),
+        downloaded: 100,
+        total: 100,
+      },
+    })
+    expect(screen.getByText("Installing update…")).toBeInTheDocument()
+    expect(screen.getByText("The app will restart.")).toBeInTheDocument()
+  })
+
+  it("shows a failure card without the current version row", () => {
+    renderSection({
+      state: {
+        status: "error",
+        stage: "download",
+        message:
+          "The update couldn't be downloaded. Check your connection and try again.",
+        update: fakeUpdate("1.2.0"),
+      },
+    })
+    expect(screen.getByText("Update failed")).toBeInTheDocument()
+    expect(screen.getByText("Version 1.2.0")).toBeInTheDocument()
+    expect(screen.queryByTestId("current-version")).not.toBeInTheDocument()
+  })
+
+  it("keeps the version row for a check failure", () => {
+    renderSection({
+      state: {
+        status: "error",
+        stage: "check",
+        message: "Couldn't check for updates. Check your connection and try again.",
+        update: null,
+      },
+    })
+    expect(screen.getByTestId("current-version")).toHaveTextContent(`Version ${version}`)
+    expect(screen.getByText("Couldn't check for updates. Check your connection and try again.")).toBeInTheDocument()
+  })
+
+  it("disables Update now while a batch is compressing", () => {
+    renderSection({
+      state: { status: "available", update: fakeUpdate() },
+      isCompressing: true,
+    })
+    expect(screen.getByRole("button", { name: "Update now" })).toBeDisabled()
+    expect(
+      screen.getByText("Finish the current batch to update."),
+    ).toBeInTheDocument()
+  })
+
+  it("calls check and startDownload", async () => {
     const user = userEvent.setup()
 
     const idle = renderSection({ state: { status: "idle" } })
@@ -114,15 +172,6 @@ describe("UpdateSection", () => {
     })
     await user.click(screen.getByRole("button", { name: "Update now" }))
     expect(available.value.startDownload).toHaveBeenCalledTimes(1)
-    await user.click(screen.getByRole("button", { name: "Not now" }))
-    expect(available.value.decline).toHaveBeenCalledTimes(1)
-    available.unmount()
-
-    const ready = renderSection({
-      state: { status: "ready", update: fakeUpdate() },
-    })
-    await user.click(screen.getByRole("button", { name: "Restart app" }))
-    expect(ready.value.install).toHaveBeenCalledTimes(1)
   })
 
   it("opens the release page from What's new", async () => {
@@ -130,7 +179,7 @@ describe("UpdateSection", () => {
     renderSection({
       state: { status: "available", update: fakeUpdate("1.2.0") },
     })
-    await user.click(screen.getByRole("button", { name: "What's new" }))
+    await user.click(screen.getByRole("button", { name: "What's new?" }))
     await waitFor(() => {
       expect(openUrlMock).toHaveBeenCalledWith(
         "https://github.com/initgrep-apps/yard/releases/tag/v1.2.0",
@@ -176,34 +225,18 @@ describe("UpdateSection", () => {
     expect(screen.getByRole("progressbar")).toBeInTheDocument()
   })
 
-  it("shows the ready state", () => {
+  it("shows the idle notice", () => {
     renderSection({
-      state: { status: "ready", update: fakeUpdate("1.2.0") },
-    })
-    expect(screen.getByText("Update ready.")).toBeInTheDocument()
-    expect(
-      screen.getByText("Restart the app to finish installing version 1.2.0."),
-    ).toBeInTheDocument()
-    expect(screen.getByRole("button", { name: "Restart app" })).toBeEnabled()
-  })
-
-  it("defers the restart while a batch is running", () => {
-    renderSection({
-      state: { status: "ready", update: fakeUpdate() },
-      isCompressing: true,
+      state: {
+        status: "idle",
+        notice: "Update paused. Finish the current batch, then check for updates again.",
+      },
     })
     expect(
-      screen.getByText("Finish the current batch to restart."),
+      screen.getByText(
+        "Update paused. Finish the current batch, then check for updates again.",
+      ),
     ).toBeInTheDocument()
-    expect(screen.getByRole("button", { name: "Restart app" })).toBeDisabled()
-  })
-
-  it("shows the installing state", () => {
-    renderSection({
-      state: { status: "installing", update: fakeUpdate() },
-    })
-    expect(screen.getByText("Installing update…")).toBeInTheDocument()
-    expect(screen.getByText("The app will restart.")).toBeInTheDocument()
   })
 
   it("shows the error message in an alert with retry", () => {
@@ -236,6 +269,7 @@ describe("UpdateSection", () => {
   it("never names the app in any state", () => {
     const states: UpdateState[] = [
       { status: "idle" },
+      { status: "idle", notice: "Update paused." },
       { status: "checking" },
       { status: "current" },
       { status: "available", update: fakeUpdate() },
@@ -245,8 +279,6 @@ describe("UpdateSection", () => {
         downloaded: 1,
         total: 2,
       },
-      { status: "ready", update: fakeUpdate() },
-      { status: "installing", update: fakeUpdate() },
       {
         status: "error",
         stage: "check",

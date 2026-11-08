@@ -44,8 +44,6 @@ const updateValue: UpdateContextValue = {
   isCompressing: false,
   check: vi.fn(),
   startDownload: vi.fn(),
-  install: vi.fn(),
-  decline: vi.fn(),
   retry: vi.fn(),
   setSurfaceOpen: vi.fn(),
 }

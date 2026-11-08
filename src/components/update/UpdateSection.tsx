@@ -47,8 +47,7 @@ function formatReleaseDate(date: string): string {
 }
 
 export function UpdateSection(): React.ReactElement {
-  const { state, canCheck, isCompressing, check, startDownload, install, decline, retry } =
-    useUpdate()
+  const { state, canCheck, isCompressing, check, startDownload, retry } = useUpdate()
 
   const update = "update" in state && state.update ? state.update : null
 
@@ -68,26 +67,43 @@ export function UpdateSection(): React.ReactElement {
       </Button>
     ) : null
 
-  const rowBadge =
-    state.status === "current"
-      ? "Up to date"
-      : state.status === "available"
-        ? "Available"
-        : state.status === "ready"
-          ? "Ready"
-          : null
+  const rowBadge = state.status === "current" ? "Up to date" : null
+  const showVersionRow =
+    state.status === "idle" ||
+    state.status === "checking" ||
+    state.status === "current" ||
+    (state.status === "error" && state.stage === "check")
+  const downloadPercentValue =
+    state.status === "downloading" ? downloadPercent(state.downloaded, state.total) : null
+  const installing = downloadPercentValue === 100
+  const errorActions = (
+    <ItemActions className="basis-full justify-end">
+      <Button
+        variant="outline"
+        size="sm"
+        onClick={() => void openUrl(`${RELEASES_URL}/latest`)}
+      >
+        Download from GitHub
+      </Button>
+      <Button size="sm" onClick={retry}>
+        Try again
+      </Button>
+    </ItemActions>
+  )
 
   return (
     <div className="flex flex-col gap-2">
-      <Item variant="outline" size="sm">
-        <ItemContent>
-          <ItemTitle>Version {version}</ItemTitle>
-        </ItemContent>
-        <ItemActions>
-          {rowBadge && <Badge variant="secondary">{rowBadge}</Badge>}
-          {rowAction}
-        </ItemActions>
-      </Item>
+      {showVersionRow && (
+        <Item variant="outline" size="sm">
+          <ItemContent>
+            <ItemTitle data-testid="current-version">Version {version}</ItemTitle>
+          </ItemContent>
+          <ItemActions>
+            {rowBadge && <Badge variant="secondary">{rowBadge}</Badge>}
+            {rowAction}
+          </ItemActions>
+        </Item>
+      )}
 
       {state.status === "checking" && (
         <p className="text-muted-foreground text-xs" aria-live="polite">
@@ -107,6 +123,12 @@ export function UpdateSection(): React.ReactElement {
         </p>
       )}
 
+      {state.status === "idle" && state.notice && (
+        <p className="text-muted-foreground text-xs" aria-live="polite">
+          {state.notice}
+        </p>
+      )}
+
       {state.status === "available" && update && (
         <Item variant="outline">
           <ItemContent>
@@ -119,12 +141,9 @@ export function UpdateSection(): React.ReactElement {
               size="sm"
               onClick={() => void openUrl(releaseTagUrl(update.version))}
             >
-              What's new
+              What's new?
             </Button>
-            <Button variant="ghost" size="sm" onClick={decline}>
-              Not now
-            </Button>
-            <Button size="sm" onClick={startDownload}>
+            <Button size="sm" onClick={startDownload} disabled={isCompressing}>
               Update now
             </Button>
           </ItemActions>
@@ -133,6 +152,9 @@ export function UpdateSection(): React.ReactElement {
               The app will restart after installing. Staged files that haven't run will be
               cleared.
             </ItemDescription>
+            {isCompressing && (
+              <ItemDescription>Finish the current batch to update.</ItemDescription>
+            )}
           </ItemContent>
         </Item>
       )}
@@ -140,69 +162,43 @@ export function UpdateSection(): React.ReactElement {
       {state.status === "downloading" && update && (
         <Item variant="outline">
           <ItemContent>
-            <Progress value={downloadPercent(state.downloaded, state.total)}>
-              <ProgressLabel aria-live="polite">Downloading update…</ProgressLabel>
+            <Progress value={downloadPercentValue}>
+              <ProgressLabel aria-live="polite">
+                {installing ? "Installing update…" : "Downloading update…"}
+              </ProgressLabel>
               <ProgressValue>
                 {() => downloadProgressText(state.downloaded, state.total)}
               </ProgressValue>
             </Progress>
             <ItemDescription>
-              You can close this window. The download continues in the background.
+              {installing
+                ? "The app will restart."
+                : "You can close this window. The download continues in the background."}
             </ItemDescription>
           </ItemContent>
         </Item>
       )}
 
-      {state.status === "ready" && update && (
-        <Item variant="outline">
-          <ItemContent>
-            <ItemTitle aria-live="polite">Update ready.</ItemTitle>
-            <ItemDescription>
-              Restart the app to finish installing version {update.version}.
-            </ItemDescription>
-            {isCompressing && (
-              <ItemDescription>Finish the current batch to restart.</ItemDescription>
-            )}
-          </ItemContent>
-          <ItemActions>
-            <Button size="sm" onClick={install} disabled={isCompressing}>
-              Restart app
-            </Button>
-          </ItemActions>
-        </Item>
-      )}
-
-      {state.status === "installing" && update && (
-        <Item variant="outline">
-          <ItemContent>
-            <div className="flex items-center gap-2" aria-live="polite">
-              <Spinner />
-              <span className="text-sm font-medium">Installing update…</span>
-            </div>
-            <ItemDescription>The app will restart.</ItemDescription>
-            <Progress value={100} aria-label="Installing update progress" />
-          </ItemContent>
-        </Item>
-      )}
-
-      {state.status === "error" && (
+      {state.status === "error" && state.stage === "check" && (
         <div className="flex flex-col gap-2">
           <Alert variant="destructive">
             <AlertDescription>{state.message}</AlertDescription>
           </Alert>
-          <ItemActions className="justify-end">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => void openUrl(`${RELEASES_URL}/latest`)}
-            >
-              Download from GitHub
-            </Button>
-            <Button size="sm" onClick={retry}>
-              Try again
-            </Button>
-          </ItemActions>
+          {errorActions}
         </div>
+      )}
+
+      {state.status === "error" && state.stage !== "check" && (
+        <Item variant="outline">
+          <ItemContent>
+            <ItemTitle>Update failed</ItemTitle>
+            {update && <ItemDescription>Version {update.version}</ItemDescription>}
+            <Alert variant="destructive">
+              <AlertDescription>{state.message}</AlertDescription>
+            </Alert>
+          </ItemContent>
+          {errorActions}
+        </Item>
       )}
     </div>
   )
