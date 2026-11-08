@@ -34,7 +34,7 @@ tokio-util = "0.7"
 uuid = { version = "1", features = ["v4"] }
 dirs = "7"
 zip = { version = "9", default-features = false, features = ["deflate"] }
-tauri-plugin-updater = "2"
+tauri-plugin-updater = { version = "2", default-features = false, features = ["native-tls", "system-proxy", "zip"] }
 tauri-plugin-process = "2"
 
 [dev-dependencies]
