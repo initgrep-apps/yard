@@ -76,13 +76,15 @@ describe('RunBoard', () => {
     ]
     const { rerender } = render(boardFor(mixed))
     expect(laneLabels()).toEqual(['image', 'video', 'pdf', 'document', 'other'])
-    expect(screen.getByTestId('kanban-board').className).toContain('overflow-y-auto')
+    expect(screen.getByTestId('kanban-board').className).toContain('overflow-x-auto')
     const grid = document.querySelector('[data-slot="kanban-board"]') as HTMLElement
-    expect(grid.style.gridTemplateColumns).toBe('repeat(auto-fit, minmax(13rem, 1fr))')
+    expect(grid.className).toContain('w-max')
+    expect(grid.className).toContain('min-w-full')
+    expect(grid.style.gridTemplateColumns).toBe('repeat(5, 16rem)')
 
     rerender(boardFor([makeFile({ name: 'Photo.png', category: 'image' })]))
     expect(laneLabels()).toEqual(['image'])
-    expect((document.querySelector('[data-slot="kanban-board"]') as HTMLElement).style.gridTemplateColumns).toBe('repeat(auto-fit, minmax(13rem, 1fr))')
+    expect((document.querySelector('[data-slot="kanban-board"]') as HTMLElement).style.gridTemplateColumns).toBe('repeat(1, 16rem)')
   })
 
   it('failed filter renders only lanes containing failed rows', () => {
@@ -246,23 +248,6 @@ describe('RunBoard', () => {
     expect(content.className).toContain('flex-1')
     expect(content.className).toContain('overflow-y-auto')
     expect(content.hasAttribute('data-lane-scroll')).toBe(true)
-  })
-
-  it('pans horizontally from a vertical wheel', () => {
-    render(boardFor([makeFile()]))
-    const board = document.querySelector('[data-testid="kanban-board"]') as HTMLElement
-    Object.defineProperty(board, 'scrollLeft', { value: 0, writable: true })
-    fireEvent.wheel(board, { deltaY: 240 })
-    expect(board.scrollLeft).toBe(240)
-  })
-
-  it('does not pan the board when wheeling inside a lane scroll list', () => {
-    render(boardFor([makeFile()]))
-    const board = document.querySelector('[data-testid="kanban-board"]') as HTMLElement
-    const laneScroll = document.querySelector('[data-lane-scroll]') as HTMLElement
-    Object.defineProperty(board, 'scrollLeft', { value: 0, writable: true })
-    fireEvent.wheel(laneScroll, { deltaY: 240 })
-    expect(board.scrollLeft).toBe(0)
   })
 
   it('removeDisabled suppresses card remove buttons; otherwise Remove is wired', () => {

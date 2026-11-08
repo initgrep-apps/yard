@@ -33,8 +33,10 @@ mod temp;
 use commands::FileListState;
 use history::HistoryStore;
 use queue::QueueState;
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::Mutex;
-use tauri::Manager;
+use tauri::{LogicalPosition, LogicalSize, Manager};
 
 pub(crate) fn setup_history<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     match HistoryStore::new(app) {
@@ -174,6 +176,9 @@ pub(crate) fn setup_hook<R: tauri::Runtime>(
     if let Err(error) = install_macos_menu(app) {
         eprintln!("warn: macOS menu install failed; Tauri default menu remains active (native About visible): {error}");
     }
+    if let Some(window) = app.get_webview_window("main") {
+        restore_window_geometry(&window);
+    }
     Ok(())
 }
 
@@ -202,7 +207,108 @@ macro_rules! invoke_handlers {
 
 fn window_state_flags() -> tauri_plugin_window_state::StateFlags {
     tauri_plugin_window_state::StateFlags::all()
-        & !tauri_plugin_window_state::StateFlags::DECORATIONS
+        & !(tauri_plugin_window_state::StateFlags::DECORATIONS
+            | tauri_plugin_window_state::StateFlags::SIZE
+            | tauri_plugin_window_state::StateFlags::POSITION)
+}
+
+const WINDOW_GEOMETRY_FILE: &str = "window-geometry.json";
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+struct WindowGeometry {
+    width: f64,
+    height: f64,
+    x: f64,
+    y: f64,
+}
+
+fn geometry_from_physical(
+    size: tauri::PhysicalSize<u32>,
+    position: tauri::PhysicalPosition<i32>,
+    scale: f64,
+) -> Option<WindowGeometry> {
+    if !(scale.is_finite() && scale > 0.0) {
+        return None;
+    }
+    let geometry = WindowGeometry {
+        width: f64::from(size.width) / scale,
+        height: f64::from(size.height) / scale,
+        x: f64::from(position.x) / scale,
+        y: f64::from(position.y) / scale,
+    };
+    (geometry.width > 0.0
+        && geometry.height > 0.0
+        && geometry.x.is_finite()
+        && geometry.y.is_finite())
+    .then_some(geometry)
+}
+
+fn window_geometry_path<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<PathBuf> {
+    app.path()
+        .app_config_dir()
+        .ok()
+        .map(|dir| dir.join(WINDOW_GEOMETRY_FILE))
+}
+
+fn restore_window_geometry<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
+    let Some(path) = window_geometry_path(window.app_handle()) else {
+        return;
+    };
+    let Ok(bytes) = std::fs::read(path) else {
+        return;
+    };
+    let Ok(geometry) = serde_json::from_slice::<WindowGeometry>(&bytes) else {
+        return;
+    };
+    if !(geometry.width > 0.0 && geometry.height > 0.0) {
+        return;
+    }
+    if let Err(e) = window.set_size(LogicalSize::new(geometry.width, geometry.height)) {
+        eprintln!("warn: window size restore failed: {e}");
+        return;
+    }
+    if let Err(e) = window.set_position(LogicalPosition::new(geometry.x, geometry.y)) {
+        eprintln!("warn: window position restore failed: {e}");
+        return;
+    }
+    if window.current_monitor().ok().flatten().is_none() {
+        if let Err(e) = window.center() {
+            eprintln!("warn: window centering fallback failed: {e}");
+        }
+    }
+}
+
+fn save_window_geometry<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
+    if window.is_minimized().unwrap_or(true)
+        || window.is_maximized().unwrap_or(false)
+        || window.is_fullscreen().unwrap_or(false)
+    {
+        return;
+    }
+    let (Ok(scale), Ok(size), Ok(position)) = (
+        window.scale_factor(),
+        window.inner_size(),
+        window.outer_position(),
+    ) else {
+        return;
+    };
+    let Some(geometry) = geometry_from_physical(size, position, scale) else {
+        return;
+    };
+    let Some(path) = window_geometry_path(window.app_handle()) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match serde_json::to_vec(&geometry) {
+        Ok(bytes) => {
+            if let Err(e) = std::fs::write(&path, bytes) {
+                eprintln!("warn: window geometry save failed: {e}");
+            }
+        }
+        Err(e) => eprintln!("warn: window geometry encode failed: {e}"),
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -237,10 +343,17 @@ pub fn run() {
         .manage(FileListState(Mutex::new(Vec::new())))
         .setup(setup_hook)
         .invoke_handler(invoke_handlers!())
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .unwrap_or_else(|e| {
             eprintln!("fatal: failed to start application: {e:#}");
             std::process::exit(1);
+        })
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                if let Some(window) = app.get_webview_window("main") {
+                    save_window_geometry(&window);
+                }
+            }
         });
 }
 
@@ -262,16 +375,50 @@ mod wiring_tests {
     }
 
     #[test]
-    fn window_state_flags_never_restore_decorations() {
+    fn window_state_flags_leave_geometry_to_logical_persistence() {
         let flags = window_state_flags();
         assert!(
-            flags.contains(tauri_plugin_window_state::StateFlags::SIZE),
-            "window-state must keep restoring size"
+            !flags.contains(tauri_plugin_window_state::StateFlags::SIZE),
+            "window-state physical size cannot be restored across mixed-DPI monitors"
+        );
+        assert!(
+            !flags.contains(tauri_plugin_window_state::StateFlags::POSITION),
+            "window-state physical position maps to the wrong monitor across mixed-DPI monitors"
         );
         assert!(
             !flags.contains(tauri_plugin_window_state::StateFlags::DECORATIONS),
             "window-state must never restore decorations: a stale state file would re-decorate the frameless Windows window"
         );
+        assert!(
+            flags.contains(tauri_plugin_window_state::StateFlags::MAXIMIZED),
+            "maximized state still belongs to the plugin"
+        );
+    }
+
+    #[test]
+    fn window_geometry_round_trips_through_logical_points() {
+        let size = tauri::PhysicalSize::new(2328, 2392);
+        let position = tauri::PhysicalPosition::new(3946, 298);
+        assert_eq!(
+            geometry_from_physical(size, position, 2.0),
+            Some(WindowGeometry {
+                width: 1164.0,
+                height: 1196.0,
+                x: 1973.0,
+                y: 149.0,
+            }),
+            "a 2x display saved in physical pixels must persist as logical points"
+        );
+        assert_eq!(
+            geometry_from_physical(size, position, 2.0),
+            geometry_from_physical(
+                tauri::PhysicalSize::new(1164, 1196),
+                tauri::PhysicalPosition::new(1973, 149),
+                1.0
+            ),
+            "the same window must persist identically on a 1x and a 2x display"
+        );
+        assert_eq!(geometry_from_physical(size, position, 0.0), None);
     }
 
     #[test]
