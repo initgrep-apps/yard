@@ -49,6 +49,19 @@
 - A processor panic no longer kills the app in a release build.
 - Sidecar stderr and stdout drains are bounded and joined.
 
+## [1.2.0](https://github.com/initgrep-apps/yard/compare/v1.1.0...v1.2.0) (2026-11-08)
+
+
+### Features
+
+* **updater:** add manual signed updates ([#236](https://github.com/initgrep-apps/yard/issues/236)) ([a87ec7b](https://github.com/initgrep-apps/yard/commit/a87ec7bf43fd01c5b74367896906a436bad06453))
+
+
+### Bug Fixes
+
+* **release:** reuse release-please draft releases ([#229](https://github.com/initgrep-apps/yard/issues/229)) ([0bbcc77](https://github.com/initgrep-apps/yard/commit/0bbcc77146f73d426e236cd7e31777d62b6089a4))
+* **updater:** read version from package in About test ([#239](https://github.com/initgrep-apps/yard/issues/239)) ([30a38a9](https://github.com/initgrep-apps/yard/commit/30a38a94d907f90692e178b70f188f5af753cf06))
+
 ## [1.1.0](https://github.com/initgrep-apps/yard/compare/v1.0.0...v1.1.0) (2026-11-07)
 
 
