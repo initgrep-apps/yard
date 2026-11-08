@@ -76,7 +76,7 @@ function stalledUpdate(events: Array<"Started" | "Progress">): Update {
 }
 
 function Probe() {
-  const { state, check, startDownload, install, decline, retry, setSurfaceOpen } = useUpdate()
+  const { state, check, startDownload, retry, setSurfaceOpen } = useUpdate()
   const version = "update" in state && state.update ? state.update.version : null
   return (
     <div>
@@ -90,17 +90,14 @@ function Probe() {
       {state.status === "error" ? (
         <span data-testid="message">{state.message}</span>
       ) : null}
+      {state.status === "idle" && state.notice ? (
+        <span data-testid="notice">{state.notice}</span>
+      ) : null}
       <button type="button" onClick={check}>
         check
       </button>
       <button type="button" onClick={startDownload}>
         download
-      </button>
-      <button type="button" onClick={install}>
-        install
-      </button>
-      <button type="button" onClick={decline}>
-        decline
       </button>
       <button type="button" onClick={retry}>
         retry
@@ -196,21 +193,18 @@ describe("UpdateProvider", () => {
     expect(relaunchMock).toHaveBeenCalled()
   })
 
-  it("defers install when a batch is compressing", async () => {
+  it("does not start a download while a batch is compressing", async () => {
     const user = userEvent.setup()
     const update = fakeUpdate()
     checkMock.mockResolvedValue(update)
-    const view = render(<Harness isCompressing />)
+    render(<Harness isCompressing />)
     await user.click(screen.getByRole("button", { name: "check" }))
     await user.click(await screen.findByRole("button", { name: "download" }))
-    expect(await screen.findByTestId("status")).toHaveTextContent("ready")
-    expect(update.install).not.toHaveBeenCalled()
-    view.rerender(<Harness isCompressing={false} />)
-    await user.click(screen.getByRole("button", { name: "install" }))
-    expect(update.install).toHaveBeenCalled()
+    expect(screen.getByTestId("status")).toHaveTextContent("available 1.2.0")
+    expect(update.download).not.toHaveBeenCalled()
   })
 
-  it("defers install when a batch starts during the download", async () => {
+  it("pauses when a batch starts during the download", async () => {
     const user = userEvent.setup()
     const update = fakeUpdate()
     let finishDownload: () => void = () => {}
@@ -227,9 +221,13 @@ describe("UpdateProvider", () => {
     await user.click(await screen.findByRole("button", { name: "download" }))
     view.rerender(<Harness isCompressing />)
     await act(async () => finishDownload())
-    expect(await screen.findByTestId("status")).toHaveTextContent("ready")
+    expect(await screen.findByTestId("status")).toHaveTextContent("idle")
+    expect(update.close).toHaveBeenCalled()
     expect(update.install).not.toHaveBeenCalled()
     expect(relaunchMock).not.toHaveBeenCalled()
+    expect(screen.getByTestId("notice")).toHaveTextContent(
+      "Update paused. Finish the current batch, then check for updates again.",
+    )
   })
 
   it("does not relaunch on Windows", async () => {
@@ -241,17 +239,6 @@ describe("UpdateProvider", () => {
     await user.click(await screen.findByRole("button", { name: "download" }))
     await waitFor(() => expect(update.install).toHaveBeenCalled())
     expect(relaunchMock).not.toHaveBeenCalled()
-  })
-
-  it("closes the update on decline", async () => {
-    const user = userEvent.setup()
-    const update = fakeUpdate()
-    checkMock.mockResolvedValue(update)
-    render(<Harness />)
-    await user.click(screen.getByRole("button", { name: "check" }))
-    await user.click(await screen.findByRole("button", { name: "decline" }))
-    expect(update.close).toHaveBeenCalled()
-    expect(screen.getByTestId("status")).toHaveTextContent("idle")
   })
 
   it("tells the user to move the app when install is denied", async () => {
@@ -418,18 +405,39 @@ describe("UpdateProvider", () => {
     expect(toast.custom).not.toHaveBeenCalled()
   })
 
-  it("shows an error toast with a retry action", async () => {
+  it("does not show an error toast when a check fails", async () => {
     const user = userEvent.setup()
     checkMock.mockRejectedValue(new Error("offline"))
     render(<Harness />)
     await user.click(screen.getByRole("button", { name: "check" }))
+    expect(await screen.findByTestId("message")).toHaveTextContent(
+      "Couldn't check for updates. Check your connection and try again.",
+    )
+    expect(toast.error).not.toHaveBeenCalled()
+  })
+
+  it("clears the notice on a new check", async () => {
+    const user = userEvent.setup()
+    const update = fakeUpdate("1.2.0")
+    let finishDownload: () => void = () => {}
+    update.download = vi.fn(async (onEvent: (event: DownloadEvent) => void) => {
+      onEvent({ event: "Started", data: { contentLength: 100 } })
+      await new Promise<void>((resolve) => {
+        finishDownload = resolve
+      })
+      onEvent({ event: "Finished" })
+    })
+    checkMock.mockResolvedValue(update)
+    const view = render(<Harness />)
+    await user.click(screen.getByRole("button", { name: "check" }))
+    await user.click(await screen.findByRole("button", { name: "download" }))
+    view.rerender(<Harness isCompressing />)
+    await act(async () => finishDownload())
+    expect(await screen.findByTestId("notice")).toHaveTextContent("Update paused")
+    view.rerender(<Harness isCompressing={false} />)
+    await user.click(screen.getByRole("button", { name: "check" }))
     await waitFor(() =>
-      expect(toast.error).toHaveBeenCalledWith("Update failed", {
-        id: "updater-error",
-        position: "top-right",
-        description: "Couldn't check for updates. Check your connection and try again.",
-        action: expect.objectContaining({ label: "Retry" }),
-      }),
+      expect(screen.queryByTestId("notice")).not.toBeInTheDocument(),
     )
   })
 
@@ -465,23 +473,5 @@ describe("UpdateProvider", () => {
       await vi.advanceTimersByTimeAsync(250)
     })
     expect(toast.custom).toHaveBeenCalledTimes(2)
-  })
-
-  it("keeps the update ready when retrying an install during a batch", async () => {
-    const user = userEvent.setup()
-    const update = fakeUpdate()
-    update.install = vi
-      .fn()
-      .mockRejectedValueOnce(new Error("boom"))
-      .mockResolvedValueOnce(undefined)
-    checkMock.mockResolvedValue(update)
-    const view = render(<Harness />)
-    await user.click(screen.getByRole("button", { name: "check" }))
-    await user.click(await screen.findByRole("button", { name: "download" }))
-    expect(await screen.findByTestId("message")).toHaveTextContent("installed")
-    view.rerender(<Harness isCompressing />)
-    await user.click(screen.getByRole("button", { name: "retry" }))
-    expect(screen.getByTestId("status")).toHaveTextContent("ready")
-    expect(update.install).toHaveBeenCalledTimes(1)
   })
 })

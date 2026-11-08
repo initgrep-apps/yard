@@ -58,8 +58,6 @@ function fakeContext(overrides: Partial<UpdateContextValue> = {}): UpdateContext
     isCompressing: false,
     check: vi.fn(async () => {}),
     startDownload: vi.fn(async () => {}),
-    install: vi.fn(async () => {}),
-    decline: vi.fn(async () => {}),
     retry: vi.fn(async () => {}),
     setSurfaceOpen: vi.fn(),
     ...overrides,
@@ -98,10 +96,21 @@ describe("UpdateSection", () => {
     expect(screen.getByText("Version 1.2.0 is available")).toBeInTheDocument()
     expect(screen.getByText("Released Nov 8, 2026.")).toBeInTheDocument()
     expect(screen.getByRole("button", { name: "Update now" })).toBeInTheDocument()
-    expect(screen.getByRole("button", { name: "Not now" })).toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "Not now" })).not.toBeInTheDocument()
   })
 
-  it("calls check, download, decline, and install", async () => {
+  it("disables Update now while a batch is compressing", () => {
+    renderSection({
+      state: { status: "available", update: fakeUpdate() },
+      isCompressing: true,
+    })
+    expect(screen.getByRole("button", { name: "Update now" })).toBeDisabled()
+    expect(
+      screen.getByText("Finish the current batch to update."),
+    ).toBeInTheDocument()
+  })
+
+  it("calls check and startDownload", async () => {
     const user = userEvent.setup()
 
     const idle = renderSection({ state: { status: "idle" } })
@@ -114,15 +123,6 @@ describe("UpdateSection", () => {
     })
     await user.click(screen.getByRole("button", { name: "Update now" }))
     expect(available.value.startDownload).toHaveBeenCalledTimes(1)
-    await user.click(screen.getByRole("button", { name: "Not now" }))
-    expect(available.value.decline).toHaveBeenCalledTimes(1)
-    available.unmount()
-
-    const ready = renderSection({
-      state: { status: "ready", update: fakeUpdate() },
-    })
-    await user.click(screen.getByRole("button", { name: "Restart app" }))
-    expect(ready.value.install).toHaveBeenCalledTimes(1)
   })
 
   it("opens the release page from What's new", async () => {
@@ -176,34 +176,18 @@ describe("UpdateSection", () => {
     expect(screen.getByRole("progressbar")).toBeInTheDocument()
   })
 
-  it("shows the ready state", () => {
+  it("shows the idle notice", () => {
     renderSection({
-      state: { status: "ready", update: fakeUpdate("1.2.0") },
-    })
-    expect(screen.getByText("Update ready.")).toBeInTheDocument()
-    expect(
-      screen.getByText("Restart the app to finish installing version 1.2.0."),
-    ).toBeInTheDocument()
-    expect(screen.getByRole("button", { name: "Restart app" })).toBeEnabled()
-  })
-
-  it("defers the restart while a batch is running", () => {
-    renderSection({
-      state: { status: "ready", update: fakeUpdate() },
-      isCompressing: true,
+      state: {
+        status: "idle",
+        notice: "Update paused. Finish the current batch, then check for updates again.",
+      },
     })
     expect(
-      screen.getByText("Finish the current batch to restart."),
+      screen.getByText(
+        "Update paused. Finish the current batch, then check for updates again.",
+      ),
     ).toBeInTheDocument()
-    expect(screen.getByRole("button", { name: "Restart app" })).toBeDisabled()
-  })
-
-  it("shows the installing state", () => {
-    renderSection({
-      state: { status: "installing", update: fakeUpdate() },
-    })
-    expect(screen.getByText("Installing update…")).toBeInTheDocument()
-    expect(screen.getByText("The app will restart.")).toBeInTheDocument()
   })
 
   it("shows the error message in an alert with retry", () => {
@@ -236,6 +220,7 @@ describe("UpdateSection", () => {
   it("never names the app in any state", () => {
     const states: UpdateState[] = [
       { status: "idle" },
+      { status: "idle", notice: "Update paused." },
       { status: "checking" },
       { status: "current" },
       { status: "available", update: fakeUpdate() },
@@ -245,8 +230,6 @@ describe("UpdateSection", () => {
         downloaded: 1,
         total: 2,
       },
-      { status: "ready", update: fakeUpdate() },
-      { status: "installing", update: fakeUpdate() },
       {
         status: "error",
         stage: "check",

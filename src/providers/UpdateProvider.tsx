@@ -43,9 +43,10 @@ const INSTALL_ERROR =
 const INSTALL_PATH_ERROR =
   "The app couldn't be replaced. Move it to Applications, then try again."
 const RELAUNCH_ERROR = "The update was installed. Restart the app to finish."
+const PAUSED_NOTICE =
+  "Update paused. Finish the current batch, then check for updates again."
 
 const PROGRESS_TOAST_ID = "updater-progress"
-const ERROR_TOAST_ID = "updater-error"
 const TOAST_THROTTLE_MS = 250
 
 function downloadPercent(downloaded: number, total: number | null): number | null {
@@ -54,13 +55,11 @@ function downloadPercent(downloaded: number, total: number | null): number | nul
 }
 
 export type UpdateState =
-  | { status: "idle" }
+  | { status: "idle"; notice?: string }
   | { status: "checking" }
   | { status: "current" }
   | { status: "available"; update: Update }
   | { status: "downloading"; update: Update; downloaded: number; total: number | null }
-  | { status: "ready"; update: Update }
-  | { status: "installing"; update: Update }
   | {
       status: "error"
       stage: "check" | "download" | "install" | "relaunch"
@@ -74,8 +73,6 @@ export interface UpdateContextValue {
   isCompressing: boolean
   check: () => Promise<void>
   startDownload: () => Promise<void>
-  install: () => Promise<void>
-  decline: () => Promise<void>
   retry: () => Promise<void>
   setSurfaceOpen: (open: boolean) => void
 }
@@ -117,11 +114,6 @@ export function UpdateProvider({ children }: { children: ReactNode }) {
 
   const installUpdate = useCallback(
     async (update: Update) => {
-      if (isCompressingRef.current) {
-        setState({ status: "ready", update })
-        return
-      }
-      setState({ status: "installing", update })
       try {
         await update.install()
       } catch (error) {
@@ -161,6 +153,12 @@ export function UpdateProvider({ children }: { children: ReactNode }) {
           },
           { timeout: 600_000 },
         )
+        if (isCompressingRef.current) {
+          updateRef.current = null
+          await update.close().catch(() => {})
+          setState({ status: "idle", notice: PAUSED_NOTICE })
+          return
+        }
         await installUpdate(update)
       } catch {
         setState({ status: "error", stage: "download", message: DOWNLOAD_ERROR, update })
@@ -191,7 +189,7 @@ export function UpdateProvider({ children }: { children: ReactNode }) {
 
   const check = useCallback(async () => {
     const s = stateRef.current
-    if (s.status === "checking" || s.status === "downloading" || s.status === "installing") {
+    if (s.status === "checking" || s.status === "downloading") {
       return
     }
     await checkUpdate()
@@ -200,23 +198,9 @@ export function UpdateProvider({ children }: { children: ReactNode }) {
   const startDownload = useCallback(async () => {
     const s = stateRef.current
     if (s.status !== "available") return
+    if (isCompressingRef.current) return
     await downloadUpdate(s.update)
   }, [downloadUpdate])
-
-  const install = useCallback(async () => {
-    const s = stateRef.current
-    if (s.status !== "ready") return
-    await installUpdate(s.update)
-  }, [installUpdate])
-
-  const decline = useCallback(async () => {
-    const held = updateRef.current
-    if (held) {
-      updateRef.current = null
-      await held.close().catch(() => {})
-    }
-    setState({ status: "idle" })
-  }, [])
 
   const retry = useCallback(async () => {
     const s = stateRef.current
@@ -239,18 +223,16 @@ export function UpdateProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const renderProgress = () => {
       const s = stateRef.current
-      if (s.status !== "downloading" && s.status !== "ready" && s.status !== "installing") {
+      if (s.status !== "downloading") {
         return
       }
       toast.custom(
         () => (
           <UpdateToast
-            status={s.status}
             version={s.update.version}
-            percent={s.status === "downloading" ? downloadPercent(s.downloaded, s.total) : null}
-            downloaded={s.status === "downloading" ? s.downloaded : 0}
-            total={s.status === "downloading" ? s.total : null}
-            isCompressing={isCompressing}
+            percent={downloadPercent(s.downloaded, s.total)}
+            downloaded={s.downloaded}
+            total={s.total}
           />
         ),
         { id: PROGRESS_TOAST_ID, position: "top-right", duration: Infinity },
@@ -260,36 +242,21 @@ export function UpdateProvider({ children }: { children: ReactNode }) {
     if (surfaceOpen) {
       lastToastStatusRef.current = null
       toast.dismiss(PROGRESS_TOAST_ID)
-      toast.dismiss(ERROR_TOAST_ID)
-    } else if (state.status === "error") {
+    } else if (state.status !== "downloading") {
       lastToastStatusRef.current = state.status
       toast.dismiss(PROGRESS_TOAST_ID)
-      toast.error("Update failed", {
-        id: ERROR_TOAST_ID,
-        position: "top-right",
-        description: state.message,
-        action: { label: "Retry", onClick: () => void retry() },
-      })
     } else {
-      toast.dismiss(ERROR_TOAST_ID)
-
-      const status = state.status
-      if (status !== "downloading" && status !== "ready" && status !== "installing") {
-        lastToastStatusRef.current = status
-        toast.dismiss(PROGRESS_TOAST_ID)
+      const elapsed = Date.now() - lastToastAtRef.current
+      if (lastToastStatusRef.current !== state.status || elapsed >= TOAST_THROTTLE_MS) {
+        lastToastStatusRef.current = state.status
+        lastToastAtRef.current = Date.now()
+        renderProgress()
       } else {
-        const elapsed = Date.now() - lastToastAtRef.current
-        if (lastToastStatusRef.current !== status || elapsed >= TOAST_THROTTLE_MS) {
-          lastToastStatusRef.current = status
+        throttleTimerRef.current = setTimeout(() => {
+          throttleTimerRef.current = null
           lastToastAtRef.current = Date.now()
           renderProgress()
-        } else {
-          throttleTimerRef.current = setTimeout(() => {
-            throttleTimerRef.current = null
-            lastToastAtRef.current = Date.now()
-            renderProgress()
-          }, TOAST_THROTTLE_MS - elapsed)
-        }
+        }, TOAST_THROTTLE_MS - elapsed)
       }
     }
 
@@ -299,7 +266,7 @@ export function UpdateProvider({ children }: { children: ReactNode }) {
         throttleTimerRef.current = null
       }
     }
-  }, [state, surfaceOpen, retry, isCompressing])
+  }, [state, surfaceOpen])
 
   const value = useMemo<UpdateContextValue>(
     () => ({
@@ -308,12 +275,10 @@ export function UpdateProvider({ children }: { children: ReactNode }) {
       isCompressing,
       check,
       startDownload,
-      install,
-      decline,
       retry,
       setSurfaceOpen,
     }),
-    [state, isCompressing, check, startDownload, install, decline, retry],
+    [state, isCompressing, check, startDownload, retry],
   )
 
   return <UpdateContext.Provider value={value}>{children}</UpdateContext.Provider>
