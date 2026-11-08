@@ -161,6 +161,7 @@ All strings are generic and avoid the app name.
 | Check failure | `Couldn't check for updates. Check your connection and try again.` |
 | Download failure | `The update couldn't be downloaded. Check your connection and try again.` |
 | Install failure | `The update couldn't be installed. Try again, or download the latest installer from GitHub.` |
+| Install permission/path failure | `The app couldn't be replaced. Move it to Applications, then try again.` |
 | Retry action | `Try again` |
 | GitHub fallback | `Download from GitHub` |
 | Dev build | `Updates are disabled in development builds.` |
