@@ -85,9 +85,10 @@ see [`SECURITY.md`](SECURITY.md). Do not open a public issue.
 
 ## Development
 
-Requirements: Node.js 22, yarn, Rust stable, and the
-[Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/). Setup, the
-local gate, and PR rules are in [`CONTRIBUTING.md`](CONTRIBUTING.md).
+Requirements: Node.js 22.x (≥ 22.22.2), Yarn 1.x, Rust stable, and the
+[Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/) (Linux not
+supported). Setup, platform notes, the local gate, and PR rules are in
+[`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Documentation
 
