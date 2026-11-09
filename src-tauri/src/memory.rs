@@ -28,25 +28,30 @@ const VIDEO_BASE_MEMORY_BYTES: u64 = 400 * MIB;
 const VIDEO_BASE_WIDTH: u32 = 1920;
 const VIDEO_UNKNOWN_WIDTH: u32 = 3840;
 
-static SYSTEM: OnceLock<System> = OnceLock::new();
-
-fn system() -> &'static System {
-    SYSTEM.get_or_init(|| {
-        let mut sys = System::new();
-        sys.refresh_memory();
-        sys
-    })
-}
+static SYSTEM: OnceLock<Option<System>> = OnceLock::new();
 
 pub fn total_ram() -> u64 {
-    system().total_memory()
+    SYSTEM
+        .get_or_init(|| {
+            System::new().ok().map(|mut sys| {
+                sys.refresh_memory();
+                sys
+            })
+        })
+        .as_ref()
+        .map(|s| s.total_memory())
+        .unwrap_or(0)
 }
 
 pub fn process_rss() -> u64 {
     let pid = sysinfo::Pid::from(std::process::id() as usize);
-    let mut sys = System::new();
-    sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
-    sys.process(pid).map(|p| p.memory()).unwrap_or(0)
+    System::new()
+        .ok()
+        .and_then(|mut sys| {
+            sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+            sys.process(pid).map(|p| p.memory())
+        })
+        .unwrap_or(0)
 }
 
 pub fn derive_budget_from_total_ram(adaptive: bool, ceiling_mb: u32, total_ram: u64) -> u64 {
@@ -86,9 +91,9 @@ pub fn estimate_job(category: crate::models::Category, input_size: u64, width: O
 }
 
 pub fn available_space(path: &Path) -> Option<u64> {
-    let disks = Disks::new_with_refreshed_list();
+    let disks = Disks::new_with_refreshed_list().ok()?;
     let mut best: Option<&Disk> = None;
-    for disk in disks.list() {
+    for disk in &disks {
         let mount = disk.mount_point();
         if path.starts_with(mount) {
             if best.map(|b| mount.as_os_str().len() > b.mount_point().as_os_str().len())
