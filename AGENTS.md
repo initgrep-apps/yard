@@ -6,7 +6,7 @@
 
 ## Overview
 
-Offline desktop app for batch-optimizing files to maximum size limits. Tauri 2 + React + TypeScript + Vite + shadcn/ui. Rust core with sidecar binaries. GPLv3.
+Offline desktop app for batch-optimizing files to maximum size limits. Tauri 2 + React + TypeScript + Vite + shadcn/ui. Rust core with sidecar binaries. GPLv3. Terms have fixed meanings — see `GLOSSARY.md`.
 
 ## Orchestrator Config
 
@@ -47,7 +47,7 @@ See `docs/ARCHITECTURE.md` for components, IPC, algorithms and limits. Key rule:
 
 ## Setup
 
-Scaffolded via `yarn create tauri-app` (React + TS + Vite). shadcn/ui via `yarn dlx shadcn@latest init --preset b0 --template vite`. Package manager: yarn.
+Scaffolded via `yarn create tauri-app` (React + TS + Vite). shadcn/ui via `yarn dlx shadcn@latest init --preset b0 --template vite`. Package manager: yarn. Local dev requires staged binaries first — see `CONTRIBUTING.md`.
 
 ## CI/CD
 
@@ -64,19 +64,25 @@ When working with a library, use its official AI docs/skill if available. Fetch 
 | Library | Version | Skill / AI Docs |
 |---------|---------|----------------|
 | Tauri 2 | 2.12 | Context7: `/tauri-apps/tauri-docs` · llms.txt: `https://v2.tauri.app/llms.txt` |
-| shadcn/ui | 4.21 | Skill: `shadcn` (already installed). llms.txt: `https://ui.shadcn.com/llms.txt` · MCP server available |
+| shadcn/ui | 4.23 | Skill: `shadcn` (already installed). llms.txt: `https://ui.shadcn.com/llms.txt` · MCP server available |
 | React | 19.3 | Context7: `/websites/react_dev` · llms.txt: `https://react.dev/llms.txt` |
 | Vite | 8.3 | Context7: resolve `Vite` · llms.txt: `https://vite.dev/llms.txt` |
 | Tailwind CSS | 4.3 | No llms.txt. Context7: resolve `Tailwind CSS` |
 | tauri-plugin-store | 2.5 | Covered by Tauri llms.txt — `https://v2.tauri.app/plugin/store` |
 | tauri-plugin-dialog | 2.8 | Covered by Tauri llms.txt — `https://v2.tauri.app/plugin/dialog` |
-| tauri-plugin-shell | 2.4 | Covered by Tauri llms.txt — `https://v2.tauri.app/plugin/shell` |
 
 **Rules:**
 - shadcn/ui components → use `shadcn` skill before adding/building components. Ask which shadcn block to use.
 - Tauri APIs/plugins → fetch from Context7 `/tauri-apps/tauri-docs` before writing Tauri code.
 - React patterns → fetch from Context7 or react.dev/llms.txt.
 - Rust crates (tokio, serde, uuid, zip, dirs) → Context7 or crates.io docs. No llms.txt.
+
+## Manual testing
+
+`GATE_E2E_COMMAND` is `none` — the gate has no E2E. Manual QA is on-demand: use it when the gate can't cover the change (dialogs, drag-drop, compression flows, window chrome) or when asked.
+
+- **Desktop app:** run `yarn tauri dev` (binaries staged first — see `CONTRIBUTING.md`) and drive the window with the `cua-driver` skill. Compression and IPC behavior can only be tested here.
+- **Browser only (pure UI):** for React-only work (mocks, styling, layout debugging) run `yarn dev` and use the `ego-browser` skill; fall back to `agent-browser` for scripted automation. Tauri IPC `invoke` is unavailable in a plain browser — never test compression behavior this way.
 
 ## Compatibility Notes
 

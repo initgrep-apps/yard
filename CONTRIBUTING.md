@@ -14,9 +14,10 @@ compression work and the React frontend is UI only.
 
 ## Development setup
 
-Requirements: Node.js 22, [yarn](https://yarnpkg.com/), Rust stable, and the
+Requirements: Node.js **22.x (≥ 22.22.2, or 24.15+ / 26+)** — jsdom rejects
+others — **Yarn 1.x** (the lockfile is v1, not Yarn 4), Rust stable, and the
 [Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/) for your
-platform.
+platform. A [`.nvmrc`](.nvmrc) pins the tested Node version (`nvm use`).
 
 ```bash
 yarn install
@@ -24,9 +25,19 @@ yarn binaries:all     # one-time: download, verify, and stage the engines (~150 
 yarn tauri dev
 ```
 
+Platform notes:
+
+- **macOS:** staging builds the vips and gs sidecars from Homebrew — run
+  `brew install vips ghostscript` first.
+- **Windows:** the staging audit runs through `bash` — keep Git Bash on PATH.
+- **Linux:** not supported; engines ship for macOS and Windows only.
+
 The sidecar engines are gitignored. `yarn binaries:all` populates
 `src-tauri/binaries/` from the manifest and lock files in `scripts/binaries/`.
 Never commit engine binaries.
+
+Dev runs use your real local app profile: history and recent files from your
+normal app appear in the dev build and its logs. Treat them like personal data.
 
 ## The gate
 
